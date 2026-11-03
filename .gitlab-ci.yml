@@ -3,7 +3,7 @@
 
 include:
   - project: quip.network/ci-templates
-    ref: v1.1.4
+    ref: v1.2.0
     file: templates/dependency-gate.yml
 
 stages:
