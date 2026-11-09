@@ -43,9 +43,14 @@ the driver's forward-compatible PTX JIT.
 ## Documentation
 
 - `AGENTS.md` — build, test, and run commands; repository conventions.
-- `COORDINATOR.md` — how the coordinator works (chain access, feeder, routing,
-  supervision, session protocol).
-- `NEWMINER.md` — how to add a new miner and wire it into the coordinator.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — how the coordinator, solver
+  contract, miners, and chain fit together.
+- [`docs/COORDINATOR.md`](docs/COORDINATOR.md) — how the coordinator works
+  (chain access, feeder, routing, supervision, session protocol).
+- [`docs/NEWMINER.md`](docs/NEWMINER.md) — how to add a new miner and wire it
+  into the coordinator.
+- [`docs/CHAINSTORAGE.md`](docs/CHAINSTORAGE.md) — how the main structures are
+  written to chain.
 - `docs/VERSIONING.md` — the release-tag standard.
 
 The solver contract — the wire protocol, the `Sampler` trait, handshake,
@@ -68,7 +73,8 @@ Run the coordinator against a config that lists the miners and the validators:
 quip-coordinator --config ./docker/config.toml
 ```
 
-See `AGENTS.md` for the full command set and `COORDINATOR.md` for the run model.
+See `AGENTS.md` for the full command set and
+[`docs/COORDINATOR.md`](docs/COORDINATOR.md) for the run model.
 
 ## Testing
 

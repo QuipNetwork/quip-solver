@@ -8,7 +8,7 @@ The miner binaries ship from their own repos. The solver contract lives in
 `quip.network/quip-solver-core` and is consumed from crates.io at v0.0.5.
 It supplies the wire protocol, consensus primitives, and solver session loop.
 
-For deeper detail, see the companion guides: `COORDINATOR.md` covers how the coordinator works, and `NEWMINER.md` covers adding a new miner. The solver contract itself is specified in the quip-solver-core repo (`SPEC.md`).
+For deeper detail, see the companion guides: `docs/COORDINATOR.md` covers how the coordinator works, and `docs/NEWMINER.md` covers adding a new miner. The solver contract itself is specified in the quip-solver-core repo (`SPEC.md`).
 
 ## Repository layout
 
@@ -122,7 +122,7 @@ edges and topology hash prefix `cbec1eb4`.
 
 For ordinary drive results, compare miner energies with `raw_best_energy_milli`
 in the `--report` JSONL file. The `best_energy_milli` field describes the diversity
-selection. See `COORDINATOR.md` for units, missing-energy values, and lease
+selection. See `docs/COORDINATOR.md` for units, missing-energy values, and lease
 summaries.
 
 The config registers miners and their launch plan. Each backend section (`[cpu]`, `[cuda.0]`, `[metal]`, `[dwave]`) becomes one supervised subprocess; `binary` selects the executable — `quip-cpu-sa`, the chromatic `quip-cpu-gibbs`, `quip-cpu-sb`, or one of quip-solver-cpu's experimental kernels when that release published it. See `crates/quip-coordinator/config.toml.example`. Miner binaries are fetched per host by `crates/quip-coordinator/tools/fetch-miners.sh` from the standalone repos and resolved on `PATH` or by absolute path.
