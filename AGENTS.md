@@ -16,19 +16,18 @@ For deeper detail, see the companion guides: `docs/COORDINATOR.md` covers how th
   - `quip-coordinator` — the coordinator binary: chain access, routing, miner supervision.
   - `quip-solver-exec` — a miner that shells out to a generic external solver.
   - `quip-mock-miner` — the miner test double the coordinator tests spawn.
-- `docker/` — image builds (`Dockerfile.quip-solver`, `Dockerfile.quip-solver-cuda`) and `config.toml`.
-- `dwave_topologies/` — D-Wave embedding data.
-- `docs/VERSIONING.md` — the release-tag standard.
+- `docker/` — image builds (`Dockerfile.quip-solver`, `Dockerfile.quip-solver-cuda`), `entrypoint.sh`, and `config.toml`.
+- `docs/` — the guides: `ARCHITECTURE.md`, `COORDINATOR.md`, `NEWMINER.md`, `CHAINSTORAGE.md`, and `VERSIONING.md` (the release-tag standard).
 
-The miner binaries live in their own repos: `quip.network/quip-solver-{cpu,cuda,metal,dwave}`. The `quip-proto` (wire types), `quip-protocol` (consensus math), and `quip-solver-core` (`Sampler` trait + session loop) crates come from crates.io; their source repo is `quip.network/quip-solver-core`, which also publishes the `quip-solver-core` Python wheel the D-Wave miner uses.
+The miner binaries live in their own repos: `quip.network/quip-solver-{cpu,cuda,metal,dwave}`. The `quip-proto` (wire types), `quip-protocol` (consensus math), `quip-solver-core` (`Sampler` trait + session loop), and `ising-generators` crates come from crates.io at v0.0.5. Their source repo is `quip.network/quip-solver-core`, which also publishes the `quip-solver-core` Python wheel the D-Wave miner uses.
 
 ## CUDA card support requirement
 
 The CUDA miner supports NVIDIA GPUs with compute capability 7.0 through 12.1
-(the kernels need sm_70 for `__nanosleep`; NVRTC 12.9 supplies the 12.1
-ceiling), host driver from a CUDA 12.9 branch (r535+). The cudarc pin in
+(the kernels need sm_70 for `__nanosleep`, and NVRTC 12.9 supplies the 12.1
+ceiling), with a host driver from a CUDA 12.9 branch (r535+). The cudarc pin in
 `quip-solver-cuda` (`cuda-12090`) and the runtime image's `cuda-nvrtc-12-9`
-package must move together — the CUDA major of the pin decides which
+package must move together. The CUDA major of the pin decides which
 `libnvrtc.so.N` the miner dlopens, and `docker/Dockerfile.quip-solver-cuda`
 asserts the load at build time. Widening or narrowing card support is a
 reviewed change to `SUPPORTED_ARCHS` in `quip-solver-cuda`
@@ -125,7 +124,7 @@ in the `--report` JSONL file. The `best_energy_milli` field describes the divers
 selection. See `docs/COORDINATOR.md` for units, missing-energy values, and lease
 summaries.
 
-The config registers miners and their launch plan. Each backend section (`[cpu]`, `[cuda.0]`, `[metal]`, `[dwave]`) becomes one supervised subprocess; `binary` selects the executable — `quip-cpu-sa`, the chromatic `quip-cpu-gibbs`, `quip-cpu-sb`, or one of quip-solver-cpu's experimental kernels when that release published it. See `crates/quip-coordinator/config.toml.example`. Miner binaries are fetched per host by `crates/quip-coordinator/tools/fetch-miners.sh` from the standalone repos and resolved on `PATH` or by absolute path.
+The config registers miners and their launch plan. Each backend section (`[cpu]`, `[cuda.N]`, `[metal]`, `[dwave]`) becomes one supervised subprocess. `binary` selects the executable: `quip-cpu-sa`, the chromatic `quip-cpu-gibbs`, `quip-cpu-sb`, or one of quip-solver-cpu's experimental kernels when that release published it. See `crates/quip-coordinator/config.toml.example`. `crates/quip-coordinator/tools/fetch-miners.sh` fetches the miner binaries per host from the standalone repos. The coordinator resolves them on `PATH` or by absolute path.
 
 `signer_key` accepts a keystore path, a 32-byte hex master seed, or a `//DevUri`
 such as `//Alice`. It also accepts any substrate secret URI, including a BIP39
@@ -137,7 +136,7 @@ This repo holds no Python. The `quip-solver-core` PyPI wheel (consensus primitiv
 
 ## Conventions
 
-- Rust standards and lints follow the `lang-rust` guidance; `cargo clippy -- -D warnings` is the gate.
-- Follow the existing crate layout — shared code goes in the crate that owns it, not a new top-level module.
+- Rust standards and lints follow the `lang-rust` guidance. `cargo clippy -- -D warnings` is the gate.
+- Follow the existing crate layout. Shared code goes in the crate that owns it, not a new top-level module.
 - No `Co-Authored-By` or other assistant-attribution trailers in commits.
 - Never read `.env`.

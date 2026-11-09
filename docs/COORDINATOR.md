@@ -2,7 +2,7 @@
 
 `quip-coordinator` is the one process that touches the chain. It follows the
 chain head and stages work for the miners. Each miner runs as a subprocess and
-speaks the gRPC miner protocol to the coordinator over a local socket; the
+speaks the gRPC miner protocol to the coordinator over a local socket. The
 coordinator collects the solutions and submits the winning proofs. The miners
 never see the chain.
 
@@ -186,10 +186,10 @@ pallet computes in `account_to_bytes`, or the pallet rejects the proof with
 identity.
 
 The H3-to-H4 signing migration keeps the keystore format and 32-byte master
-seed unchanged, so existing keystore files still load. Account derivation is
-domain-separated over the suite's full hybrid public key, however, and H4
-derives different public bytes from the same seed. The resulting SS58 account
-therefore changes. Re-fund the new account from the faucet and submit a fresh
+seed unchanged, so existing keystore files still load. But account derivation
+is domain-separated over the suite's full hybrid public key, and H4 derives
+different public bytes from the same seed. So the resulting SS58 account
+changes. Re-fund the new account from the faucet and submit a fresh
 `register_miner` before mining. `miner_identity_bytes` changes with the
 account because it is the pallet-matched hash of that account's SCALE encoding.
 
@@ -425,12 +425,14 @@ The staged depth per miner tracks how fast that miner drains work, so a
 many-core backend stays saturated while a slow one does not hoard jobs. Each
 poll samples the miner's dispatch counter (`Router::take_consumed`,
 read-and-reset), smooths it with an EMA (`α = 0.3`), and sizes the window to
-`ceil(ema × 2.0)` — about two poll-intervals of drain — with `buffer_depth` as
-the floor and no ceiling. The EMA tracks queue drain. A job leaves the staged
-queue at dispatch, so that is the signal the feeder sizes against. The default
-floor is 256 (`main.rs`), generous enough to keep every miner fed from the
-first poll. The one-minute heartbeat reports completions, not this dispatch
-counter.
+`ceil(ema × 2.0)`, about two poll-intervals of drain, with `buffer_depth` as
+the floor. The feeder then clamps the depth to `stage_ceiling`, a per-miner
+budget of 64 MiB of staged Ising models (`MAX_STAGE_BYTES_PER_MINER`), so a
+fast miner on a large topology cannot stage an unbounded reserve. The EMA
+tracks queue drain. A job leaves the staged queue at dispatch, so that is the
+signal the feeder sizes against. The default floor is 256 (`main.rs`),
+generous enough to keep every miner fed from the first poll. The one-minute
+heartbeat reports completions, not this dispatch counter.
 
 ### Decay projection and the win-time stash
 
@@ -486,14 +488,14 @@ The dispatch path checks each queued job again before spending a credit.
 Jobs already dispatched continue under the existing result and reject rules.
 A snapshot with an incompatible protocol version leaves the current envelope intact.
 
-Dispatch is gated by a **credit pool**, not a queue depth. The miner grants
+A **credit pool** gates dispatch, not a queue depth. The miner grants
 `width` credits up front and one more per terminal event (`Result` or
-`Reject`); each dispatch spends one credit (`next_job`). Dispatch stays
-one-to-one with completion, and in-flight is bounded by the credits the miner
-has actually issued. In-flight jobs live in `CoordinatorState`, so the
+`Reject`). Each dispatch spends one credit (`next_job`). Dispatch stays
+one-to-one with completion, and the credits the miner has issued bound the
+in-flight count. In-flight jobs live in `CoordinatorState`, so the
 router keeps no separate outstanding counter.
 
-On a reject with `UnsupportedKind`, the router records that the miner can't
+On a reject with `UnsupportedKind`, the router records that the miner cannot
 serve that job kind and re-routes the job to another capable miner. On a miner
 crash, `reclaim` returns its staged and in-flight jobs for re-queue.
 
@@ -519,15 +521,16 @@ They do not restore dropped jobs.
 ## The miner session
 
 `CoordinatorService<C>` is the server side of the gRPC `MinerService`
-(`session.rs`) — the streaming miner protocol carried over the Unix socket. Per
+(`session.rs`), the streaming miner protocol carried over the Unix socket. Per
 session it runs the handshake (`Hello` → `Welcome`), applies `Configure`, then
 services the bidirectional stream: a `JobRequest` grants credits, the
 coordinator dispatches staged `Job`s, and each `Result` or `Reject` is a
-terminal event that frees a credit and advances accounting. A periodic `Ping` (every 15s) draws a
-`Status` that reports how busy the miner is and surfaces paused or stale-round
-liveness; `Shutdown` ends the session in-band. The harness owns credits, reject
-reasons, and liveness, so each backend only has to sample. `SPEC.md` in the
-quip-solver-core repo specifies this contract from the miner's side.
+terminal event that frees a credit and advances accounting. A periodic `Ping`
+(every 15 s) draws a `Status` that reports how busy the miner is and surfaces
+paused or stale-round liveness. `Shutdown` ends the session in-band. The
+harness owns credits, reject reasons, and liveness, so each backend only has to
+sample. `SPEC.md` in the quip-solver-core repo specifies this contract from the
+miner's side.
 
 ### Protocol version
 
@@ -551,7 +554,7 @@ lease at 2²⁰ salts. Before a miner's first lease completes, the feeder assume
 75 salts per second for each pipeline slot. `LEASE_STAGE_DEPTH` sets the
 two-lease staging limit per miner.
 
-A lease miner on quip-solver-core 0.0.2 sends a `Result` for each salt it
+A lease miner on quip-solver-core 0.0.5 sends a `Result` for each salt it
 reports, with every read and no target filter. The coordinator first checks
 that the `Result` is authentic: `verify_lease_result` with a permissive target
 redraws the problem and rescores every read. The coordinator drops a forged or
@@ -607,9 +610,11 @@ matched, because those bytes never pass through the coordinator's own filter.
 
 Restarts follow the child's exit code (`restart_policy`):
 
-- `0` — clean exit; respawn on demand, reset backoff.
-- `64` / `69` / `77` — operator, environment, or token error; don't respawn.
-- `70` or a signal — crash; respawn after exponential backoff
+- `0`: clean exit. Respawn on demand and reset backoff.
+- `64`, `69`, or `77`: operator, environment, or token error. Do not respawn.
+- `2`: clap usage error. The argv the coordinator built does not match the
+  binary. Do not respawn.
+- `70`, any other code, or a signal: crash. Respawn after exponential backoff
   (`2^consecutive × base`, capped at `max`) under a failure budget. Too many
   crashes inside the window marks the miner unhealthy and stops respawning.
 
@@ -630,7 +635,7 @@ backend name stays on the entry so the coordinator can derive `MinerKind`.
 `binary` selects the executable, defaulting to `quip-<backend>-sa` (and
 `quip-dwave-qa` for D-Wave). The coordinator-owned keys (`binary`,
 `queue_depth`, `idle_timeout_s`, `heartbeat_s`, `reconnect_window_s`) become
-fields of the `Configure` message; every other key passes through verbatim in
+fields of the `Configure` message. Every other key passes through verbatim in
 `Configure.backend_toml`, which the coordinator forwards to the miner. This is
 how a backend receives its own settings without the coordinator knowing them.
 
@@ -677,7 +682,7 @@ is ignored, as before.
 
 **Upgrading:** two behaviors change for configs written against earlier
 releases. `[cuda.N]` now binds GPU N, so miners that all shared GPU 0 on a
-multi-GPU host spread across cards; throughput and thermals change with them.
+multi-GPU host spread across cards. Throughput and thermals change with them.
 Check `nvidia-smi -L | wc -l` against the highest `[cuda.N]` first, because a
 section naming a GPU the host does not have now fails at device open (exit 69,
 never restarted) instead of mining on GPU 0. A non-numeric section such as
@@ -686,16 +691,16 @@ a startup error: rename the key to the device ordinal. `[cuda]` is the only
 indexed backend, so `[metal.N]` and `[cpu.N]` are startup errors too: they used
 to launch as `metal-0`/`cpu-0` on device 0 with the nested table leaking into
 the miner's `backend_toml` and the `binary` key under it ignored. Write
-`[metal]` or `[cpu]`. The `device_index` key
-was never read and is gone from `config.toml.example`; leaving it in an
-existing config costs one "unknown field" warning from the miner.
+`[metal]` or `[cpu]`. The coordinator never read the `device_index` key, and
+`config.toml.example` no longer lists it. Leaving it in an existing config
+costs one "unknown field" warning from the miner.
 
 A backend key travels on the child argv only when the miner must know it
 *before* it opens its device. Every other key travels in
 `Configure.backend_toml`. `--device` is the only key that meets this test: the
 CUDA context is created inside the miner `open` closure, before any wire byte is
-read, while `apply_config` runs after the handshake. Keys such as `utilization`
-and `yielding` are therefore never forwarded on argv from the supervised path.
+read, while `apply_config` runs after the handshake. So the supervised path
+never forwards keys such as `utilization` and `yielding` on argv.
 They already arrive in `backend_toml`, and sending them twice would put one
 operator value into two channels.
 

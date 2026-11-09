@@ -12,7 +12,7 @@ Both shapes are specified and documented in the
 [quip-solver-core](https://gitlab.com/quip.network/quip-solver-core)
 repository: `SPEC.md` is the contract, the crate README covers the Rust
 `Sampler` path, and `examples/` holds a conformant mock solver in Rust, C++,
-Python, and TypeScript. Depend on `quip-solver-core = "0.0.2"` from crates.io
+Python, and TypeScript. Depend on `quip-solver-core = "0.0.5"` from crates.io
 for the Rust path, or on the `quip-solver-core` PyPI wheel for Python. A
 solver is conformant when the repo's `quip-solver-drive` binary reports a
 conformant session against it.
@@ -22,7 +22,7 @@ the coordinator, publishing releases, and testing against this coordinator.
 
 ## Salt leases
 
-A Rust miner built on quip-solver-core 0.0.2 receives leases through the
+A Rust miner built on quip-solver-core 0.0.5 receives leases through the
 default session loop when it advertises the BLAKE3/ChaCha8 generator. The
 session loop draws each problem and passes it to the sampler. It sends every
 returned read for each salt to the coordinator, which verifies the reads and
@@ -35,16 +35,16 @@ part of this coordinator repository.
 
 ## Naming and algorithm variants
 
-Name the binary `quip-<backend>-<algorithm>` — `quip-mybackend-sa` for simulated
-annealing, `quip-mybackend-gibbs` for Gibbs. A new algorithm for an existing device is just
-another binary; an operator selects it in `config.toml` with `binary =
-"quip-mybackend-gibbs"`. The coordinator's default when `binary` is omitted is
-`quip-<backend>-sa`.
+Name the binary `quip-<backend>-<algorithm>`: `quip-mybackend-sa` for simulated
+annealing, `quip-mybackend-gibbs` for Gibbs. A new algorithm for an existing
+device is another binary. An operator selects it in `config.toml` with
+`binary = "quip-mybackend-gibbs"`. The coordinator's default when `binary` is
+omitted is `quip-<backend>-sa`.
 
 ## Wiring a new backend into the coordinator
 
-Adding a new algorithm to an existing backend needs no coordinator change — it
-is a new binary the config points at. A brand-new backend category needs two
+Adding a new algorithm to an existing backend needs no coordinator change. It
+is a new binary the config points at. A new backend category needs two
 edits:
 
 - **`crates/quip-coordinator/src/config.rs`** — `parse_config` recognizes the
@@ -80,7 +80,7 @@ The coordinator rejects other versions during the `Hello` handshake.
 
 - Run `quip-solver-drive <your-binary> unix:///tmp/quip-check.sock` from the
   quip-solver-core repo. Exit code 0 means the solver is conformant.
-- `your-binary --capabilities` prints the capability JSON; `your-binary --check`
+- `your-binary --capabilities` prints the capability JSON. `your-binary --check`
   probes that the device is runnable. Both exit without connecting.
 - Drive mode runs the miner end to end against this coordinator with no chain:
 

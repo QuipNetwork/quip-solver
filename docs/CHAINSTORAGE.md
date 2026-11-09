@@ -24,8 +24,10 @@ Every value is SCALE-encoded. The runtime uses these types:
 | `Balance` | `u128` |
 | `Hash` | `H256` |
 
-The pallet test runtime uses a `u64` block number. A client of the production
-chain must decode a block number as four little-endian bytes.
+The pallet test runtime (`mock.rs`) builds its block type from
+`frame_system::mocking::MockBlock`, whose block number type differs from the
+production `u32`. A client of the production chain must decode a block number
+as four little-endian bytes.
 
 Storage keys have this layout:
 
@@ -40,9 +42,9 @@ key. For example, a `QBlocks` key has 52 bytes: 32 for the prefix, 16 for the
 hash, and 4 for the block number. All maps in this document use
 `Blake2_128Concat`, except `OrdersExpiringAt`, which uses `Twox64Concat`.
 
-`state_getKeysPaged` treats `startKey` as exclusive. A page that starts at a
-`StorageValue` key does not return that key. Read a `StorageValue` with
-`state_getStorage`.
+Substrate's `state_getKeysPaged` treats `startKey` as exclusive. A page that
+starts at a `StorageValue` key does not return that key. Read a `StorageValue`
+with `state_getStorage`.
 
 These are the pallet prefixes:
 
@@ -62,9 +64,13 @@ The topology hash is the key for these items.
 | `set_default_topology` | `DefaultTopology` |
 | `set_difficulty` | `Difficulties` |
 | `set_topology_curve` | `TopologyCurveC` |
+| `add_mineable_topology`, `remove_mineable_topology` | `MineableTopologies` |
+| `set_block_reward` | `BlockRewardOverride` |
+| `set_target_proof_blocks` | `TargetProofBlocksOverride` |
 
 `MineableTopologies` is the whitelist of topologies that accept proofs.
 `submit_proof` refuses a registered topology that has no entry in this map.
+`remove_mineable_topology` refuses the current default topology.
 
 `TopologyMeta` holds `nodes`, `edges`, `allowed_h_values`, `allowed_j_values`,
 `allowed_spin_values`, and `registered_at`. The chain regenerates each problem
@@ -76,9 +82,10 @@ topology only.
 
 ## Miners
 
-`register_miner` writes a `MinerInfo` entry to `Miners`, keyed by account.
-`MinerInfo` holds `registered_at`, `deposit`, `proofs_submitted`, `proofs_won`,
-and `rewards_earned`. `Miners` holds counters and no proof data.
+`register_miner` writes a `MinerInfo` entry to `Miners`, keyed by account, and
+`deregister_miner` removes it. `MinerInfo` holds `registered_at`, `deposit`,
+`proofs_submitted`, `proofs_won`, and `rewards_earned`. `Miners` holds counters
+and no proof data.
 
 ## Proofs and qblocks
 
@@ -98,7 +105,7 @@ The coordinator builds a `QuantumProof` in `proof_encode.rs` with these fields:
 | Field | Content |
 |---|---|
 | `topology_hash` | The registered topology |
-| `nonce` | `derive_nonce(last_proof_block_hash, miner, salt)` |
+| `nonce` | `derive_nonce(last_proof_block_hash, identity, salt)`, where `identity` is `blake2_256(SCALE(account))`. The pallet computes the same value in `account_to_bytes`. The coordinator supplies it from `miner_identity_bytes` (`chain/extrinsic.rs`). |
 | `salt` | 32 bytes chosen by the miner |
 | `solutions` | Spin vectors, bit-packed under `allowed_spin_values` |
 | `device_access_time_us` | Self-reported compute time. Consensus does not read it. |
@@ -120,7 +127,7 @@ If a record exists, the hook pays the reward and writes these items:
 
 | Item | Change |
 |---|---|
-| `Miners[miner]` | Increments `proofs_won` and adds the reward to `rewards_earned` |
+| `Miners[miner]` | Increments `proofs_won` and adds the reward to `rewards_earned`, if the entry still exists |
 | `Difficulties[topology]` | Stores the adjusted difficulty |
 | `LastProofBlock` | Stores the current block number |
 | `QBlockCount` | Increments the count that supplies the qblock id |
@@ -175,10 +182,13 @@ four steps.
 
 | Step | Call | Writes |
 |---|---|---|
-| 1. Propose | `propose_job` or `propose_job_with_payee_requirement` | `NextOrderId`, `JobOrders`, `OpenOrders`, `ProposerOrders`, and `JobSpecs` |
-| 2. Solve | `submit_solution` or `submit_solution_with_payee` | `OrderSolutions`, `OrderPayees`, `Solvers`, `JobOrders`, and one ranking item |
-| 3. Expire | `on_initialize` | `JobOrders`, `OpenOrders`, and `OrderResults` |
-| 4. Claim | `claim_reward` | `JobOrders`, `OpenOrders`, `JobSpecs`, and `Solvers` |
+| 1. Propose | `propose_job` or `propose_job_with_payee_requirement` | `NextOrderId`, `JobOrders`, `OpenOrders`, `OrdersExpiringAt`, `ProposerOrders`, and `JobSpecs`. The payee variant also writes `OrderPayeeRequirements`. |
+| 2. Solve | `submit_solution` or `submit_solution_with_payee` | `OrderSolutions`, `Solvers`, `JobOrders`, and one ranking item. `OrderPayees` changes only when the payee changes. The first solution can move the `OrdersExpiringAt` entry to an earlier bucket. |
+| 3. Expire | `on_initialize` | `JobOrders`, `OpenOrders`, `OrdersExpiringAt`, `NextExpiryBucket`, and `OrderResults` |
+| 4. Claim | `claim_reward` | `JobOrders`, `OpenOrders`, `JobSpecs`, `Solvers`, and `ProposerOrders` |
+
+A proposer can call `reclaim_order` on an order that has no accepted solution.
+It writes `JobOrders` and removes the order from `OpenOrders`.
 
 Unlike a proof, a job solution stays in storage. `OrderSolutions` holds one
 `JobSolution` per order and solver, with the spin vectors as `BoundedVec<i8>`.
@@ -187,8 +197,9 @@ The ranking item depends on the reward resolution of the order. A `SingleBest`
 order uses `OrderFrontRunner`, and other resolutions use `OrderTopSolvers`.
 
 Expiry removes the order from `OpenOrders`. The chain writes `OrderResults` only
-for an expired order that has a solution and `CallbackWithPoll` delivery. `purge_result` removes that
-entry. `OrdersExpiringAt` and `NextExpiryBucket` schedule order expiry.
+for an expired order that has a solution and `CallbackWithPoll` delivery.
+`purge_result` removes that entry after `settled_at + ResultTtlBlocks`.
+`OrdersExpiringAt` and `NextExpiryBucket` schedule order expiry.
 
 ## Storage items
 
@@ -234,7 +245,7 @@ entry. `OrdersExpiringAt` and `NextExpiryBucket` schedule order expiry.
 | `NextExpiryBucket` | Value | None | `BlockNumber` |
 | `OrderSolutions` | Double map | Order id, then account | `JobSolution` |
 | `OrderPayeeRequirements` | Map | Order id | `u64` |
-| `OrderPayees` | Double map | Order id, then account | Payee |
+| `OrderPayees` | Double map | Order id, then account | `WinnerPayee` |
 | `OrderFrontRunner` | Map | Order id | `FrontRunner` |
 | `OrderTopSolvers` | Map | Order id | Bounded list of ranked solvers |
 | `Solvers` | Map | Account | `SolverInfo` |
