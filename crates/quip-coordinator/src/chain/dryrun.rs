@@ -58,8 +58,7 @@ pub fn decode_dispatch_error(bytes: &[u8]) -> Option<ModuleError> {
 /// table degrades a log line rather than a decision. The order below is the
 /// declaration order, which is the SCALE index, taken from
 /// `pallets/quantum-pow/src/lib.rs` lines 355 to 409 and
-/// `pallets/miner-registry/src/lib.rs` lines 494 to 518. See
-/// `docs/chain-storage-notes.md`.
+/// `pallets/miner-registry/src/lib.rs` lines 494 to 518.
 const QUANTUM_POW_ERRORS: [&str; 25] = [
     "MinerAlreadyRegistered",
     "MinerNotRegistered",
