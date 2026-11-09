@@ -2,9 +2,9 @@
 
 use crate::chain::snapshot::MiningSnapshot;
 use crate::producer::problem::milli_problem;
+use ising_generators::random::derive_nonce;
 use quip_proto::v1::{ising_problem, Job, JobKind, Provenance};
 use quip_protocol::chacha8::{draw_ising_milli, DrawError};
-use quip_protocol::derive::derive_nonce;
 
 /// Build an `ISING_SAMPLE` `PoW` job from a snapshot, miner account, and salt.
 ///
@@ -88,6 +88,7 @@ mod tests {
             min_diversity_milli: 200,
             block_number: 42,
             spec_version: 117,
+            family: None,
         }
     }
 

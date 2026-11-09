@@ -152,7 +152,7 @@ pub struct CoordinatorState {
     /// Dense-position view of `topology` that lease verification draws on.
     /// Built once in [`CoordinatorState::set_topology`]. `None` without a
     /// topology or when the topology cannot map its edges.
-    pub lease_topology: Option<Arc<quip_protocol::lease::TopologyView>>,
+    pub lease_topology: Option<Arc<crate::lease::LeaseTopology>>,
     /// Position-indexed scoring form of `topology`, resolved once via
     /// [`CoordinatorState::set_topology`]. A run constant every result borrows
     /// by `Arc`, so the graph is never rebuilt per result.
@@ -271,8 +271,8 @@ impl CoordinatorState {
     pub fn set_topology(&mut self, topology: Option<Topology>) {
         self.router.set_topology(topology.as_ref());
         self.lease_topology = topology.as_ref().and_then(|t| {
-            quip_protocol::lease::TopologyView::from_proto(&t.to_proto())
-                .map_err(|e| tracing::error!(error = ?e, "topology cannot back lease verification"))
+            crate::lease::LeaseTopology::from_topology(t, crate::lease::FAMILY_CONTRACTS)
+                .map_err(|e| tracing::error!(error = %e, "topology cannot back lease verification"))
                 .ok()
                 .map(Arc::new)
         });
@@ -1338,6 +1338,7 @@ pub async fn serve_one_session_expecting(
             min_diversity_milli: 0,
             block_number: 0,
             spec_version: 117,
+            family: None,
         },
         None,
     ));
@@ -1435,6 +1436,7 @@ mod tests {
             min_diversity_milli: 0,
             block_number: 42,
             spec_version: 117,
+            family: None,
         }
     }
 
@@ -1615,6 +1617,176 @@ mod tests {
             .is_some_and(|proof| proof.solutions.len() <= crate::validate::MAX_PROOF_SOLUTIONS));
     }
 
+    static FAMILY_TABLE: [ising_generators::descriptor::Contract; 1] =
+        [quip_solver_conformance::families::layered::UNIFORM_V1];
+
+    /// A session holding one in-flight family lease, and an honest report for
+    /// the lease's first salt that yields an instance.
+    fn family_state() -> (CoordinatorState, Job, WireResult) {
+        use ising_generators::descriptor::{admit, AdvertisedLimits};
+        use ising_generators::family::{admit_topology, generate_instance, BaseTopology};
+
+        let (mut st, legacy) = lease_state();
+        let mut snap = lease_snapshot();
+        let topology = Topology::from_nodes_edges(
+            snap.nodes.clone(),
+            snap.edges.clone(),
+            &snap.allowed_h_milli,
+            &snap.allowed_j_milli,
+            &snap.allowed_spin_milli,
+        );
+        snap.family = Some(
+            crate::lease::ChallengeFamily::admit(
+                &FAMILY_TABLE,
+                "vectors/uniform-field",
+                1,
+                quip_solver_conformance::families::layered::P_SPEC.to_vec(),
+                &topology,
+            )
+            .unwrap(),
+        );
+        let account: [u8; 32] = legacy
+            .generator
+            .as_ref()
+            .unwrap()
+            .miner_account
+            .as_slice()
+            .try_into()
+            .unwrap();
+        let mut job = crate::lease::build_lease_job(&snap, account, 0, 32, legacy.generation);
+        job.job_id.clone_from(&legacy.job_id);
+        let _ = st.inflight.insert(job.job_id.clone(), job.clone());
+        st.lease_topology = Some(Arc::new(
+            crate::lease::LeaseTopology::from_topology(&topology, &FAMILY_TABLE).unwrap(),
+        ));
+
+        let generator = job.generator.as_ref().unwrap();
+        let spec = LeaseSpec::from_proto(generator).unwrap();
+        let descriptor = generator.family.as_ref().unwrap();
+        let admitted = admit(
+            &FAMILY_TABLE,
+            descriptor.family_id.as_bytes(),
+            descriptor.revision,
+            &descriptor.params,
+            &descriptor.params_digest,
+        )
+        .unwrap();
+        let base = BaseTopology::new(topology.nodes.clone(), &topology.edge_pairs()).unwrap();
+        let bounds = admit_topology(
+            &admitted,
+            &base,
+            &generator.topology_order_digest,
+            &AdvertisedLimits::default(),
+        )
+        .unwrap();
+        let (index, nonce, instance) = (0..32)
+            .find_map(|i| {
+                let nonce = spec.nonce(i).unwrap();
+                generate_instance(&admitted, &base, &bounds, nonce)
+                    .ok()
+                    .map(|instance| (i, nonce, instance))
+            })
+            .expect("a salt yields an instance");
+        let spins = vec![1i8; instance.node_ids().len()];
+        let edges: Vec<(usize, usize)> = instance
+            .edges()
+            .iter()
+            .map(|&(u, v)| (u as usize, v as usize))
+            .collect();
+        let energy =
+            quip_protocol::scoring::energy_from_milli(&spins, instance.h(), instance.j(), &edges)
+                + instance.offset_milli();
+        let report = WireResult {
+            job_id: job.job_id.clone(),
+            solutions: vec![Solution {
+                spins: quip_protocol::wire::encode_spins_packed(&spins),
+                energy_milli: energy,
+            }],
+            meta: None,
+            salt: spec.salt(index).unwrap().to_vec(),
+            nonce: nonce.to_vec(),
+        };
+        (st, job, report)
+    }
+
+    #[tokio::test]
+    async fn an_honest_family_result_is_submitted() {
+        let (st, _, report) = family_state();
+        let state = Arc::new(Mutex::new(st));
+        let chain = FakeChain::new(lease_snapshot(), None);
+        let salt = report.salt.clone();
+        handle_lease_result(&chain, &state, &notify(), "m", report).await;
+        let submitted = chain.take_submitted();
+        assert_eq!(submitted.len(), 1);
+        assert_eq!(submitted.first().map(|proof| &proof.salt), Some(&salt));
+        assert!(state.lock().await.round_mined());
+    }
+
+    #[tokio::test]
+    async fn a_forged_family_result_never_reaches_submission_or_the_stash() {
+        let (mut st, job, mut report) = family_state();
+        let energy = report.solutions.first().unwrap().energy_milli;
+        st.stash.reset(
+            job.generation,
+            Some(crate::decay::DecayModel {
+                base_max_energy_milli: energy,
+                curve: Some(crate::decay::EnergyCurve {
+                    min_milli: energy - 100_000,
+                    knee_milli: energy,
+                    max_milli: energy + 50_000,
+                }),
+                epoch_length: 10,
+                algorithm: crate::decay::DecayAlgorithm::Stepwise,
+            }),
+            0,
+        );
+        report
+            .solutions
+            .iter_mut()
+            .for_each(|solution| solution.energy_milli -= 1);
+        let state = Arc::new(Mutex::new(st));
+        let chain = FakeChain::new(lease_snapshot(), None);
+        handle_lease_result(&chain, &state, &notify(), "m", report).await;
+        assert!(chain.take_submitted().is_empty());
+        let st = state.lock().await;
+        assert!(st.stash.is_empty(), "a forgery is not a near miss");
+        assert!(!st.round_mined(), "a forgery is not participation");
+    }
+
+    #[tokio::test]
+    async fn an_authentic_family_miss_is_stashed_and_counts_as_participation() {
+        let (mut st, job, report) = family_state();
+        let energy = report.solutions.first().unwrap().energy_milli;
+        st.target = Some(SetTarget {
+            max_energy_milli: energy,
+            min_solutions: 1,
+            min_diversity_milli: 0,
+            max_proof_solutions: 32,
+            ..Default::default()
+        });
+        st.stash.reset(
+            job.generation,
+            Some(crate::decay::DecayModel {
+                base_max_energy_milli: energy,
+                curve: Some(crate::decay::EnergyCurve {
+                    min_milli: energy - 100_000,
+                    knee_milli: energy,
+                    max_milli: energy + 50_000,
+                }),
+                epoch_length: 10,
+                algorithm: crate::decay::DecayAlgorithm::Stepwise,
+            }),
+            0,
+        );
+        let state = Arc::new(Mutex::new(st));
+        let chain = FakeChain::new(lease_snapshot(), None);
+        handle_lease_result(&chain, &state, &notify(), "m", report).await;
+        assert!(chain.take_submitted().is_empty());
+        let st = state.lock().await;
+        assert!(!st.stash.is_empty(), "held for the decay schedule");
+        assert!(st.round_mined());
+    }
+
     #[tokio::test]
     async fn lease_result_after_cancel_is_dropped() {
         let (mut st, job) = lease_state();
@@ -1732,6 +1904,7 @@ mod tests {
             min_diversity_milli: 0,
             block_number: 1,
             spec_version: 117,
+            family: None,
         };
         let job = crate::lease::build_lease_job(&snap, [0; 32], 21, 4, 1);
         st.dispatch_inflight("m", job.clone());

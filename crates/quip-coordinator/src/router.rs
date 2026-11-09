@@ -1,7 +1,12 @@
 //! Capability index, per-miner staged queue, credit accounting, cancel, reject.
 
 use crate::topology::Topology;
-use quip_proto::v1::{ising_problem, Capabilities, Job, JobKind, RejectReason};
+use ising_generators::Code;
+use quip_proto::v1::{
+    ising_problem, Capabilities, FamilyDescriptor, FamilySupport, GeneratorAlgorithm, IsingProblem,
+    IsingProblemGenerator, Job, JobKind, RejectReason,
+};
+use quip_protocol::family::support_code;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
@@ -28,6 +33,91 @@ pub struct MinerCaps {
     pub generators: Vec<i32>,
     /// Models kept in flight. Zero means unknown.
     pub stream_width: u32,
+    /// Coefficient encodings accepted. Empty makes no claim.
+    pub encodings: Vec<i32>,
+    /// Largest local field in milli. None makes no claim. Some(0) is unbounded.
+    pub max_local_field_milli: Option<u32>,
+    /// Exact coefficient step in milli. None or Some(0) makes no claim.
+    pub exact_resolution_milli: Option<u32>,
+    /// Stable solver name across releases. Empty is not a pin target.
+    pub solver_id: String,
+    /// Families this solver generates from a lease.
+    pub generated_families: Vec<FamilySupport>,
+    /// Families this solver checks on an explicit job.
+    pub accepted_families: Vec<FamilySupport>,
+}
+
+/// Feature name of a solver that refuses a coefficient it cannot represent.
+const EXACT_COEFFICIENTS_FEATURE: &str = "exact-coefficients";
+
+/// Why one miner cannot take one job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ineligible {
+    /// A solver pin is set and this miner does not match it.
+    NotPinned,
+    /// The miner does not take this job kind.
+    KindUnsupported,
+    /// The miner does not advertise the lease generator.
+    GeneratorUnsupported,
+    /// The family support lists refuse the job with this code.
+    Family(Code),
+    /// The miner already rejected this family, revision, and parameter set.
+    FamilyRejected,
+    /// The job has more nodes than the miner allows.
+    Nodes,
+    /// The job has more edges than the miner allows.
+    Edges,
+    /// The job has a higher degree than the miner allows.
+    Degree,
+    /// The job does not fit the miner's native graph.
+    NativeTopology,
+    /// The job's coefficient encoding is not advertised.
+    Encoding,
+    /// The job's largest local field is above the miner's limit.
+    LocalField,
+    /// A coefficient is off the step of a solver that refuses to quantize.
+    ExactResolution,
+    /// A limit applies, but the job's form does not let the router check it.
+    UnprovableLimit,
+}
+
+impl std::fmt::Display for Ineligible {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotPinned => write!(f, "does not match the solver pin"),
+            Self::KindUnsupported => write!(f, "job kind unsupported"),
+            Self::GeneratorUnsupported => write!(f, "lease generator unsupported"),
+            Self::Family(code) => write!(f, "family support refused: {code}"),
+            Self::FamilyRejected => write!(f, "miner already rejected this family case"),
+            Self::Nodes => write!(f, "too many nodes"),
+            Self::Edges => write!(f, "too many edges"),
+            Self::Degree => write!(f, "degree too high"),
+            Self::NativeTopology => write!(f, "does not fit the native graph"),
+            Self::Encoding => write!(f, "coefficient encoding unsupported"),
+            Self::LocalField => write!(f, "local field too large"),
+            Self::ExactResolution => write!(f, "coefficient off the exact resolution"),
+            Self::UnprovableLimit => write!(f, "limit cannot be checked for this job form"),
+        }
+    }
+}
+
+/// One family, revision, and parameter set a miner rejected.
+type FamilyCase = (String, u32, Vec<u8>);
+
+fn family_case(descriptor: &FamilyDescriptor) -> FamilyCase {
+    (
+        descriptor.family_id.clone(),
+        descriptor.revision,
+        descriptor.params_digest.clone(),
+    )
+}
+
+/// The descriptor a job carries: a lease's, or an explicit job's binding.
+fn job_family(job: &Job) -> Option<&FamilyDescriptor> {
+    if job.kind == JobKind::IsingGenerate as i32 {
+        return job.generator.as_ref()?.family.as_ref();
+    }
+    job.ising.as_ref()?.family.as_ref()?.family.as_ref()
 }
 
 impl MinerCaps {
@@ -40,7 +130,7 @@ impl MinerCaps {
             .contains(&(JobKind::IsingGenerate as i32))
             && self
                 .generators
-                .contains(&(quip_proto::v1::GeneratorAlgorithm::Blake3Chacha8V1 as i32))
+                .contains(&(GeneratorAlgorithm::Blake3Chacha8V1 as i32))
     }
 
     /// Index a protocol-2 capability snapshot.
@@ -58,6 +148,12 @@ impl MinerCaps {
             features: c.features.clone(),
             generators: c.generators.clone(),
             stream_width: c.stream_width,
+            encodings: c.encodings.clone(),
+            max_local_field_milli: c.max_local_field_milli,
+            exact_resolution_milli: c.exact_resolution_milli,
+            solver_id: c.solver_id.clone(),
+            generated_families: c.generated_families.clone(),
+            accepted_families: c.accepted_families.clone(),
         }
     }
 }
@@ -87,6 +183,8 @@ struct MinerQueue {
     /// The heartbeat reads this total. Polls do not reset it.
     completed: u64,
     unsupported_kinds: HashSet<i32>,
+    /// Family cases this miner rejected. A capability snapshot clears them.
+    rejected_families: HashSet<FamilyCase>,
 }
 
 /// How often one miner's dropped-job total may reach the log at `warn`.
@@ -169,6 +267,8 @@ pub struct Router {
     pub unroutable: Vec<Job>,
     /// Per-miner drop counters behind [`DROP_WARN_INTERVAL`].
     drops: HashMap<String, DropLog>,
+    /// Operator pin for family work: a miner id or a `solver_id`.
+    solver_pin: Option<String>,
 }
 
 impl Router {
@@ -181,6 +281,12 @@ impl Router {
     /// Cache the active session graph for hash-job and lease routing.
     pub fn set_topology(&mut self, topology: Option<&Topology>) {
         self.topology = topology.and_then(RoutingTopology::new);
+    }
+
+    /// Limit family work to the miner with this id or `solver_id`. The pin
+    /// narrows the candidates. It never admits a miner that cannot take the job.
+    pub fn set_solver_pin(&mut self, pin: Option<String>) {
+        self.solver_pin = pin;
     }
 
     /// Register (or re-register) a miner with the given capability envelope.
@@ -197,6 +303,7 @@ impl Router {
                 q.consumed_since_poll = 0;
                 q.salts_since_poll = 0;
                 q.unsupported_kinds.clear();
+                q.rejected_families.clear();
             }
             None => {
                 let _ = self.miners.insert(
@@ -210,6 +317,7 @@ impl Router {
                         round_salts: 0,
                         completed: 0,
                         unsupported_kinds: HashSet::new(),
+                        rejected_families: HashSet::new(),
                     },
                 );
             }
@@ -224,7 +332,36 @@ impl Router {
     fn is_capable(&self, miner_id: &str, job: &Job) -> bool {
         self.miners
             .get(miner_id)
-            .is_some_and(|q| capable(q, job, self.topology.as_ref()))
+            .is_some_and(|q| self.check_miner(miner_id, q, job).is_ok())
+    }
+
+    /// Admission runs first, so an incompatible pinned miner reports why it
+    /// cannot take the job instead of only reporting the pin.
+    fn check_miner(&self, miner_id: &str, q: &MinerQueue, job: &Job) -> Result<(), Ineligible> {
+        check_capable(q, job, self.topology.as_ref())?;
+        let pinned_out = job_family(job).is_some()
+            && self
+                .solver_pin
+                .as_deref()
+                .is_some_and(|pin| pin != miner_id && pin != q.caps.solver_id);
+        if pinned_out {
+            return Err(Ineligible::NotPinned);
+        }
+        Ok(())
+    }
+
+    /// Each registered miner that cannot take `job`, with the reason, sorted
+    /// by miner id.
+    #[must_use]
+    pub fn ineligible_reasons(&self, job: &Job) -> Vec<(String, Ineligible)> {
+        let mut reasons = Vec::new();
+        for (id, q) in &self.miners {
+            if let Err(reason) = self.check_miner(id, q, job) {
+                reasons.push((id.clone(), reason));
+            }
+        }
+        reasons.sort_by(|a, b| a.0.cmp(&b.0));
+        reasons
     }
 
     /// Like [`Router::route`], but never selects `exclude`. Used by
@@ -244,6 +381,13 @@ impl Router {
             }
             Some(id)
         } else {
+            if job_family(&job).is_some() {
+                tracing::warn!(
+                    reasons = ?self.ineligible_reasons(&job),
+                    pin = ?self.solver_pin,
+                    "no miner can take this family job"
+                );
+            }
             self.unroutable.push(job);
             None
         }
@@ -257,6 +401,7 @@ impl Router {
         };
         q.caps = caps;
         q.unsupported_kinds.clear();
+        q.rejected_families.clear();
         let staged = std::mem::take(&mut q.staged);
         for job in staged {
             if self.is_capable(miner_id, &job) {
@@ -365,9 +510,23 @@ impl Router {
     /// credit it would loop forever with a single miner. If no other miner can
     /// take it, the job lands in `unroutable` (dropped) rather than spinning.
     pub fn on_reject(&mut self, miner_id: &str, job: Job, reason: i32) {
-        if reason == RejectReason::UnsupportedKind as i32 {
-            if let Some(q) = self.miners.get_mut(miner_id) {
-                let _ = q.unsupported_kinds.insert(job.kind);
+        if let Some(q) = self.miners.get_mut(miner_id) {
+            // A family refusal covers that case only, so the miner keeps its
+            // legacy work and every other family.
+            match job_family(&job) {
+                Some(descriptor) => {
+                    if reason == RejectReason::UnsupportedKind as i32
+                        || reason == RejectReason::FamilyUnsupported as i32
+                        || reason == RejectReason::TooLarge as i32
+                    {
+                        let _ = q.rejected_families.insert(family_case(descriptor));
+                    }
+                }
+                None => {
+                    if reason == RejectReason::UnsupportedKind as i32 {
+                        let _ = q.unsupported_kinds.insert(job.kind);
+                    }
+                }
             }
         }
         if self.route_excluding(job, Some(miner_id)).is_none() {
@@ -477,29 +636,166 @@ impl Router {
     }
 }
 
-fn capable(q: &MinerQueue, job: &Job, topology: Option<&RoutingTopology>) -> bool {
+fn check_capable(
+    q: &MinerQueue,
+    job: &Job,
+    topology: Option<&RoutingTopology>,
+) -> Result<(), Ineligible> {
     let kind = job.kind;
-    if q.unsupported_kinds.contains(&kind) {
-        return false;
+    if q.unsupported_kinds.contains(&kind)
+        || (!q.caps.supported_kinds.is_empty() && !q.caps.supported_kinds.contains(&kind))
+    {
+        return Err(Ineligible::KindUnsupported);
     }
-    if !q.caps.supported_kinds.is_empty() && !q.caps.supported_kinds.contains(&kind) {
-        return false;
+    if job_family(job).is_some_and(|d| q.rejected_families.contains(&family_case(d))) {
+        return Err(Ineligible::FamilyRejected);
     }
-    if kind == JobKind::IsingGenerate as i32 && !q.caps.accepts_leases() {
-        return false;
+    let is_lease = kind == JobKind::IsingGenerate as i32;
+    if is_lease {
+        check_lease_generator(&q.caps, job.generator.as_ref())?;
     }
-    if q.caps.max_nodes > 0 && job_node_count(job, topology) > q.caps.max_nodes {
-        return false;
+    // A family lease is bounded by its revision's declared sizes, which the
+    // solver checks at admission. The base topology does not bound it.
+    if !(is_lease && job_family(job).is_some()) {
+        check_shape(&q.caps, job, topology)?;
     }
-    if q.caps.max_edges > 0 && job_edge_count(job, topology) > q.caps.max_edges {
-        return false;
-    }
-    if let Some(limit) = q.caps.max_degree.filter(|&limit| limit > 0) {
-        if job_max_degree(job, topology).is_some_and(|degree| degree > limit) {
-            return false;
+    if !is_lease {
+        if let Some(ising) = job.ising.as_ref().filter(|i| job_family_bound(i)) {
+            check_bound_job(&q.caps, ising)?;
         }
     }
-    native_compatible(&q.caps, job, topology)
+    if native_compatible(&q.caps, job, topology) {
+        Ok(())
+    } else {
+        Err(Ineligible::NativeTopology)
+    }
+}
+
+fn job_family_bound(ising: &IsingProblem) -> bool {
+    ising.family.as_ref().is_some_and(|b| b.family.is_some())
+}
+
+fn check_shape(
+    caps: &MinerCaps,
+    job: &Job,
+    topology: Option<&RoutingTopology>,
+) -> Result<(), Ineligible> {
+    if caps.max_nodes > 0 && job_node_count(job, topology) > caps.max_nodes {
+        return Err(Ineligible::Nodes);
+    }
+    if caps.max_edges > 0 && job_edge_count(job, topology) > caps.max_edges {
+        return Err(Ineligible::Edges);
+    }
+    if let Some(limit) = caps.max_degree.filter(|&limit| limit > 0) {
+        if job_max_degree(job, topology).is_some_and(|degree| degree > limit) {
+            return Err(Ineligible::Degree);
+        }
+    }
+    Ok(())
+}
+
+/// The lease's own generator must be advertised, and a family lease needs a
+/// matching `generated_families` entry.
+fn check_lease_generator(
+    caps: &MinerCaps,
+    generator: Option<&IsingProblemGenerator>,
+) -> Result<(), Ineligible> {
+    let Some(generator) = generator else {
+        return Err(Ineligible::GeneratorUnsupported);
+    };
+    if !caps.generators.contains(&generator.algorithm) {
+        return Err(Ineligible::GeneratorUnsupported);
+    }
+    if generator.algorithm != GeneratorAlgorithm::FamilyChacha8V1 as i32 {
+        return Ok(());
+    }
+    let Some(descriptor) = generator.family.as_ref() else {
+        return Err(Ineligible::Family(Code::DescriptorMissing));
+    };
+    match support_code(
+        &caps.generated_families,
+        &descriptor.family_id,
+        descriptor.revision,
+        &descriptor.params_digest,
+    ) {
+        Some(code) => Err(Ineligible::Family(code)),
+        None => Ok(()),
+    }
+}
+
+/// An explicit job with a family binding. Codes 5 and 6 mean the solver is a
+/// generic solver for this job and solves the plain model (FAM-65).
+fn check_bound_job(caps: &MinerCaps, ising: &IsingProblem) -> Result<(), Ineligible> {
+    let descriptor = ising.family.as_ref().and_then(|b| b.family.as_ref());
+    if let Some(descriptor) = descriptor {
+        let code = support_code(
+            &caps.accepted_families,
+            &descriptor.family_id,
+            descriptor.revision,
+            &descriptor.params_digest,
+        );
+        if let Some(code @ Code::ParamsRestricted) = code {
+            return Err(Ineligible::Family(code));
+        }
+    }
+    if !caps.encodings.is_empty() && !caps.encodings.contains(&ising.encoding) {
+        return Err(Ineligible::Encoding);
+    }
+    let field_limit = caps.max_local_field_milli.filter(|&limit| limit > 0);
+    let step = caps
+        .exact_resolution_milli
+        .filter(|&step| step > 0)
+        .filter(|_| {
+            caps.features
+                .iter()
+                .any(|f| f == EXACT_COEFFICIENTS_FEATURE)
+        });
+    if field_limit.is_none() && step.is_none() {
+        return Ok(());
+    }
+    let Some((h, j, edges)) = milli_coefficients(ising) else {
+        return Err(Ineligible::UnprovableLimit);
+    };
+    if let Some(step) = step.map(i64::from) {
+        for value in h.iter().chain(&j) {
+            if i64::from(*value) % step != 0 {
+                return Err(Ineligible::ExactResolution);
+            }
+        }
+    }
+    if let Some(limit) = field_limit {
+        if largest_local_field(&h, &j, edges) > u64::from(limit) {
+            return Err(Ineligible::LocalField);
+        }
+    }
+    Ok(())
+}
+
+/// Coefficients of an inline-graph `I32` problem at milli scale.
+fn milli_coefficients(
+    ising: &IsingProblem,
+) -> Option<(Vec<i32>, Vec<i32>, &quip_proto::v1::EdgeList)> {
+    let Some(ising_problem::Graph::Edges(edges)) = ising.graph.as_ref() else {
+        return None;
+    };
+    let (h, j) = crate::producer::problem::problem_milli(ising).ok()?;
+    (edges.u.len() == edges.v.len() && j.len() == edges.u.len()).then_some((h, j, edges))
+}
+
+/// The maximum over nodes of `|h_i| + sum_j |J_ij|`, in milli. A node outside
+/// `h` still collects its couplings, so a malformed job cannot hide field.
+fn largest_local_field(h: &[i32], j: &[i32], edges: &quip_proto::v1::EdgeList) -> u64 {
+    let mut field: HashMap<u32, u64> = HashMap::new();
+    for (node, value) in (0u32..).zip(h) {
+        let _ = field.insert(node, u64::from(value.unsigned_abs()));
+    }
+    for ((u, v), value) in edges.u.iter().zip(&edges.v).zip(j) {
+        for node in [*u, *v] {
+            let entry = field.entry(node).or_default();
+            *entry = entry.saturating_add(u64::from(value.unsigned_abs()));
+        }
+    }
+    field.into_values().max().unwrap_or(0)
 }
 
 fn native_compatible(caps: &MinerCaps, job: &Job, topology: Option<&RoutingTopology>) -> bool {
@@ -622,7 +918,7 @@ mod tests {
     fn caps_lease() -> MinerCaps {
         MinerCaps {
             supported_kinds: vec![JobKind::IsingSample as i32, JobKind::IsingGenerate as i32],
-            generators: vec![quip_proto::v1::GeneratorAlgorithm::Blake3Chacha8V1 as i32],
+            generators: vec![GeneratorAlgorithm::Blake3Chacha8V1 as i32],
             stream_width: 4,
             ..caps_ising()
         }
@@ -643,6 +939,7 @@ mod tests {
             min_diversity_milli: 0,
             block_number: 1,
             spec_version: 117,
+            family: None,
         };
         crate::lease::build_lease_job(&snap, [0; 32], start, 4, 1)
     }
@@ -1455,10 +1752,7 @@ mod tests {
         assert!(!r.stage_on("qpu", inline_job(2, &[(0, 1)])));
     }
 
-    fn assert_native_inline_rejected(
-        r: &mut Router,
-        mutate: impl FnOnce(&mut quip_proto::v1::IsingProblem),
-    ) {
+    fn assert_native_inline_rejected(r: &mut Router, mutate: impl FnOnce(&mut IsingProblem)) {
         let mut job = inline_job(2, &[(0, 1)]);
         if let Some(ising) = job.ising.as_mut() {
             mutate(ising);

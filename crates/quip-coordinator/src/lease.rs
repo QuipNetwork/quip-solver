@@ -2,7 +2,17 @@
 //! proof-of-work problems, and how many salts each lease names.
 
 use crate::chain::snapshot::MiningSnapshot;
-use quip_proto::v1::{GeneratorAlgorithm, IsingProblemGenerator, Job, JobKind, Provenance};
+use crate::topology::Topology;
+use ising_generators::descriptor::{admit, params_digest, AdvertisedLimits, Contract};
+use ising_generators::family::{admit_topology, generate_instance, BaseTopology};
+use ising_generators::random::derive_nonce;
+use ising_generators::Code;
+use quip_proto::v1::{
+    FamilyDescriptor, GeneratorAlgorithm, IsingProblemGenerator, Job, JobKind, Provenance,
+};
+use quip_protocol::lease::{LeaseSpec, TopologyView, Verified, VerifyError};
+use quip_protocol::scoring::energy_from_milli;
+use quip_protocol::wire::decode_spins_packed;
 
 /// Seconds of sampling one lease should hold. A lease completes only when its
 /// slowest salt does, and a screening miner can hold one salt for tens of
@@ -34,6 +44,106 @@ pub const LEASE_JOB_ID_PREFIX: &[u8] = b"lease:";
 /// and the estimate would take several rounds to climb.
 const INITIAL_SALTS_PER_SEC_PER_SLOT: f64 = 75.0;
 
+/// Family revisions this build regenerates. Empty until a solver-core release
+/// publishes the constructions, so live work stays on the legacy draw.
+pub const FAMILY_CONTRACTS: &[Contract] = &[];
+
+/// One problem family admitted for a challenge. The fields are private, so a
+/// lease cannot change a descriptor that passed admission.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChallengeFamily {
+    descriptor: FamilyDescriptor,
+    topology_order_digest: [u8; 32],
+}
+
+impl ChallengeFamily {
+    /// Commit to `params` and check the descriptor against `contracts` and the
+    /// ordered `topology`.
+    ///
+    /// # Errors
+    /// Returns the family code of the first failed admission check.
+    pub fn admit(
+        contracts: &[Contract],
+        family_id: &str,
+        revision: u32,
+        params: Vec<u8>,
+        topology: &Topology,
+    ) -> Result<Self, Code> {
+        let digest = params_digest(&params);
+        let base = BaseTopology::new(topology.nodes.clone(), &topology.edge_pairs())
+            .map_err(|_| Code::TopologyIncompatible)?;
+        let admitted = admit(contracts, family_id.as_bytes(), revision, &params, &digest)?;
+        let _ = admit_topology(
+            &admitted,
+            &base,
+            base.order_digest(),
+            &AdvertisedLimits::default(),
+        )?;
+        let topology_order_digest = *base.order_digest();
+        Ok(Self {
+            descriptor: FamilyDescriptor {
+                family_id: family_id.to_owned(),
+                revision,
+                params,
+                params_digest: digest.to_vec(),
+            },
+            topology_order_digest,
+        })
+    }
+
+    /// The admitted descriptor.
+    #[must_use]
+    pub fn descriptor(&self) -> &FamilyDescriptor {
+        &self.descriptor
+    }
+
+    /// Digest of the node and edge order the descriptor was admitted on.
+    #[must_use]
+    pub const fn topology_order_digest(&self) -> &[u8; 32] {
+        &self.topology_order_digest
+    }
+
+    /// Bytes that identify this family binding in a challenge key.
+    #[must_use]
+    pub fn commitment(&self) -> [u8; 32] {
+        let mut h = blake3::Hasher::new();
+        let _ = h.update(self.descriptor.family_id.as_bytes());
+        let _ = h.update(&[0]);
+        let _ = h.update(&self.descriptor.revision.to_le_bytes());
+        let _ = h.update(&self.descriptor.params_digest);
+        let _ = h.update(&self.topology_order_digest);
+        *h.finalize().as_bytes()
+    }
+}
+
+/// What lease verification needs to know about the session topology.
+#[derive(Debug)]
+pub struct LeaseTopology {
+    view: TopologyView,
+    base: BaseTopology,
+    contracts: &'static [Contract],
+}
+
+impl LeaseTopology {
+    /// Prepare `topology` once, so a result does not rebuild it.
+    ///
+    /// # Errors
+    /// Returns a message when the topology cannot back lease verification.
+    pub fn from_topology(
+        topology: &Topology,
+        contracts: &'static [Contract],
+    ) -> Result<Self, String> {
+        let view = TopologyView::from_proto(&topology.to_proto()).map_err(|e| format!("{e:?}"))?;
+        let base = BaseTopology::new(topology.nodes.clone(), &topology.edge_pairs())
+            .map_err(|e| format!("{e:?}"))?;
+        Ok(Self {
+            view,
+            base,
+            contracts,
+        })
+    }
+}
+
 /// Unique `job_id` for the lease whose first counter is `salt_start`. The feeder's
 /// counter never repeats within a process, so neither does the id.
 #[must_use]
@@ -52,7 +162,8 @@ pub fn is_lease(job: &Job) -> bool {
 /// An `ISING_GENERATE` job naming counters `salt_start..salt_start + salt_count`
 /// over `snap`'s topology and round. `base_salt` is all zeros, so salt `i`
 /// equals the counter salt of `salt_start + i`, the salt a plain proof-of-work
-/// job would use.
+/// job would use. A snapshot with a family issues a family lease and has no
+/// fallback to the legacy draw.
 #[must_use]
 pub fn build_lease_job(
     snap: &MiningSnapshot,
@@ -61,6 +172,14 @@ pub fn build_lease_job(
     salt_count: u64,
     generation: u64,
 ) -> Job {
+    let (algorithm, family, topology_order_digest) = match &snap.family {
+        Some(family) => (
+            GeneratorAlgorithm::FamilyChacha8V1,
+            Some(family.descriptor().clone()),
+            family.topology_order_digest().to_vec(),
+        ),
+        None => (GeneratorAlgorithm::Blake3Chacha8V1, None, vec![]),
+    };
     Job {
         job_id: lease_job_id(salt_start),
         kind: JobKind::IsingGenerate as i32,
@@ -72,13 +191,15 @@ pub fn build_lease_job(
             order_id: vec![],
         }),
         generator: Some(IsingProblemGenerator {
-            algorithm: GeneratorAlgorithm::Blake3Chacha8V1 as i32,
+            algorithm: algorithm as i32,
             topology_hash: snap.topology_hash.clone(),
             last_proof_block_hash: snap.last_proof_block_hash.to_vec(),
             miner_account: miner_identity.to_vec(),
             base_salt: vec![0u8; 32],
             salt_start,
             salt_count,
+            family,
+            topology_order_digest,
         }),
     }
 }
@@ -134,19 +255,29 @@ const AUTHENTICITY_ONLY: quip_protocol::target::Target = quip_protocol::target::
 /// Returns the verification error when the result is not authentic.
 pub fn verify_and_select(
     generator: &IsingProblemGenerator,
-    topology: &quip_protocol::lease::TopologyView,
+    topology: &LeaseTopology,
     target: &quip_proto::v1::SetTarget,
     result: &quip_proto::v1::Result,
-) -> Result<(quip_protocol::lease::Verified, crate::validate::Validated), String> {
-    let verified =
-        quip_protocol::lease::verify_lease_result(generator, topology, &AUTHENTICITY_ONLY, result)
-            .map_err(|e| e.to_string())?;
+) -> Result<(Verified, crate::validate::Validated), String> {
+    let (verified, num_nodes) = if generator.algorithm == GeneratorAlgorithm::FamilyChacha8V1 as i32
+    {
+        verify_family_result(generator, topology, result)?
+    } else {
+        let verified = quip_protocol::lease::verify_lease_result(
+            generator,
+            &topology.view,
+            &AUTHENTICITY_ONLY,
+            result,
+        )
+        .map_err(|e| e.to_string())?;
+        (verified, topology.view.num_nodes)
+    };
     // Verification decoded and rescored every read, so neither step fails here.
     let (rows, energies): (Vec<Vec<i8>>, Vec<i64>) = result
         .solutions
         .iter()
         .filter_map(|s| {
-            quip_protocol::wire::decode_spins_packed(&s.spins, topology.num_nodes)
+            decode_spins_packed(&s.spins, num_nodes)
                 .ok()
                 .map(|spins| (spins, s.energy_milli))
         })
@@ -154,6 +285,76 @@ pub fn verify_and_select(
     let gates = crate::validate::gates_from_target(Some(target));
     let validated = crate::validate::validate_scored(&rows, &energies, &gates);
     Ok((verified, validated))
+}
+
+/// Regenerate the reported salt's instance from the lease descriptor and
+/// rescore every read. The instance node count is returned because a family
+/// instance need not have the base topology's width.
+fn verify_family_result(
+    generator: &IsingProblemGenerator,
+    topology: &LeaseTopology,
+    result: &quip_proto::v1::Result,
+) -> Result<(Verified, usize), String> {
+    let spec = LeaseSpec::from_proto(generator).map_err(|e| e.to_string())?;
+    let salt: [u8; 32] = result
+        .salt
+        .as_slice()
+        .try_into()
+        .map_err(|_| VerifyError::SaltOutsideLease.to_string())?;
+    if spec.index_of(&salt).is_none() {
+        return Err(VerifyError::SaltOutsideLease.to_string());
+    }
+    let nonce: [u8; 32] = result
+        .nonce
+        .as_slice()
+        .try_into()
+        .map_err(|_| VerifyError::NonceMismatch.to_string())?;
+    if derive_nonce(spec.last_proof_block_hash, spec.miner_account, salt) != nonce {
+        return Err(VerifyError::NonceMismatch.to_string());
+    }
+    let descriptor = generator
+        .family
+        .as_ref()
+        .ok_or_else(|| Code::DescriptorMissing.to_string())?;
+    let admitted = admit(
+        topology.contracts,
+        descriptor.family_id.as_bytes(),
+        descriptor.revision,
+        &descriptor.params,
+        &descriptor.params_digest,
+    )
+    .map_err(|code| code.to_string())?;
+    let bounds = admit_topology(
+        &admitted,
+        &topology.base,
+        &generator.topology_order_digest,
+        &AdvertisedLimits::default(),
+    )
+    .map_err(|code| code.to_string())?;
+    let instance = generate_instance(&admitted, &topology.base, &bounds, nonce)
+        .map_err(|fault| format!("salt gives no instance: {fault:?}"))?;
+
+    let num_nodes = instance.node_ids().len();
+    let mut edges = Vec::with_capacity(instance.edges().len());
+    for &(u, v) in instance.edges() {
+        edges.push((u as usize, v as usize));
+    }
+    let mut rows = Vec::with_capacity(result.solutions.len());
+    for (index, solution) in result.solutions.iter().enumerate() {
+        let spins = decode_spins_packed(&solution.spins, num_nodes)
+            .map_err(|_| VerifyError::MalformedSpins { index }.to_string())?;
+        // A lease salt reports the offset in its energy (FAM-52).
+        let energy = energy_from_milli(&spins, instance.h(), instance.j(), &edges)
+            .saturating_add(instance.offset_milli());
+        if energy != solution.energy_milli {
+            return Err(VerifyError::EnergyMismatch { index }.to_string());
+        }
+        rows.push((spins, energy));
+    }
+    let proof: Vec<(&[i8], i64)> = rows.iter().map(|(s, e)| (s.as_slice(), *e)).collect();
+    let stats = quip_protocol::target::validate_proof_set(&proof, &AUTHENTICITY_ONLY)
+        .map_err(|e| format!("{e:?}"))?;
+    Ok((Verified { salt, nonce, stats }, num_nodes))
 }
 
 /// A miner's lease throughput in salts per second.
@@ -209,6 +410,7 @@ mod tests {
             min_diversity_milli: 200,
             block_number: 42,
             spec_version: 117,
+            family: None,
         }
     }
 

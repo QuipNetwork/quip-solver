@@ -126,6 +126,11 @@ impl WinStash {
     /// Insert a candidate if it becomes viable within the horizon and ranks in
     /// the top-K by energy (lowest wins). Returns whether it was kept.
     pub fn insert(&mut self, cand: Candidate) -> bool {
+        // A result verified just before a reseed belongs to the old challenge
+        // and family. Mempool work has generation 0 and no round to match.
+        if cand.is_pow && cand.generation != self.generation {
+            return false;
+        }
         if self.viability_block(cand.best_energy_milli).is_none() {
             return false; // never clears within the horizon → not worth holding
         }
@@ -288,6 +293,25 @@ mod tests {
             device_access_time_us: 0,
             submitted: false,
         }
+    }
+
+    #[test]
+    fn a_proof_of_work_candidate_from_another_generation_is_refused() {
+        let mut stash = stash_with(Some(model()), 0, 3);
+        let mut stale = cand(1, -60_000);
+        stale.generation = 2;
+        assert!(!stash.insert(stale));
+        assert!(stash.is_empty());
+        assert!(stash.insert(cand(2, -60_000)), "the current generation");
+    }
+
+    #[test]
+    fn a_mempool_candidate_has_no_generation_to_match() {
+        let mut stash = stash_with(Some(model()), 0, 3);
+        let mut mempool = cand(1, -60_000);
+        mempool.generation = 0;
+        mempool.is_pow = false;
+        assert!(stash.insert(mempool));
     }
 
     fn job_byte(c: &Candidate) -> u8 {

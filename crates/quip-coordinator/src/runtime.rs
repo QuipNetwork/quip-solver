@@ -1020,7 +1020,7 @@ pub async fn feeder_loop<C>(
                 let lease_width = st
                     .router
                     .caps(&id)
-                    .filter(|c| c.accepts_leases())
+                    .filter(|c| snap.family.is_some() || c.accepts_leases())
                     .map(|c| c.stream_width);
                 // Lease salts per second, for the heartbeat. Zero for a miner
                 // that takes plain jobs.
