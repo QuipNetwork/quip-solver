@@ -618,7 +618,7 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 [[package]]
 name = "binary-merkle-tree"
 version = "16.1.1"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=30810786a6610de8798594bbc5d4f00670744c6d#30810786a6610de8798594bbc5d4f00670744c6d"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
 dependencies = [
  "hash-db",
  "log",
@@ -2056,6 +2056,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
+name = "ising-generators"
+version = "0.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fcb6043563e84b577d7a7562a313f13075337d2419706a0ed380ae9b3b11fd05"
+dependencies = [
+ "blake3",
+]
+
+[[package]]
 name = "itertools"
 version = "0.10.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2827,9 +2836,9 @@ dependencies = [
 
 [[package]]
 name = "pqhybridsign"
-version = "0.0.0-rc9"
+version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f372f042590c68330e61de50d72d251cde2b21fea64838c93e709075da79b927"
+checksum = "6451af32d85eac7827d3d03eb2319579051bc891394c994316a8db33b66a16ab"
 dependencies = [
  "curve25519-dalek",
  "ed25519-zebra",
@@ -2936,8 +2945,8 @@ dependencies = [
 
 [[package]]
 name = "quantum-validation"
-version = "0.3.0"
-source = "git+https://gitlab.com/quip.network/quip-validator.git?rev=7754efa2bbc42cfcf60bb21af8d22b29bd30b67c#7754efa2bbc42cfcf60bb21af8d22b29bd30b67c"
+version = "0.4.1"
+source = "git+https://gitlab.com/quip.network/quip-validator.git?tag=v0.4.1#cb09fe643630adbc503e3f5255353c098aae52e6"
 dependencies = [
  "blake3",
  "libm",
@@ -3007,7 +3016,7 @@ dependencies = [
 
 [[package]]
 name = "quip-coordinator"
-version = "0.3.5-rc13"
+version = "0.3.7"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -3017,6 +3026,7 @@ dependencies = [
  "futures",
  "getrandom 0.2.17",
  "hyper-util",
+ "ising-generators",
  "jsonrpsee",
  "libm",
  "parity-scale-codec",
@@ -3024,6 +3034,7 @@ dependencies = [
  "quantum-validation",
  "quip-proto",
  "quip-protocol",
+ "quip-solver-conformance",
  "quip-transaction-crypto",
  "quip-transaction-crypto-core",
  "rand 0.8.7",
@@ -3047,7 +3058,7 @@ dependencies = [
 [[package]]
 name = "quip-crypto-primitives"
 version = "0.1.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=30810786a6610de8798594bbc5d4f00670744c6d#30810786a6610de8798594bbc5d4f00670744c6d"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
 dependencies = [
  "hkdf",
  "parity-scale-codec",
@@ -3064,7 +3075,7 @@ dependencies = [
 [[package]]
 name = "quip-crypto-primitives-core"
 version = "0.1.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=30810786a6610de8798594bbc5d4f00670744c6d#30810786a6610de8798594bbc5d4f00670744c6d"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
 dependencies = [
  "ed25519-zebra",
  "fips204",
@@ -3093,9 +3104,9 @@ dependencies = [
 
 [[package]]
 name = "quip-proto"
-version = "0.0.3"
+version = "0.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ba0bb2f044ee9716053b85cf17ae7ee71f60a88a2c13a4517ae71932c978132"
+checksum = "02ff0b04ded49f49ada8e21a87fa0d58d5e180b8c3ac9f74a6f721e171488556"
 dependencies = [
  "prost",
  "tonic",
@@ -3103,25 +3114,45 @@ dependencies = [
 
 [[package]]
 name = "quip-protocol"
-version = "0.0.3"
+version = "0.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02fd183f280108004811f34cb2520e448bf104fad8a1cd3d985ad474c96cdf43"
+checksum = "0fc54ac969c76e194b05b2e108289317868c2ed63a4b67e9c9b242258a039c39"
 dependencies = [
- "blake3",
+ "ising-generators",
  "quip-proto",
 ]
 
 [[package]]
-name = "quip-solver-core"
-version = "0.0.3"
+name = "quip-solver-conformance"
+version = "0.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "399d68183bcd24f38f8782ce8f1b83508afcbe269faa5a8ab9294e6ba97ce93e"
+checksum = "549a8b878c8cb533b7d49114d1743e8d9e5ed8c3593048d2d13887829b809502"
+dependencies = [
+ "hyper-util",
+ "ising-generators",
+ "prost",
+ "quip-proto",
+ "quip-protocol",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tower 0.5.3",
+]
+
+[[package]]
+name = "quip-solver-core"
+version = "0.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "240fcd83c3819ff6defbf49d3bbf68e3965b085df3f6afe9ef0342398e0947b2"
 dependencies = [
  "base64",
  "clap",
  "getrandom 0.2.17",
  "half",
  "hyper-util",
+ "ising-generators",
  "prost",
  "quip-proto",
  "quip-protocol",
@@ -3149,8 +3180,8 @@ dependencies = [
 
 [[package]]
 name = "quip-transaction-crypto"
-version = "0.3.0"
-source = "git+https://gitlab.com/quip.network/quip-validator.git?rev=7754efa2bbc42cfcf60bb21af8d22b29bd30b67c#7754efa2bbc42cfcf60bb21af8d22b29bd30b67c"
+version = "0.4.1"
+source = "git+https://gitlab.com/quip.network/quip-validator.git?tag=v0.4.1#cb09fe643630adbc503e3f5255353c098aae52e6"
 dependencies = [
  "log",
  "parity-scale-codec",
@@ -3164,7 +3195,7 @@ dependencies = [
 [[package]]
 name = "quip-transaction-crypto-core"
 version = "0.1.0"
-source = "git+https://gitlab.com/quip.network/quip-validator.git?rev=7754efa2bbc42cfcf60bb21af8d22b29bd30b67c#7754efa2bbc42cfcf60bb21af8d22b29bd30b67c"
+source = "git+https://gitlab.com/quip.network/quip-validator.git?tag=v0.4.1#cb09fe643630adbc503e3f5255353c098aae52e6"
 dependencies = [
  "bip39",
  "blake2",
@@ -3955,7 +3986,7 @@ dependencies = [
 [[package]]
 name = "sp-application-crypto"
 version = "45.0.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=30810786a6610de8798594bbc5d4f00670744c6d#30810786a6610de8798594bbc5d4f00670744c6d"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
 dependencies = [
  "parity-scale-codec",
  "scale-info",
@@ -3967,7 +3998,7 @@ dependencies = [
 [[package]]
 name = "sp-arithmetic"
 version = "28.0.1"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=30810786a6610de8798594bbc5d4f00670744c6d#30810786a6610de8798594bbc5d4f00670744c6d"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
 dependencies = [
  "docify",
  "integer-sqrt",
@@ -3981,7 +4012,7 @@ dependencies = [
 [[package]]
 name = "sp-core"
 version = "40.0.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=30810786a6610de8798594bbc5d4f00670744c6d#30810786a6610de8798594bbc5d4f00670744c6d"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
 dependencies = [
  "ark-vrf",
  "array-bytes",
@@ -4018,7 +4049,7 @@ dependencies = [
  "sp-std",
  "sp-storage",
  "ss58-registry",
- "substrate-bip39 0.6.1 (git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=30810786a6610de8798594bbc5d4f00670744c6d)",
+ "substrate-bip39 0.6.1 (git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1)",
  "thiserror 1.0.69",
  "tracing",
  "w3f-bls",
@@ -4028,7 +4059,7 @@ dependencies = [
 [[package]]
 name = "sp-crypto-hashing"
 version = "0.1.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=30810786a6610de8798594bbc5d4f00670744c6d#30810786a6610de8798594bbc5d4f00670744c6d"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
 dependencies = [
  "blake2b_simd",
  "byteorder",
@@ -4041,7 +4072,7 @@ dependencies = [
 [[package]]
 name = "sp-debug-derive"
 version = "15.0.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=30810786a6610de8798594bbc5d4f00670744c6d#30810786a6610de8798594bbc5d4f00670744c6d"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
 dependencies = [
  "proc-macro-warning",
  "proc-macro2",
@@ -4052,7 +4083,7 @@ dependencies = [
 [[package]]
 name = "sp-externalities"
 version = "0.32.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=30810786a6610de8798594bbc5d4f00670744c6d#30810786a6610de8798594bbc5d4f00670744c6d"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
 dependencies = [
  "environmental",
  "parity-scale-codec",
@@ -4062,7 +4093,7 @@ dependencies = [
 [[package]]
 name = "sp-io"
 version = "45.0.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=30810786a6610de8798594bbc5d4f00670744c6d#30810786a6610de8798594bbc5d4f00670744c6d"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
 dependencies = [
  "bytes",
  "docify",
@@ -4088,7 +4119,7 @@ dependencies = [
 [[package]]
 name = "sp-keystore"
 version = "0.46.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=30810786a6610de8798594bbc5d4f00670744c6d#30810786a6610de8798594bbc5d4f00670744c6d"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
 dependencies = [
  "parity-scale-codec",
  "parking_lot",
@@ -4099,7 +4130,7 @@ dependencies = [
 [[package]]
 name = "sp-panic-handler"
 version = "13.0.2"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=30810786a6610de8798594bbc5d4f00670744c6d#30810786a6610de8798594bbc5d4f00670744c6d"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
 dependencies = [
  "backtrace",
  "regex",
@@ -4108,7 +4139,7 @@ dependencies = [
 [[package]]
 name = "sp-runtime"
 version = "46.0.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=30810786a6610de8798594bbc5d4f00670744c6d#30810786a6610de8798594bbc5d4f00670744c6d"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
 dependencies = [
  "binary-merkle-tree",
  "bytes",
@@ -4139,7 +4170,7 @@ dependencies = [
 [[package]]
 name = "sp-runtime-interface"
 version = "34.0.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=30810786a6610de8798594bbc5d4f00670744c6d#30810786a6610de8798594bbc5d4f00670744c6d"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
 dependencies = [
  "bytes",
  "impl-trait-for-tuples",
@@ -4157,7 +4188,7 @@ dependencies = [
 [[package]]
 name = "sp-runtime-interface-proc-macro"
 version = "21.0.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=30810786a6610de8798594bbc5d4f00670744c6d#30810786a6610de8798594bbc5d4f00670744c6d"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
 dependencies = [
  "Inflector",
  "expander",
@@ -4170,7 +4201,7 @@ dependencies = [
 [[package]]
 name = "sp-state-machine"
 version = "0.50.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=30810786a6610de8798594bbc5d4f00670744c6d#30810786a6610de8798594bbc5d4f00670744c6d"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
 dependencies = [
  "hash-db",
  "log",
@@ -4190,12 +4221,12 @@ dependencies = [
 [[package]]
 name = "sp-std"
 version = "14.0.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=30810786a6610de8798594bbc5d4f00670744c6d#30810786a6610de8798594bbc5d4f00670744c6d"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
 
 [[package]]
 name = "sp-storage"
 version = "23.0.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=30810786a6610de8798594bbc5d4f00670744c6d#30810786a6610de8798594bbc5d4f00670744c6d"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
 dependencies = [
  "impl-serde",
  "parity-scale-codec",
@@ -4207,7 +4238,7 @@ dependencies = [
 [[package]]
 name = "sp-tracing"
 version = "19.0.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=30810786a6610de8798594bbc5d4f00670744c6d#30810786a6610de8798594bbc5d4f00670744c6d"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
 dependencies = [
  "parity-scale-codec",
  "regex",
@@ -4219,7 +4250,7 @@ dependencies = [
 [[package]]
 name = "sp-trie"
 version = "43.0.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=30810786a6610de8798594bbc5d4f00670744c6d#30810786a6610de8798594bbc5d4f00670744c6d"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
 dependencies = [
  "ahash",
  "foldhash 0.1.5",
@@ -4244,7 +4275,7 @@ dependencies = [
 [[package]]
 name = "sp-wasm-interface"
 version = "24.0.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=30810786a6610de8798594bbc5d4f00670744c6d#30810786a6610de8798594bbc5d4f00670744c6d"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
 dependencies = [
  "anyhow",
  "impl-trait-for-tuples",
@@ -4255,7 +4286,7 @@ dependencies = [
 [[package]]
 name = "sp-weights"
 version = "34.0.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=30810786a6610de8798594bbc5d4f00670744c6d#30810786a6610de8798594bbc5d4f00670744c6d"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
 dependencies = [
  "bounded-collections",
  "parity-scale-codec",
@@ -4347,7 +4378,7 @@ dependencies = [
 [[package]]
 name = "substrate-bip39"
 version = "0.6.1"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=30810786a6610de8798594bbc5d4f00670744c6d#30810786a6610de8798594bbc5d4f00670744c6d"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
 dependencies = [
  "hmac",
  "pbkdf2",
@@ -4359,7 +4390,7 @@ dependencies = [
 [[package]]
 name = "substrate-prometheus-endpoint"
 version = "0.17.7"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=30810786a6610de8798594bbc5d4f00670744c6d#30810786a6610de8798594bbc5d4f00670744c6d"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
 dependencies = [
  "http-body-util",
  "hyper",

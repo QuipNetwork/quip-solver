@@ -16,6 +16,13 @@ pub struct LeaseSource {
 }
 
 impl LeaseSource {
+    /// Bind every lease from this source to `family`.
+    #[must_use]
+    pub fn with_family(mut self, family: crate::lease::ChallengeFamily) -> Self {
+        self.snapshot.family = Some(family);
+        self
+    }
+
     /// Build the source. A `lease_size` of zero means one salt per lease.
     #[must_use]
     pub fn new(

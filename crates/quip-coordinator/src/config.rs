@@ -49,6 +49,12 @@ pub enum ConfigError {
         /// The ordinal both sections resolve to.
         device: usize,
     },
+    /// `[miner].solver_pin` is neither a configured miner id nor a valid
+    /// `solver_id`, so it could never match a miner.
+    InvalidSolverPin {
+        /// The pin, as written in the config.
+        pin: String,
+    },
 }
 
 impl std::fmt::Display for ConfigError {
@@ -65,6 +71,10 @@ impl std::fmt::Display for ConfigError {
                 f,
                 "bad [cuda.{key}] section: the key must be a CUDA device index \
                  (a non-negative integer)"
+            ),
+            Self::InvalidSolverPin { pin } => write!(
+                f,
+                "[miner].solver_pin {pin:?} is neither a configured miner id nor a valid solver_id"
             ),
             Self::DuplicateCudaDevice { device } => {
                 write!(f, "two [cuda] sections resolve to device {device}")
@@ -128,6 +138,9 @@ pub struct CoordinatorConfig {
     pub auto_mine: bool,
     /// Log level advertised in the descriptor. Defaults to `Info`.
     pub node_log_level: NodeLogLevel,
+    /// Limits family work to this miner id or `solver_id`. `None` keeps every
+    /// compatible miner.
+    pub solver_pin: Option<String>,
 }
 
 /// `[dashboard]` config: where to serve the attempt logs and where they live.
@@ -594,6 +607,15 @@ pub fn parse_config(toml_text: &str) -> Result<CoordinatorConfig, ConfigError> {
     }
 
     let identity = parse_miner_identity(miner)?;
+    let solver_pin = optional_str(miner, "solver_pin");
+    if let Some(pin) = &solver_pin {
+        let names_miner = launch.iter().any(|entry| entry.miner_id == *pin);
+        let valid_id = quip_protocol::family::solver_id_class(pin.as_bytes())
+            == quip_protocol::family::SolverIdClass::Valid;
+        if !names_miner && !valid_id {
+            return Err(ConfigError::InvalidSolverPin { pin: pin.clone() });
+        }
+    }
 
     Ok(CoordinatorConfig {
         validators,
@@ -611,6 +633,7 @@ pub fn parse_config(toml_text: &str) -> Result<CoordinatorConfig, ConfigError> {
         public_port: identity.public_port,
         auto_mine: identity.auto_mine,
         node_log_level: identity.node_log_level,
+        solver_pin,
     })
 }
 
@@ -1259,6 +1282,30 @@ idle_after_s = 600
 
     fn miner_cpu(extra: &str) -> String {
         format!("[miner]\nsigner_key = \"//Alice\"\n{extra}\n[cpu]\n")
+    }
+
+    const IDENTITY: &str = "public_host = \"h\"\npublic_port = 1\n";
+
+    #[test]
+    fn solver_pin_is_optional_and_accepts_a_solver_id() {
+        let unset = parse_config(&miner_cpu(IDENTITY)).unwrap();
+        assert_eq!(unset.solver_pin, None);
+        let set = parse_config(&miner_cpu(&format!(
+            "{IDENTITY}solver_pin = \"quip-cpu-sa/1\"\n"
+        )))
+        .unwrap();
+        assert_eq!(set.solver_pin.as_deref(), Some("quip-cpu-sa/1"));
+    }
+
+    #[test]
+    fn solver_pin_that_can_never_match_is_refused() {
+        let err = parse_config(&miner_cpu(&format!("{IDENTITY}solver_pin = \"Bad Pin\"\n"))).err();
+        assert_eq!(
+            err,
+            Some(ConfigError::InvalidSolverPin {
+                pin: "Bad Pin".to_owned()
+            })
+        );
     }
 
     #[test]

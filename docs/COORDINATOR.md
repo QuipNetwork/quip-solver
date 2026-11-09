@@ -439,20 +439,26 @@ threshold now may clear it later in the same round, so the session path
 stashes it and the feeder submits it at the projected block. `decay.rs`
 mirrors the chain's rule so the projection needs no per-block RPC.
 
-The chain has shipped two rules. Runtime 117 steps the threshold once per
+The chain has shipped three rules. Runtime 117 steps the threshold once per
 100-block epoch by 2.5% of the room to the easy cap. Runtime 118
 (quip-validator !87) eases every block in closed form. Past 100 blocks in a
 round it eases at twice the baseline rate. That doubling holds while the
 room to the easy cap exceeds the 40,000 milli floor crossover. Under the
 crossover both phases step 1,000 milli per epoch and the overdue term adds
-nothing. `DecayAlgorithm` names the two. `DecayModel` holds the stored base difficulty, the curve, the epoch
-length, and the rule, and answers the threshold at any elapsed block.
+nothing. Runtime 119 (quip-validator v0.4.0) holds the threshold at the
+stored base through 100 blocks. From block 101 it eases every block at the
+combined rate, `1 - 0.975 * 0.975` (4.9375%) of the room per epoch, for the
+blocks past 100 only. The 1,000 milli floor per epoch still applies near the
+easy cap. `DecayAlgorithm` names the three. `DecayModel` holds the stored
+base difficulty, the curve, the epoch length, and the rule, and answers the
+threshold at any elapsed block.
 
 `fetch_mining_snapshot` reads `state_getRuntimeVersion` at the snapshot
-block. `DecayAlgorithm::for_spec_version` picks the rule: continuous at
-spec 118 and later, stepwise before. The feeder builds the model at each
-reseed. On every poll it swaps the rule into the stash when the spec version
-changes. The stash keeps its candidates across the swap. The upgrade needs
+block. `DecayAlgorithm::for_spec_version` picks the rule from the
+`spec_version`. Version 119 and later use the gated rule. Version 118 uses
+the continuous rule, and earlier versions use the stepwise rule. The feeder
+builds the model at each reseed. On every poll it swaps the rule into the
+stash when the `spec_version` changes. The stash keeps its candidates across the swap. The upgrade needs
 no restart.
 
 `WinStash::viability_block` finds the first block whose threshold exceeds a
@@ -556,6 +562,38 @@ selects the proof set against the live target with the same gates as a plain
 result. It submits a `Result` that clears the target and offers one that misses
 to the win-time stash. `LeaseDone` completes the lease. If `salts_done` is greater
 than zero, the miner counts as a round participant.
+
+## Problem families
+
+Family work is inactive in production. `FAMILY_CONTRACTS` in
+`crates/quip-coordinator/src/lease.rs` is empty, and the chain snapshot sets no
+family. A snapshot with a family issues only family leases and has no legacy
+fallback.
+
+`ChallengeFamily::admit` checks a descriptor against the contract table and the
+ordered topology. The descriptor is then fixed for that challenge.
+`head_state_key` includes the family, so a family change starts a new generation.
+The new generation cancels old work and resets the win-time stash.
+
+The router sends a family lease only to a miner that advertises the generator
+and a matching `generated_families` entry. The miner checks the family size
+bounds at admission. An explicit job with a family binding can go to a generic
+sampler, and the router applies the sampler's encoding, local-field, and
+exact-resolution limits. A rejection applies to one family, revision, and
+parameter set.
+
+`[miner].solver_pin` limits family work to one miner id or `solver_id`. The pin
+does not affect legacy work and does not admit an incompatible miner.
+
+The coordinator regenerates each family `Result` from the descriptor of the
+in-flight lease. It rejects a wrong salt, nonce, descriptor, topology order,
+spin vector, or energy. The reported energy must include the instance offset. An
+authentic `Result` that misses the target follows the same stash path as a
+legacy `Result`.
+
+`drive --source lease` accepts `--family-id`, `--family-revision`, and
+`--family-params <file>`. These options refuse every descriptor until
+`FAMILY_CONTRACTS` lists the family.
 
 ## Supervision and shutdown
 

@@ -1064,6 +1064,7 @@ impl ChainClient for RealChainClient {
             min_diversity_milli: difficulty.min_diversity_milli,
             block_number,
             spec_version,
+            family: None,
         };
 
         if let Ok(mut g) = self.last_snapshot.lock() {
@@ -2207,6 +2208,7 @@ mod tests {
             min_diversity_milli: 0,
             block_number: 1,
             spec_version,
+            family: None,
         }
     }
 

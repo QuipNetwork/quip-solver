@@ -525,6 +525,8 @@ mod tests {
                 base_salt: vec![0; 32],
                 salt_start: 5,
                 salt_count: count,
+                family: None,
+                topology_order_digest: vec![],
             }),
             ..Default::default()
         }
