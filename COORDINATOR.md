@@ -563,6 +563,38 @@ result. It submits a `Result` that clears the target and offers one that misses
 to the win-time stash. `LeaseDone` completes the lease. If `salts_done` is greater
 than zero, the miner counts as a round participant.
 
+## Problem families
+
+Family work is inactive in production. `FAMILY_CONTRACTS` in
+`crates/quip-coordinator/src/lease.rs` is empty, and the chain snapshot sets no
+family. A snapshot with a family issues only family leases and has no legacy
+fallback.
+
+`ChallengeFamily::admit` checks a descriptor against the contract table and the
+ordered topology. The descriptor is then fixed for that challenge.
+`head_state_key` includes the family, so a family change starts a new generation.
+The new generation cancels old work and resets the win-time stash.
+
+The router sends a family lease only to a miner that advertises the generator
+and a matching `generated_families` entry. The miner checks the family size
+bounds at admission. An explicit job with a family binding can go to a generic
+sampler, and the router applies the sampler's encoding, local-field, and
+exact-resolution limits. A rejection applies to one family, revision, and
+parameter set.
+
+`[miner].solver_pin` limits family work to one miner id or `solver_id`. The pin
+does not affect legacy work and does not admit an incompatible miner.
+
+The coordinator regenerates each family `Result` from the descriptor of the
+in-flight lease. It rejects a wrong salt, nonce, descriptor, topology order,
+spin vector, or energy. The reported energy must include the instance offset. An
+authentic `Result` that misses the target follows the same stash path as a
+legacy `Result`.
+
+`drive --source lease` accepts `--family-id`, `--family-revision`, and
+`--family-params <file>`. These options refuse every descriptor until
+`FAMILY_CONTRACTS` lists the family.
+
 ## Supervision and shutdown
 
 `supervise_miner` (`supervisor.rs`) owns one miner for the run. It spawns the

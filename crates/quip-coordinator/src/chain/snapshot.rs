@@ -36,6 +36,9 @@ pub struct MiningSnapshot {
     /// Runtime `specVersion` at the snapshot block. Selects the decay rule
     /// the coordinator mirrors (`DecayAlgorithm::for_spec_version`).
     pub spec_version: u32,
+    /// Problem family bound to this challenge. `None` keeps the legacy draw.
+    /// Set once when the snapshot is built. A change is a new challenge.
+    pub family: Option<crate::lease::ChallengeFamily>,
 }
 
 /// Difficulty-decay parameters read alongside the snapshot (independent
@@ -110,6 +113,9 @@ pub fn head_state_key(snap: &MiningSnapshot) -> [u8; 32] {
     let _ = h.update(&snap.max_energy_milli.to_le_bytes());
     let _ = h.update(&snap.min_diversity_milli.to_le_bytes());
     let _ = h.update(&snap.block_number.to_le_bytes());
+    if let Some(family) = &snap.family {
+        let _ = h.update(&family.commitment());
+    }
     *h.finalize().as_bytes()
 }
 
@@ -154,6 +160,7 @@ mod tests {
             min_diversity_milli: 200,
             block_number: 42,
             spec_version: 117,
+            family: None,
         }
     }
 

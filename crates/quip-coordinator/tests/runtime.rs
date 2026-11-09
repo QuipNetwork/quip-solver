@@ -16,6 +16,7 @@
     reason = "test-local constants next to usage"
 )]
 
+use ising_generators::random::derive_nonce;
 use quip_coordinator::chain::PendingProof;
 use quip_coordinator::chain::{FakeChain, MiningSnapshot};
 use quip_coordinator::config::LaunchEntry;
@@ -24,7 +25,6 @@ use quip_coordinator::runtime::{feeder_loop, run_runtime, FeederParams, RuntimeP
 use quip_coordinator::session::CoordinatorState;
 use quip_coordinator::supervisor::BackoffPolicy;
 use quip_proto::v1::{Configure, GeneratorAlgorithm, JobKind};
-use quip_protocol::derive::derive_nonce;
 use sp_core::crypto::{AccountId32, Ss58Codec};
 use std::sync::Arc;
 use std::time::Duration;
@@ -67,6 +67,7 @@ fn trivial_snapshot() -> MiningSnapshot {
         min_diversity_milli: 0,
         block_number: 0,
         spec_version: 117,
+        family: None,
     }
 }
 
@@ -176,6 +177,7 @@ fn ising_snapshot() -> MiningSnapshot {
         min_diversity_milli: 0,
         block_number: 42,
         spec_version: 117,
+        family: None,
     }
 }
 

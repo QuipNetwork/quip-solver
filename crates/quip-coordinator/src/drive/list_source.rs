@@ -232,6 +232,7 @@ mod tests {
             min_diversity_milli: 0,
             block_number: 0,
             spec_version: 0,
+            family: None,
         }
     }
 

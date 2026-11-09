@@ -581,7 +581,7 @@ mod tests {
         assert_eq!(account_id.encode(), raw.to_vec());
     }
 
-    /// The coordinator derives job nonces with `quip_protocol::derive`, while
+    /// The coordinator derives job nonces with `ising_generators::random`, while
     /// the pallet validates them with `quantum_validation`. These are separate
     /// implementations of the same BLAKE3 composition, so a change to either
     /// one alone invalidates every proof. Cross-check them over the identity.
@@ -592,14 +592,14 @@ mod tests {
         let head = [0x33u8; 32];
         let salt = [0x44u8; 32];
 
-        let coordinator = quip_protocol::derive::derive_nonce(head, identity, salt);
+        let coordinator = ising_generators::random::derive_nonce(head, identity, salt);
         let pallet: U256 = quantum_validation::derive_nonce(&head, &identity, &salt);
         assert_eq!(pallet, U256::from_big_endian(&coordinator));
 
         // The account is not an accepted substitute for the identity anywhere
         // on this path.
         let from_account =
-            quip_protocol::derive::derive_nonce(head, signer_account_bytes(&pair), salt);
+            ising_generators::random::derive_nonce(head, signer_account_bytes(&pair), salt);
         assert_ne!(coordinator, from_account);
     }
 

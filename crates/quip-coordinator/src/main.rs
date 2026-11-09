@@ -143,6 +143,15 @@ struct DriveArgs {
     /// Salts per lease (`--source lease`). `--count` is the total salt count.
     #[arg(long, default_value_t = 64)]
     lease_size: u64,
+    /// Problem family for `--source lease`. Requires `--family-params`.
+    #[arg(long, requires = "family_params")]
+    family_id: Option<String>,
+    /// Revision of `--family-id`.
+    #[arg(long, default_value_t = 1)]
+    family_revision: u32,
+    /// File holding the canonical parameter bytes of `--family-id`.
+    #[arg(long, requires = "family_id")]
+    family_params: Option<PathBuf>,
     /// JSONL model list (`--source list`).
     #[arg(long)]
     list: Option<PathBuf>,
@@ -360,7 +369,11 @@ fn run_config_path(config: Option<PathBuf>, log_level: LogLevel) -> StdExitCode 
         return code;
     }
 
-    let state = Arc::new(Mutex::new(CoordinatorState::new()));
+    let mut coordinator_state = CoordinatorState::new();
+    coordinator_state
+        .router
+        .set_solver_pin(cfg.solver_pin.clone());
+    let state = Arc::new(Mutex::new(coordinator_state));
     // Two distinct 32-byte values come out of one signer key, and mixing them
     // up funds an address that never signs anything. A live mining coordinator
     // needs its signer key; without a usable one, warn and fall back to zeros —
@@ -652,6 +665,9 @@ fn build_jobs(
     spec: Option<TopologySpec>,
     deadline_ms: u64,
 ) -> Result<BuiltJobs, String> {
+    if args.family_id.is_some() && !matches!(args.source, DriveSourceKind::Lease) {
+        return Err("--family-id requires --source lease".to_owned());
+    }
     match args.source {
         DriveSourceKind::Random => {
             let spec = spec.ok_or("--source random requires a topology")?;
@@ -669,6 +685,19 @@ fn build_jobs(
                 u64::from(args.count),
                 args.lease_size,
             );
+            if let (Some(id), Some(path)) = (&args.family_id, &args.family_params) {
+                let params = std::fs::read(path)
+                    .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+                let family = quip_coordinator::lease::ChallengeFamily::admit(
+                    quip_coordinator::lease::FAMILY_CONTRACTS,
+                    id,
+                    args.family_revision,
+                    params,
+                    &spec.topology,
+                )
+                .map_err(|code| format!("family descriptor refused: {code}"))?;
+                source = source.with_family(family);
+            }
             let jobs = drain_all(&mut source);
             let target = set_target_from_spec(&spec, args);
             Ok((jobs, Some(spec.topology), Some(target)))
@@ -860,6 +889,9 @@ mod tests {
 
     fn drive_args(source: DriveSourceKind) -> DriveArgs {
         DriveArgs {
+            family_id: None,
+            family_revision: 1,
+            family_params: None,
             miner: PathBuf::from("miner"),
             source,
             topology: None,
