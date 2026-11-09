@@ -3,8 +3,8 @@
 This repository is the v0.3 mining stack for the
 [quip-validator](https://gitlab.com/quip.network/quip-validator) chain. It
 holds the coordinator: it follows the chain, stages Ising problems, and
-submits proofs. The solver contract — the wire protocol, the consensus
-primitives, and the shared solver harness — lives in
+submits proofs. The solver contract (the wire protocol, the consensus
+primitives, and the shared solver harness) lives in
 [quip-solver-core](https://gitlab.com/quip.network/quip-solver-core) and is
 consumed from crates.io. The miners themselves live in their own repositories.
 Consensus rules live in the chain pallet. This document maps how the pieces
@@ -13,24 +13,29 @@ fit and names the seams that keep them apart.
 For task-level detail, read the two guides this document ties together:
 `COORDINATOR.md` (the coordinator internals) and `NEWMINER.md` (adding a
 backend). The solver side is specified in quip-solver-core's `SPEC.md`.
-`docs/VERSIONING.md` covers release tags.
+`VERSIONING.md` covers release tags. `CHAINSTORAGE.md` covers the on-chain
+storage layout.
 
 ## Crate layout
 
-The workspace is a strict dependency DAG under `crates/`. Lower crates never
-import higher ones.
+The workspace members under `crates/` do not depend on each other. Each one
+depends on the solver-contract crates from crates.io.
 
 | Crate | Role | Depends on |
 |-------|------|-----------|
 | `quip-solver-exec` | Generic external-solver miner: JSON model + exec over the session protocol | `quip-solver-core` |
-| `quip-coordinator` | The `quip-coordinator` binary: chain access, feeder, router, supervisor | `quip-proto`, `quip-protocol` |
+| `quip-coordinator` | The `quip-coordinator` binary: chain access, feeder, router, supervisor | `quip-proto`, `quip-protocol`, `ising-generators` |
 | `quip-mock-miner` | Miner test double | `quip-proto`, `quip-protocol` |
 
-Three dependencies come from crates.io at v0.0.2, published from the
+Four dependencies come from crates.io at v0.0.5, published from the
 quip-solver-core repository: `quip-proto` (generated protocol types and gRPC
 service), `quip-protocol` (consensus primitives: `wire`, `session`, `scoring`,
-`derive`, `chacha8`), and `quip-solver-core` (the `Sampler` trait, session
-client, and adaptive params — it re-exports the other two).
+`chacha8`, `lease`, `diversity`, `target`, `family`), `quip-solver-core` (the
+`Sampler` trait, session client, and adaptive params, which re-exports the
+other two), and `ising-generators` (nonce derivation, problem-family
+contracts, and instance generation, which the coordinator uses to build and
+verify lease work). The coordinator's tests also use `quip-solver-conformance`
+from the same repository.
 
 `quip-coordinator` does not depend on `quip-solver-core`. The two sides share
 nothing but the wire protocol (`quip-proto`) and the codec and session
@@ -51,9 +56,10 @@ Every chain interaction sits in `crates/quip-coordinator/src/chain/` behind the
 `fetch_mining_snapshot` and `submit_proof` for proof-of-work, and
 `ensure_solver_registered`, `fetch_mempool_orders`, and `submit_solution` for
 mempool orders. Two types
-provide it: `RealChainClient` over subxt and JSON-RPC (`chain/real.rs:103`)
-and `FakeChain` for tests (`chain/fake.rs:44`). `subxt` appears in one source
-file, `chain/real.rs`. The module owns everything downstream of the seam:
+provide it: `RealChainClient` over Substrate JSON-RPC (`chain/real.rs:61`)
+and `FakeChain` for tests (`chain/fake.rs:14`). The JSON-RPC transport is
+`jsonrpsee`, wrapped in `chain/transport_jsonrpsee.rs`. The module owns
+everything downstream of the seam:
 extrinsic building, SCALE types, proof encoding, snapshot decoding, mempool
 decoding, and submission. Nothing outside `chain/` talks to the node.
 
@@ -62,35 +68,36 @@ decoding, and submission. Nothing outside `chain/` talks to the node.
 Job staging runs through three files that form one control path. `producer/`
 builds jobs: `pow.rs` derives the proof-of-work job from the chain snapshot,
 `mempool.rs` converts fetched `JobOrder`s into wire `Job`s. `runtime::feeder_loop`
-(`runtime.rs:100`) follows the chain head, bumps a generation on each new
+(`runtime.rs:604`) follows the chain head, bumps a generation on each new
 `last_proof_block_hash`, and stages jobs per miner using an adaptive window read
-off the router's drain rate (`runtime.rs:150`). `router.rs` holds the
-capability-indexed staged queues and the dispatch credits. The target design
-named a single module here; the code splits it into producer, feeder,
+off the router's drain rate (`adaptive_depth`, `runtime.rs:135`). `router.rs`
+holds the capability-indexed staged queues and the dispatch credits. The target
+design named a single module here. The code splits it into producer, feeder,
 and router. The split is deliberate: the router is a reusable queue primitive,
 and the feeder is the policy on top of it.
 
 ### 3. Spawn, kill, and the protocol kill line
 
-`supervise_miner` (`supervisor.rs:219`) starts each miner: it spawns the binary
+`supervise_miner` (`supervisor.rs:176`) starts each miner: it spawns the binary
 with a fresh per-spawn session token and applies the exit-code restart policy
 (`restart_policy`, `supervisor.rs:25`). Clean exits respawn on demand,
 operator and environment errors (64, 69, 77) never respawn, and crashes back off
 by `2^consecutive` within a failure budget. A clap usage error (2) also never
 respawns: the argv does not match the binary, and no retry can fix that.
 `supervise_miner` also ends the run: on a stop signal it sends an in-band
-`Shutdown`, waits the grace period, then kills any survivor. The protocol kill line is the `Shutdown` and `Cancel` control
-messages. The coordinator emits them (`session.rs:391` `send_cancel`,
-`session.rs:896` `shutdown_msg`); the `quip-solver-core` harness honors them
-and drains in-flight work (its session loop and `SPEC.md` section 5 cover the
-cancel semantics).
+`Shutdown`, waits the grace period, then kills any survivor. The protocol kill
+line is the `Shutdown` and `Cancel` control messages. The coordinator emits
+them (`send_cancel`, `session.rs:1141`, and `shutdown_msg`, `session.rs:1406`).
+The `quip-solver-core` harness honors them and drains in-flight work (its
+session loop and `SPEC.md` section 5, "Cancellation", cover the cancel
+semantics).
 
 ### 4. The generic miner harness
 
 `quip-solver-core` (crates.io, from the quip-solver-core repository) is the
-standard interface every miner builds on. A backend supplies a `Sampler` (the
-`sample` method is required; streaming, throttling, and config hooks have
-defaults). The crate's `run` entry point handles the `--capabilities`,
+standard interface every miner builds on. A backend supplies a `Sampler`. The
+`sample` method is required. Streaming, warm-start, family, throttling, and
+config hooks have defaults. The crate's `run` entry point handles the `--capabilities`,
 `--check`, and `--solve` modes and drives the gRPC session loop. The crate is
 library-only, with no binary of its own.
 
@@ -102,8 +109,8 @@ to a JSON model, execs a configured external solver (by file or stdin), and
 parses the solver's JSON solutions back over the same session protocol. One part
 of the target design still differs from the source:
 
-- The random, file, and lease job sources (the driver for benchmarking without a chain)
-  live coordinator-side under `drive/` (`drive/random_source.rs`,
+- The random, list, and lease job sources (the driver for benchmarking without
+  a chain) live coordinator-side under `drive/` (`drive/random_source.rs`,
   `drive/list_source.rs`, `drive/lease_source.rs`, `drive/harness.rs`), reached
   through the `drive` subcommand. They generate jobs, so the coordinator is
   their natural home, and the miner stays a pure solver.
@@ -142,8 +149,8 @@ A proof-of-work job flows through the system in one pass:
 6. `validate.rs` scores the returned set. A solution is energy-valid when its
    milli-energy is strictly below the gate floor. The coordinator accepts the
    set when `n_valid >= min_solutions` and `diversity_milli >= min_diversity_milli`
-   (`validate.rs:143`). A mempool result uses the gates of its own order, not
-   the round target.
+   (`check_proof_gates`, `validate.rs:131`). A mempool result uses the gates of
+   its own order, not the round target.
 7. On an accepted proof-of-work set, the coordinator submits the
    `QuantumPow.submit_proof` extrinsic through `ChainClient`. An accepted
    mempool set goes to `QuantumComputeMempool.submit_solution` with its
@@ -172,26 +179,28 @@ Provenance marks proof-of-work or mempool work and carries the source
 
 ## Parameters and where they live
 
-The harness owns the adaptive-parameter mechanism; the layer that knows the
+The harness owns the adaptive-parameter mechanism. The layer that knows the
 concrete values supplies them.
 
 `quip-solver-core`'s `adapt` module holds the ground-state-energy model that
 turns a difficulty target into `num_reads` and `num_sweeps`. The
-`quip-solver-conformance` crate's adapt vectors pin cross-language parity.
+`quip-solver-conformance` crate's vectors pin cross-language parity.
 
 Per-backend bounds are an `AdaptBounds` struct, not a fixed table in this
-repository. Each miner binary constructs its own; `quip-solver-exec` uses
+repository. Each miner binary constructs its own. `quip-solver-exec` uses
 conservative CPU-SA-like bounds (`crates/quip-solver-exec/src/main.rs`). The
 CUDA, Metal, and D-Wave bounds live in their own repositories.
 
 Genesis and consensus defaults live in the chain pallet, not here. The
-coordinator reads them from the mining snapshot. The devnet acceptance test
-exercises the defaults it expects to receive: `min_solutions = 5` and
-`min_diversity = 0.200` (`n = 5`, `n_milli = 200` in
-`tests/devnet_submit.rs`). For the difficulty energy target, the per-topology
-energy ranges, and the mempool section-election rules, read the pallet in
-quip-validator. This repository consumes those values across the `ChainClient`
-seam and doesn't define them.
+coordinator reads them from the mining snapshot. The one place this repository
+names difficulty values is `seed-chain`: `DEFAULT_SEED_DIFFICULTY`
+(`chain/seed.rs:101`) writes `min_solutions = 5`,
+`max_energy_milli = -2_500_000`, and `min_diversity_milli = 200` to a fresh
+chain. The devnet acceptance test (`tests/devnet_submit.rs`) asserts that the
+decoded gates are sane, not that they hold fixed values. For the difficulty
+energy target, the per-topology energy ranges, and the mempool
+section-election rules, read the pallet in quip-validator. This repository
+consumes those values across the `ChainClient` seam and does not define them.
 
 ## Testing and the doubles
 
@@ -204,8 +213,8 @@ spawn. Keeping both independent of the production serve loop is what lets
 them script failures the real path would never produce.
 
 The `drive` subcommand runs the coordinator against synthetic problems with no
-chain, using `FakeChain` and the `drive/` job sources. It's the fast offline
-path for load and behavior testing.
+chain, using the `drive/` job sources. It is the fast offline path for load
+and behavior testing.
 
 ## Build and run
 
