@@ -944,27 +944,29 @@ mod tests {
         crate::lease::build_lease_job(&snap, [0; 32], start, 4, 1)
     }
 
+    /// A lease needs both the generate kind and the generator: neither a
+    /// sample-only miner nor a generate-kind miner without the generator
+    /// takes one.
     #[test]
     fn lease_routes_only_to_a_miner_with_the_generator() {
+        let no_generator = MinerCaps {
+            generators: vec![],
+            ..caps_lease()
+        };
+        assert!(!no_generator.accepts_leases());
+        assert!(caps_lease().accepts_leases());
         let mut r = Router::new();
-        r.register_miner("plain", caps_ising());
+        r.register_miner("a-plain", caps_ising());
+        r.register_miner("b-no-generator", no_generator);
         assert_eq!(r.route(lease_job(1)), None);
         r.register_miner("lease", caps_lease());
         assert_eq!(r.route(lease_job(1)).as_deref(), Some("lease"));
     }
 
+    /// Lease salts read and reset per poll. Round salts survive a
+    /// re-registration and reset per round.
     #[test]
-    fn kind_without_generator_does_not_accept_leases() {
-        let caps = MinerCaps {
-            generators: vec![],
-            ..caps_lease()
-        };
-        assert!(!caps.accepts_leases());
-        assert!(caps_lease().accepts_leases());
-    }
-
-    #[test]
-    fn lease_salts_read_and_reset() {
+    fn salt_counters_reset_on_their_own_schedules() {
         let mut r = Router::new();
         r.register_miner("lease", caps_lease());
         r.record_lease_salts("lease", 7);
@@ -972,12 +974,7 @@ mod tests {
         assert_eq!(r.take_lease_salts("lease"), 10);
         assert_eq!(r.take_lease_salts("lease"), 0);
         assert_eq!(r.take_lease_salts("unknown"), 0);
-    }
 
-    #[test]
-    fn round_salts_survive_reregistration_and_reset_per_round() {
-        let mut r = Router::new();
-        r.register_miner("lease", caps_lease());
         r.record_round_salts("lease", 7);
         r.register_miner("lease", caps_lease());
         r.record_round_salts("lease", 3);
@@ -1005,19 +1002,12 @@ mod tests {
     }
 
     #[test]
-    fn route_picks_capable_miner_and_stages() {
+    fn route_stages_and_next_job_consumes_credits() {
         let mut r = Router::new();
         r.register_miner("cpu-0", caps_ising());
         let id = r.route(make_job(1, JobKind::IsingSample));
         assert_eq!(id.as_deref(), Some("cpu-0"));
         assert_eq!(r.staged_len("cpu-0"), 1);
-    }
-
-    #[test]
-    fn next_job_consumes_credits() {
-        let mut r = Router::new();
-        r.register_miner("cpu-0", caps_ising());
-        let _ = r.route(make_job(1, JobKind::IsingSample));
         let _ = r.route(make_job(2, JobKind::IsingSample));
         assert!(r.next_job("cpu-0").is_none()); // no credits
         r.grant_credits("cpu-0", 1);
@@ -1028,34 +1018,10 @@ mod tests {
         assert!(r.next_job("cpu-0").is_some()); // dispatches the replacement
     }
 
-    #[test]
-    fn never_exceeds_credits() {
-        let mut r = Router::new();
-        r.register_miner("cpu-0", caps_ising());
-        let _ = r.route(make_job(1, JobKind::IsingSample));
-        let _ = r.route(make_job(2, JobKind::IsingSample));
-        r.grant_credits("cpu-0", 1);
-        assert!(r.next_job("cpu-0").is_some());
-        assert!(r.next_job("cpu-0").is_none());
-    }
-
-    #[test]
-    fn take_consumed_counts_dispatches_then_resets() {
-        let mut r = Router::new();
-        r.register_miner("cpu-0", caps_ising());
-        let _ = r.route(make_job(1, JobKind::IsingSample));
-        let _ = r.route(make_job(2, JobKind::IsingSample));
-        r.grant_credits("cpu-0", 2);
-        assert!(r.next_job("cpu-0").is_some());
-        assert!(r.next_job("cpu-0").is_some());
-        assert_eq!(r.take_consumed("cpu-0"), 2); // two dispatched this interval
-        assert_eq!(r.take_consumed("cpu-0"), 0); // reset after read
-        assert_eq!(r.take_consumed("unknown"), 0); // unknown miner
-    }
-
     /// The heartbeat must report completions, not the per-poll dispatch
     /// counter. Stage 8, dispatch 8, complete 3, then drain the poll
-    /// counter twice. The reported number is 3, not 8 and not 0.
+    /// counter twice. The reported number is 3, not 8 and not 0. The poll
+    /// counter itself counts dispatches and resets after each read.
     #[test]
     fn heartbeat_reports_completions_not_poll_dispatches() {
         let mut r = Router::new();
@@ -1074,6 +1040,7 @@ mod tests {
         // heartbeat used to print whatever that single poll held.
         assert_eq!(r.take_consumed("cpu-0"), 8);
         assert_eq!(r.take_consumed("cpu-0"), 0);
+        assert_eq!(r.take_consumed("unknown"), 0);
         assert_eq!(r.jobs_completed("cpu-0"), 3);
         assert_eq!(r.jobs_completed("unknown"), 0);
     }
@@ -1098,21 +1065,15 @@ mod tests {
     }
 
     #[test]
-    fn miner_ids_are_sorted() {
+    fn stage_on_targets_specific_capable_miner() {
         let mut r = Router::new();
         r.register_miner("cpu-1", caps_ising());
         r.register_miner("cpu-0", caps_ising());
         assert_eq!(
             r.miner_ids(),
-            vec!["cpu-0".to_string(), "cpu-1".to_string()]
+            vec!["cpu-0".to_string(), "cpu-1".to_string()],
+            "miner ids are sorted"
         );
-    }
-
-    #[test]
-    fn stage_on_targets_specific_capable_miner() {
-        let mut r = Router::new();
-        r.register_miner("cpu-0", caps_ising());
-        r.register_miner("cpu-1", caps_ising());
         // Directly stage on cpu-1 (first-fit `route` would have picked cpu-0).
         assert!(r.stage_on("cpu-1", make_job(1, JobKind::IsingSample)));
         assert_eq!(r.staged_len("cpu-0"), 0);
@@ -1125,17 +1086,7 @@ mod tests {
     fn on_reject_unsupported_stops_routing_kind() {
         let mut r = Router::new();
         r.register_miner("cpu-0", caps_ising());
-        r.register_miner(
-            "cpu-1",
-            MinerCaps {
-                backend: "mock".into(),
-                algorithm: "sa".into(),
-                supported_kinds: vec![JobKind::IsingSample as i32],
-                max_nodes: 1000,
-                max_edges: 10000,
-                ..MinerCaps::default()
-            },
-        );
+        r.register_miner("cpu-1", caps_ising());
         let job = make_job(1, JobKind::IsingSample);
         let _ = r.route(job);
         r.grant_credits("cpu-0", 1);
@@ -1152,7 +1103,9 @@ mod tests {
 
     /// A miner that rejects everything (an exhausted QPU budget) drops one job
     /// per dispatch. Those drops must collapse into one line per window, or the
-    /// session log is unreadable for as long as the condition lasts.
+    /// session log is unreadable for as long as the condition lasts. A one-off
+    /// drop still reaches the log immediately: rate limiting must not swallow
+    /// the first occurrence.
     #[test]
     fn repeated_drops_collapse_into_one_warn_window() {
         let mut r = Router::new();
@@ -1163,54 +1116,15 @@ mod tests {
             r.grant_credits("qpu-0", 1);
             let dispatched = r.next_job("qpu-0").expect("dispatched");
             r.on_reject("qpu-0", dispatched, RejectReason::Overloaded as i32);
+            if g == 1 {
+                let log = r.drops.get("qpu-0").expect("drop log");
+                assert_eq!(log.since_warn, 0, "the first drop opens a window");
+            }
         }
         let log = r.drops.get("qpu-0").expect("drop log");
         // The first drop reports at once and resets the counter; the other 49
         // are counted for the next line instead of being logged one by one.
         assert_eq!(log.since_warn, 49);
-    }
-
-    /// A one-off drop still reaches the log immediately: rate limiting must not
-    /// swallow the first occurrence.
-    #[test]
-    fn first_drop_opens_a_window_immediately() {
-        let mut r = Router::new();
-        r.register_miner("qpu-0", caps_ising());
-        let job = make_job(1, JobKind::IsingSample);
-        let _ = r.route(job);
-        r.grant_credits("qpu-0", 1);
-        let dispatched = r.next_job("qpu-0").expect("dispatched");
-        r.on_reject("qpu-0", dispatched, RejectReason::Overloaded as i32);
-        assert_eq!(r.drops.get("qpu-0").expect("drop log").since_warn, 0);
-    }
-
-    #[test]
-    fn on_reject_terminal_does_not_reroute_onto_same_single_miner() {
-        // F6: with one capable miner, a deterministic reject must NOT re-stage
-        // onto the rejecting miner (which would loop forever); it drops instead.
-        let mut r = Router::new();
-        r.register_miner("cpu-0", caps_ising());
-        let job = make_job(1, JobKind::IsingSample);
-        let _ = r.route(job);
-        r.grant_credits("cpu-0", 1);
-        let dispatched = r.next_job("cpu-0").unwrap();
-        assert_eq!(r.staged_len("cpu-0"), 0);
-        r.on_reject("cpu-0", dispatched, RejectReason::Malformed as i32);
-        // Not re-staged onto the only (rejecting) miner.
-        assert_eq!(r.staged_len("cpu-0"), 0);
-    }
-
-    #[test]
-    fn reregister_preserves_staged_queue() {
-        // F8: a supervised restart of the same id must keep jobs re-staged onto
-        // it while it was down (reclaim → re-route → re-handshake path).
-        let mut r = Router::new();
-        r.register_miner("cpu-0", caps_ising());
-        let _ = r.route(make_job(0, JobKind::IsingSample)); // mempool order (generation 0)
-        assert_eq!(r.staged_len("cpu-0"), 1);
-        // Re-handshake with the same id: queue survives, credits reset.
-        r.register_miner("cpu-0", caps_ising());
-        assert_eq!(r.staged_len("cpu-0"), 1);
     }
 
     #[test]
@@ -1289,6 +1203,10 @@ mod tests {
         assert!(r.stage_on("a", make_job(3, JobKind::IsingSample)));
     }
 
+    /// F8: a supervised restart of the same id must keep jobs re-staged onto
+    /// it while it was down (reclaim → re-route → re-handshake path). The
+    /// queue survives the re-handshake and dispatch rechecks it against the
+    /// new capabilities.
     #[test]
     fn dispatch_rechecks_a_queue_preserved_across_reregistration() {
         let mut r = Router::new();
@@ -1302,6 +1220,7 @@ mod tests {
                 ..caps_ising()
             },
         );
+        assert_eq!(r.staged_len("a"), 1, "queue survives re-registration");
         r.grant_credits("a", 1);
         assert!(r.next_job("a").is_none());
         assert_eq!(r.staged_len("b"), 1);
@@ -1342,6 +1261,11 @@ mod tests {
         }
     }
 
+    /// A topology over `nodes` and `edges` with the fixed coefficient sets.
+    fn topo(nodes: Vec<u32>, edges: Vec<(u32, u32)>) -> Topology {
+        Topology::from_nodes_edges(nodes, edges, &[0], &[1000], &[-1000, 1000])
+    }
+
     #[test]
     fn degree_boundary_routes_and_stages_before_dispatch() {
         let mut r = Router::new();
@@ -1361,12 +1285,9 @@ mod tests {
 
     #[test]
     fn cached_sparse_graph_bounds_hash_jobs_and_leases() {
-        let topology = Topology::from_nodes_edges(
+        let topology = topo(
             (0..=21).map(|n| 10 + n * 10).collect(),
             (1..=21).map(|n| (10, 10 + n * 10)).collect(),
-            &[0],
-            &[1000],
-            &[-1000, 1000],
         );
         let mut r = Router::new();
         r.set_topology(Some(&topology));
@@ -1429,30 +1350,17 @@ mod tests {
                 ..caps_ising()
             }
         ));
-        assert_eq!(
-            r.miners.get("a").map(|q| q
-                .staged
-                .iter()
-                .map(|j| j.job_id.clone())
-                .collect::<Vec<_>>()),
-            Some(vec![
-                20_u32.to_le_bytes().to_vec(),
-                19_u32.to_le_bytes().to_vec(),
-                18_u32.to_le_bytes().to_vec(),
-            ])
-        );
-        assert_eq!(
-            r.miners.get("b").map(|q| q
-                .staged
-                .iter()
-                .map(|j| j.job_id.clone())
-                .collect::<Vec<_>>()),
-            Some(vec![
-                21_u32.to_le_bytes().to_vec(),
-                22_u32.to_le_bytes().to_vec(),
-                23_u32.to_le_bytes().to_vec(),
-            ])
-        );
+        let staged_degrees = |id: &str| {
+            r.miners.get(id).map(|q| {
+                q.staged
+                    .iter()
+                    .map(|j| j.job_id.clone())
+                    .collect::<Vec<_>>()
+            })
+        };
+        let ids = |degrees: [u32; 3]| degrees.map(|d| d.to_le_bytes().to_vec()).to_vec();
+        assert_eq!(staged_degrees("a"), Some(ids([20, 19, 18])));
+        assert_eq!(staged_degrees("b"), Some(ids([21, 22, 23])));
         assert_eq!(r.miners.get("a").map(|q| q.granted_credits), Some(2));
         assert_eq!(r.miners.get("b").map(|q| q.granted_credits), Some(3));
         assert_eq!(r.take_consumed("a"), 0);
@@ -1483,8 +1391,7 @@ mod tests {
                 ..caps_ising()
             }
         ));
-        let topology =
-            Topology::from_nodes_edges(vec![0, 1], vec![(0, 1)], &[0], &[1000], &[-1000, 1000]);
+        let topology = topo(vec![0, 1], vec![(0, 1)]);
         assert!(r.stage_on("m", hash_job(&topology)));
         r.set_topology(Some(&topology));
         assert!(r.stage_on("m", hash_job(&topology)));
@@ -1519,68 +1426,53 @@ mod tests {
         assert!(r.stage_on("m", degree_job(0)));
     }
 
-    fn assert_graph_job_staging(r: &mut Router, topology: &Topology, expected: bool) {
-        assert_eq!(r.stage_on("m", hash_job(topology)), expected);
+    fn assert_graph_job_staging(r: &mut Router, topology: &Topology, expected: bool, label: &str) {
+        assert_eq!(
+            r.stage_on("m", hash_job(topology)),
+            expected,
+            "{label}: hash job"
+        );
         let mut lease = lease_job(100);
         if let Some(generator) = lease.generator.as_mut() {
             generator.topology_hash.clone_from(&topology.hash);
         }
-        assert_eq!(r.stage_on("m", lease), expected);
+        assert_eq!(r.stage_on("m", lease), expected, "{label}: lease");
     }
 
+    /// Invalid topologies clear the cached graph metrics, and an unmatched or
+    /// cleared topology keeps the fallback.
     #[test]
-    fn unmatched_and_cleared_topology_keep_the_fallback() {
-        let topology = Topology::from_nodes_edges(
-            vec![10, 20, 30],
-            vec![(10, 20), (10, 30)],
-            &[0],
-            &[1000],
-            &[-1000, 1000],
-        );
-        let mut r = Router::new();
-        r.register_miner(
-            "m",
-            MinerCaps {
-                max_degree: Some(1),
-                ..caps_lease()
-            },
-        );
-        r.set_topology(Some(&topology));
-        assert_graph_job_staging(&mut r, &topology, false);
-
-        let mut unmatched = topology.clone();
-        unmatched.hash = vec![99; 32];
-        assert_graph_job_staging(&mut r, &unmatched, true);
-        r.set_topology(None);
-        assert_graph_job_staging(&mut r, &topology, true);
-    }
-
-    #[test]
-    fn invalid_topologies_clear_cached_graph_metrics() {
-        let topology = Topology::from_nodes_edges(
-            vec![10, 20, 30],
-            vec![(10, 20), (10, 30)],
-            &[0],
-            &[1000],
-            &[-1000, 1000],
-        );
+    fn invalid_unmatched_and_cleared_topologies_keep_the_fallback() {
+        let topology = topo(vec![10, 20, 30], vec![(10, 20), (10, 30)]);
         let invalid = [
-            Topology {
-                edges: (vec![10, 10], vec![20]),
-                ..topology.clone()
-            },
-            Topology {
-                nodes: vec![10, 20, 30, 10],
-                ..topology.clone()
-            },
-            Topology {
-                edges: (vec![10], vec![10]),
-                ..topology.clone()
-            },
-            Topology {
-                edges: (vec![10], vec![40]),
-                ..topology.clone()
-            },
+            (
+                "uneven edge lists",
+                Topology {
+                    edges: (vec![10, 10], vec![20]),
+                    ..topology.clone()
+                },
+            ),
+            (
+                "repeated node",
+                Topology {
+                    nodes: vec![10, 20, 30, 10],
+                    ..topology.clone()
+                },
+            ),
+            (
+                "self loop",
+                Topology {
+                    edges: (vec![10], vec![10]),
+                    ..topology.clone()
+                },
+            ),
+            (
+                "endpoint not a node",
+                Topology {
+                    edges: (vec![10], vec![40]),
+                    ..topology.clone()
+                },
+            ),
         ];
         let mut r = Router::new();
         r.register_miner(
@@ -1590,12 +1482,19 @@ mod tests {
                 ..caps_lease()
             },
         );
-        for invalid in invalid {
+        for (label, invalid) in invalid {
             r.set_topology(Some(&topology));
-            assert_graph_job_staging(&mut r, &topology, false);
+            assert_graph_job_staging(&mut r, &topology, false, "valid");
             r.set_topology(Some(&invalid));
-            assert_graph_job_staging(&mut r, &topology, true);
+            assert_graph_job_staging(&mut r, &topology, true, label);
         }
+
+        r.set_topology(Some(&topology));
+        let mut unmatched = topology.clone();
+        unmatched.hash = vec![99; 32];
+        assert_graph_job_staging(&mut r, &unmatched, true, "unmatched");
+        r.set_topology(None);
+        assert_graph_job_staging(&mut r, &topology, true, "cleared");
     }
 
     fn native_caps(topology: &Topology) -> MinerCaps {
@@ -1627,13 +1526,7 @@ mod tests {
 
     #[test]
     fn native_router_accepts_hash_jobs_and_only_proven_inline_subgraphs() {
-        let topology = Topology::from_nodes_edges(
-            vec![0, 1, 2, 3],
-            vec![(0, 1), (1, 2), (2, 3)],
-            &[0],
-            &[1000],
-            &[-1000, 1000],
-        );
+        let topology = topo(vec![0, 1, 2, 3], vec![(0, 1), (1, 2), (2, 3)]);
         let caps = native_caps(&topology);
         assert!(caps.native_topology_hash.is_some());
         assert_ne!(caps.native_topology_hash.as_ref(), Some(&topology.hash));
@@ -1652,8 +1545,7 @@ mod tests {
 
     #[test]
     fn unknown_native_graph_keeps_hash_fallback_and_skips_inline_work() {
-        let topology =
-            Topology::from_nodes_edges(vec![0, 1], vec![(0, 1)], &[0], &[1000], &[-1000, 1000]);
+        let topology = topo(vec![0, 1], vec![(0, 1)]);
         let mut r = Router::new();
         r.set_topology(Some(&topology));
         r.register_miner(
@@ -1677,13 +1569,7 @@ mod tests {
 
     #[test]
     fn inline_positions_are_never_relabelled_through_sparse_native_nodes() {
-        let topology = Topology::from_nodes_edges(
-            vec![10, 20, 30],
-            vec![(10, 20), (20, 30)],
-            &[0],
-            &[1000],
-            &[-1000, 1000],
-        );
+        let topology = topo(vec![10, 20, 30], vec![(10, 20), (20, 30)]);
         let mut r = Router::new();
         r.set_topology(Some(&topology));
         r.register_miner("qpu", native_caps(&topology));
@@ -1694,8 +1580,7 @@ mod tests {
 
     #[test]
     fn native_snapshot_and_topology_changes_recheck_queued_jobs() {
-        let topology =
-            Topology::from_nodes_edges(vec![0, 1], vec![(0, 1)], &[0], &[1000], &[-1000, 1000]);
+        let topology = topo(vec![0, 1], vec![(0, 1)]);
         let mut r = Router::new();
         r.set_topology(Some(&topology));
         r.register_miner("a", native_caps(&topology));
@@ -1714,8 +1599,7 @@ mod tests {
         assert_eq!(r.miners.get("a").map(|q| q.granted_credits), Some(2));
         assert!(r.update_capabilities("a", native_caps(&topology)));
         assert!(r.stage_on("a", inline_job(2, &[(0, 1)])));
-        let replacement =
-            Topology::from_nodes_edges(vec![0, 1], vec![], &[0], &[1000], &[-1000, 1000]);
+        let replacement = topo(vec![0, 1], vec![]);
         r.set_topology(Some(&replacement));
         assert!(r.next_job("a").is_none());
         assert_eq!(r.staged_len("b"), 2);
@@ -1724,8 +1608,7 @@ mod tests {
 
     #[test]
     fn malformed_native_evidence_never_admits_inline_work() {
-        let topology =
-            Topology::from_nodes_edges(vec![0, 1], vec![(0, 1)], &[0], &[1000], &[-1000, 1000]);
+        let topology = topo(vec![0, 1], vec![(0, 1)]);
         let mut r = Router::new();
         r.set_topology(Some(&topology));
         r.register_miner(
@@ -1762,8 +1645,7 @@ mod tests {
 
     #[test]
     fn native_inline_proof_rejects_invalid_coefficients_and_missing_graphs() {
-        let topology =
-            Topology::from_nodes_edges(vec![0, 1], vec![(0, 1)], &[0], &[1000], &[-1000, 1000]);
+        let topology = topo(vec![0, 1], vec![(0, 1)]);
         let mut r = Router::new();
         r.set_topology(Some(&topology));
         r.register_miner("qpu", native_caps(&topology));
@@ -1788,8 +1670,7 @@ mod tests {
 
     #[test]
     fn native_hash_jobs_and_leases_use_only_active_chain_hash() {
-        let topology =
-            Topology::from_nodes_edges(vec![0, 1], vec![(0, 1)], &[0], &[1000], &[-1000, 1000]);
+        let topology = topo(vec![0, 1], vec![(0, 1)]);
         let mut r = Router::new();
         r.register_miner(
             "m",
@@ -1799,12 +1680,12 @@ mod tests {
             },
         );
         r.set_topology(Some(&topology));
-        assert_graph_job_staging(&mut r, &topology, true);
+        assert_graph_job_staging(&mut r, &topology, true, "active chain hash");
         let mut wrong = topology.clone();
         wrong.hash = vec![8; 32];
-        assert_graph_job_staging(&mut r, &wrong, false);
+        assert_graph_job_staging(&mut r, &wrong, false, "native hash as job hash");
         r.set_topology(None);
-        assert_graph_job_staging(&mut r, &topology, false);
+        assert_graph_job_staging(&mut r, &topology, false, "no chain topology");
         r.set_topology(Some(&topology));
         assert!(r.update_capabilities(
             "m",
@@ -1813,23 +1694,29 @@ mod tests {
                 ..caps_lease()
             }
         ));
-        assert_graph_job_staging(&mut r, &topology, false);
+        assert_graph_job_staging(&mut r, &topology, false, "malformed native hash");
     }
 
+    /// F6: with one capable miner, a deterministic reject must NOT re-stage
+    /// onto the rejecting miner (which would loop forever); it drops instead.
     #[test]
     fn refusal_fallback_still_excludes_the_rejecting_miner_and_drops_without_alternative() {
-        for reason in [RejectReason::TopologyMismatch, RejectReason::TooLarge] {
+        for reason in [
+            RejectReason::TopologyMismatch,
+            RejectReason::TooLarge,
+            RejectReason::Malformed,
+        ] {
             let mut r = Router::new();
             r.register_miner("a", caps_ising());
             r.register_miner("b", caps_ising());
             r.on_reject("a", make_job(1, JobKind::IsingSample), reason as i32);
-            assert_eq!(r.staged_len("a"), 0);
-            assert_eq!(r.staged_len("b"), 1);
+            assert_eq!(r.staged_len("a"), 0, "{reason:?}");
+            assert_eq!(r.staged_len("b"), 1, "{reason:?}");
             let mut single = Router::new();
             single.register_miner("a", caps_ising());
             single.on_reject("a", make_job(1, JobKind::IsingSample), reason as i32);
-            assert_eq!(single.staged_len("a"), 0);
-            assert_eq!(single.unroutable.len(), 1);
+            assert_eq!(single.staged_len("a"), 0, "{reason:?}");
+            assert_eq!(single.unroutable.len(), 1, "{reason:?}");
         }
     }
 }

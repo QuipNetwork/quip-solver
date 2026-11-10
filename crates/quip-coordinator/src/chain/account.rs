@@ -49,9 +49,13 @@ mod tests {
 
     /// The `System` and `Account` twox128 hashes are fixed Substrate constants.
     /// Pinning them catches a broken hasher immediately.
+    ///
+    /// `Blake2_128Concat` appends the raw key after the 16-byte hash, so the last
+    /// 32 bytes must be the account itself.
     #[test]
-    fn the_account_key_starts_with_the_known_system_account_prefix() {
-        let key = system_account_storage_key(&[0u8; 32]);
+    fn the_account_key_is_the_system_account_prefix_then_the_hashed_account() {
+        let account = [7u8; 32];
+        let key = system_account_storage_key(&account);
         let prefix_bytes = key.get(..32).expect("key has a 32-byte pallet prefix");
         let mut prefix = String::new();
         for b in prefix_bytes {
@@ -62,14 +66,6 @@ mod tests {
             prefix,
             "26aa394eea5630e07c48ae0c9558cef7b99d880ec681799c0cf30e8886371da9"
         );
-    }
-
-    /// `Blake2_128Concat` appends the raw key after the 16-byte hash, so the last
-    /// 32 bytes must be the account itself.
-    #[test]
-    fn the_account_key_ends_with_the_raw_account() {
-        let account = [7u8; 32];
-        let key = system_account_storage_key(&account);
         assert_eq!(key.len(), 16 + 16 + 16 + 32);
         let tail = key
             .get(key.len() - 32..)

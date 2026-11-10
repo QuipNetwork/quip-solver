@@ -446,21 +446,19 @@ mod tests {
     }
 
     #[test]
-    fn ease_step_walks_geometric_fraction_toward_cap() {
+    fn ease_step_and_stepwise_walk_toward_the_cap() {
         let c = curve();
-        // room = -1000 - (-50000) = 49000; round(49000*0.025)=1225 → -48775
+        // room = -1000 - (-50000) = 49000; round(49000*0.025)=1225 -> -48775
         assert_eq!(ease_step(-50_000, &c), -48_775);
-        // room = 47775; round(1194.375)=1194 → -47581
+        // room = 47775; round(1194.375)=1194 -> -47581
         assert_eq!(ease_step(-48_775, &c), -47_581);
-        // room = 46581; round(1164.525)=1165 → -46416
+        // room = 46581; round(1164.525)=1165 -> -46416
         assert_eq!(ease_step(-47_581, &c), -46_416);
-    }
+        assert_eq!(ease_stepwise(-50_000, 0, &c), -50_000);
+        assert_eq!(ease_stepwise(-50_000, 3, &c), -46_416);
 
-    #[test]
-    fn ease_step_is_capped_and_noop_at_easy_bound() {
-        let c = curve();
         // room = -1000 - (-1200) = 200; geometric floors to 1000, min(1000,200)=200
-        // → clamped exactly to the cap, then a no-op.
+        // -> clamped exactly to the cap, then a no-op.
         assert_eq!(ease_step(-1_200, &c), -1_000);
         assert_eq!(ease_step(-1_000, &c), -1_000);
         // Degenerate curve leaves current alone.
@@ -470,13 +468,6 @@ mod tests {
             max_milli: -1_000,
         };
         assert_eq!(ease_step(-50_000, &degenerate), -50_000);
-    }
-
-    #[test]
-    fn ease_stepwise_matches_step_by_step() {
-        let c = curve();
-        assert_eq!(ease_stepwise(-50_000, 0, &c), -50_000);
-        assert_eq!(ease_stepwise(-50_000, 3, &c), -46_416);
     }
 
     #[test]
@@ -529,7 +520,7 @@ mod tests {
     }
 
     #[test]
-    fn stepwise_model_holds_the_threshold_until_the_epoch_boundary() {
+    fn stepwise_model_holds_the_threshold_until_the_epoch_boundary_and_clears_on_it() {
         let m = stepwise_model();
         // Steps: -50000, -48775, -47581, -46416 at blocks 0, 10, 20, 30.
         assert_eq!(m.threshold_at(0), -50_000);
@@ -537,25 +528,22 @@ mod tests {
         assert_eq!(m.threshold_at(10), -48_775);
         assert_eq!(m.threshold_at(29), -47_581);
         assert_eq!(m.threshold_at(30), -46_416);
-    }
 
-    #[test]
-    fn stepwise_model_clears_on_epoch_boundaries() {
-        let m = stepwise_model();
         // A floor equal to the base clears at the first step (strict >).
         assert_eq!(m.first_clearing_elapsed(-50_000, 100), Some(10));
-        // -48000 clears when the threshold first exceeds it: step 2 → 20.
+        // -48000 clears when the threshold first exceeds it: step 2 -> 20.
         assert_eq!(m.first_clearing_elapsed(-48_000, 100), Some(20));
-        // Already below the base threshold → viable now.
+        // Already below the base threshold -> viable now.
         assert_eq!(m.first_clearing_elapsed(-51_000, 100), Some(0));
-        // Above the easy cap → never.
+        // Above the easy cap -> never.
         assert_eq!(m.first_clearing_elapsed(-1, 100), None);
-        // Beyond the horizon → never, even if a later step would clear.
+        // Beyond the horizon -> never, even if a later step would clear.
         assert_eq!(m.first_clearing_elapsed(-48_000, 15), None);
     }
 
     #[test]
-    fn continuous_model_clears_inside_the_epoch() {
+    fn continuous_model_clears_inside_the_epoch_and_before_stepwise() {
+        let stepwise = stepwise_model();
         let m = DecayModel {
             algorithm: DecayAlgorithm::Continuous,
             ..stepwise_model()
@@ -566,18 +554,10 @@ mod tests {
         assert!(0 < at && at < 10, "cleared at {at}");
         assert!(m.threshold_at(at) > -49_500);
         assert!(m.threshold_at(at - 1) <= -49_500);
-    }
 
-    #[test]
-    fn continuous_model_is_earlier_than_stepwise_for_the_same_energy() {
-        let stepwise = stepwise_model();
-        let continuous = DecayModel {
-            algorithm: DecayAlgorithm::Continuous,
-            ..stepwise_model()
-        };
         for energy in [-49_900, -49_000, -48_000, -46_500] {
             let s = stepwise.first_clearing_elapsed(energy, 1_000);
-            let c = continuous.first_clearing_elapsed(energy, 1_000);
+            let c = m.first_clearing_elapsed(energy, 1_000);
             assert!(
                 c <= s,
                 "energy {energy}: continuous {c:?} vs stepwise {s:?}"
@@ -602,17 +582,13 @@ mod tests {
     }
 
     #[test]
-    fn expected_gse_matches_golden_zero_field() {
+    fn expected_gse_matches_golden_zero_field_and_is_zero_without_nodes_or_edges() {
         // Zero-field h drops the h term; legacy J {-1000,1000} has unit mean 1.0.
-        // (1024, 2048): avg_degree 4, sqrt 2, j = -0.75*1*2*1024 = -1536 → milli.
+        // (1024, 2048): avg_degree 4, sqrt 2, j = -0.75*1*2*1024 = -1536 -> milli.
         assert_eq!(
             expected_gse_milli(1024, 2048, 0.75, &[0], &[-1000, 1000]),
             -1_536_000
         );
-    }
-
-    #[test]
-    fn expected_gse_zero_nodes_or_edges_is_zero() {
         assert_eq!(expected_gse_milli(0, 2048, 0.75, &[0], &[-1000, 1000]), 0);
         assert_eq!(expected_gse_milli(1024, 0, 0.75, &[0], &[-1000, 1000]), 0);
     }
@@ -902,27 +878,52 @@ mod tests {
     }
 
     #[test]
-    fn ease_gated_is_monotone_and_capped() {
+    fn ease_continuous_and_gated_are_monotone_capped_and_noop_at_the_edges() {
+        type Ease = fn(i64, u64, u64, &EnergyCurve) -> i64;
         let c = walkup_curve();
-        for start in [c.min_milli, c.knee_milli, c.max_milli - 3_500] {
-            let mut previous = start;
-            for elapsed in 1..=20_000_u64 {
-                let now = ease_gated(start, elapsed, 100, &c);
-                assert!(now >= previous, "decay went backwards at elapsed={elapsed}");
-                assert!(
-                    now <= c.max_milli,
-                    "eased past the cap at elapsed={elapsed}"
-                );
-                previous = now;
-            }
-        }
-        assert_eq!(ease_gated(c.knee_milli, 500, 0, &c), c.knee_milli);
         let degenerate = EnergyCurve {
             min_milli: -1_000,
             knee_milli: -1_000,
             max_milli: -1_000,
         };
-        assert_eq!(ease_gated(-50_000, 500, 100, &degenerate), -50_000);
+        let easers: [(&str, Ease); 2] = [("continuous", ease_continuous), ("gated", ease_gated)];
+        for (name, ease) in easers {
+            for start in [c.min_milli, c.knee_milli, c.max_milli - 3_500] {
+                let mut previous = start;
+                for elapsed in 1..=20_000_u64 {
+                    let now = ease(start, elapsed, 100, &c);
+                    assert!(
+                        now >= previous,
+                        "{name}: decay went backwards at elapsed={elapsed}"
+                    );
+                    assert!(
+                        now <= c.max_milli,
+                        "{name}: eased past the cap at elapsed={elapsed}"
+                    );
+                    previous = now;
+                }
+            }
+            assert_eq!(
+                ease(c.max_milli, 500, 100, &c),
+                c.max_milli,
+                "{name}: no room"
+            );
+            assert_eq!(
+                ease(c.knee_milli, 0, 100, &c),
+                c.knee_milli,
+                "{name}: no time"
+            );
+            assert_eq!(
+                ease(c.knee_milli, 500, 0, &c),
+                c.knee_milli,
+                "{name}: epoch 0"
+            );
+            assert_eq!(
+                ease(-50_000, 500, 100, &degenerate),
+                -50_000,
+                "{name}: degenerate curve"
+            );
+        }
     }
 
     #[test]
@@ -978,32 +979,23 @@ mod tests {
     }
 
     #[test]
-    fn ease_continuous_over_one_epoch_equals_one_stepwise_step() {
-        let c = walkup_curve();
-        for start in [c.min_milli, c.knee_milli, c.max_milli - 50_000] {
-            assert_eq!(
-                ease_continuous(start, 100, 100, &c),
-                ease_step(start, &c),
-                "start={start}"
-            );
-        }
-    }
-
-    #[test]
-    fn ease_continuous_eases_within_the_first_epoch() {
+    fn ease_continuous_over_one_epoch_equals_one_stepwise_step_and_eases_within_it() {
         let c = walkup_curve();
         #[expect(
             clippy::manual_midpoint,
             reason = "the fixed walkup bounds cannot overflow and preserve the reference test"
         )]
-        let start = (c.min_milli + c.max_milli) / 2;
-        let half = ease_continuous(start, 50, 100, &c);
-        let full = ease_continuous(start, 100, 100, &c);
-        assert!(
-            start < half && half < full,
-            "half an epoch must ease strictly between zero and one epoch \
-             (start={start}, half={half}, full={full})"
-        );
+        let midpoint = (c.min_milli + c.max_milli) / 2;
+        for start in [c.min_milli, c.knee_milli, c.max_milli - 50_000, midpoint] {
+            let full = ease_continuous(start, 100, 100, &c);
+            assert_eq!(full, ease_step(start, &c), "start={start}");
+            let half = ease_continuous(start, 50, 100, &c);
+            assert!(
+                start < half && half < full,
+                "half an epoch must ease strictly between zero and one epoch \
+                 (start={start}, half={half}, full={full})"
+            );
+        }
     }
 
     #[test]
@@ -1020,32 +1012,5 @@ mod tests {
             after > before && after <= 2 * before + 2,
             "per-block easing must double past target, not jump: before {before}, after {after}"
         );
-    }
-
-    #[test]
-    fn ease_continuous_is_monotone_in_elapsed_blocks() {
-        let c = walkup_curve();
-        for start in [c.min_milli, c.knee_milli, c.max_milli - 3_500] {
-            let mut previous = start;
-            for elapsed in 1..=2_000_u64 {
-                let now = ease_continuous(start, elapsed, 100, &c);
-                assert!(now >= previous, "decay went backwards at elapsed={elapsed}");
-                previous = now;
-            }
-        }
-    }
-
-    #[test]
-    fn ease_continuous_is_a_noop_without_room_or_time() {
-        let c = walkup_curve();
-        assert_eq!(ease_continuous(c.max_milli, 500, 100, &c), c.max_milli);
-        assert_eq!(ease_continuous(c.knee_milli, 0, 100, &c), c.knee_milli);
-        assert_eq!(ease_continuous(c.knee_milli, 50, 0, &c), c.knee_milli);
-        let degenerate = EnergyCurve {
-            min_milli: -1_000,
-            knee_milli: -1_000,
-            max_milli: -1_000,
-        };
-        assert_eq!(ease_continuous(-50_000, 50, 100, &degenerate), -50_000);
     }
 }

@@ -641,6 +641,8 @@ pub fn parse_config(toml_text: &str) -> Result<CoordinatorConfig, ConfigError> {
 mod tests {
     use super::*;
 
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
     const SAMPLE: &str = r#"
 [miner]
 validators = ["ws://127.0.0.1:9944"]
@@ -663,149 +665,24 @@ budget = "30s"
 budget_reset_day = 1
 "#;
 
-    #[test]
-    fn maps_sections_to_launch_entries() {
-        let c = parse_config(SAMPLE).unwrap();
-        assert_eq!(c.validators, vec!["ws://127.0.0.1:9944"]);
-        let ids: Vec<&str> = c.launch.iter().map(|e| e.miner_id.as_str()).collect();
-        assert_eq!(ids, vec!["cpu-0", "cuda-0", "cuda-1", "qpu-0"]);
+    /// A `[miner]` section holding `miner_keys` followed by an empty `[cpu]`.
+    fn cpu_config(miner_keys: &str) -> String {
+        format!("[miner]\nsigner_key = \"//Alice\"\n{miner_keys}\n[cpu]\n")
     }
 
-    /// The descriptor is the only place an operator can see, remotely, which
-    /// GPU a miner holds. Before the ordinal was forwarded, `cuda-1` was a
-    /// label with nothing behind it.
-    #[test]
-    fn miner_spec_reports_the_device_ordinal() {
-        let c = parse_config(SAMPLE).unwrap();
-        let spec = |id: &str| {
-            c.launch
-                .iter()
-                .find(|e| e.miner_id == id)
-                .unwrap_or_else(|| panic!("no {id}"))
-                .miner_spec()
-        };
-        assert_eq!(spec("cuda-0").device_id.as_deref(), Some(b"0".as_slice()));
-        assert_eq!(spec("cuda-1").device_id.as_deref(), Some(b"1".as_slice()));
-        // A backend that names no device must not invent one.
-        assert_eq!(spec("cpu-0").device_id, None);
-    }
+    const IDENTITY: &str = "public_host = \"h\"\npublic_port = 1\n";
 
-    #[test]
-    fn cuda_sections_carry_their_device_ordinal() {
-        // The section key is what binds the GPU: it reaches the miner as
-        // `--device N`, so it must survive parsing as a number.
-        let c = parse_config(SAMPLE).unwrap();
-        let dev = |id: &str| {
-            c.launch
-                .iter()
-                .find(|e| e.miner_id == id)
-                .unwrap_or_else(|| panic!("no {id}"))
-                .device
-        };
-        assert_eq!(dev("cuda-0"), Some(0));
-        assert_eq!(dev("cuda-1"), Some(1));
-    }
-
-    #[test]
-    fn non_cuda_sections_have_no_device() {
-        // `--device` is never sprayed at a binary whose CLI rejects it.
-        let c = parse_config(SAMPLE).unwrap();
-        for id in ["cpu-0", "qpu-0"] {
-            let e = c.launch.iter().find(|e| e.miner_id == id).unwrap();
-            assert_eq!(e.device, None, "{id} must not carry a device ordinal");
-        }
-    }
-
-    #[test]
-    fn cuda_sections_order_numerically() {
-        let cfg = "\n[miner]\npublic_host = \"h\"\npublic_port = 1\n\n[cuda.10]\n\n[cuda.2]\n";
-        let c = parse_config(cfg).unwrap();
-        let ids: Vec<&str> = c.launch.iter().map(|e| e.miner_id.as_str()).collect();
-        assert_eq!(ids, vec!["cuda-2", "cuda-10"]);
-        let devs: Vec<Option<usize>> = c.launch.iter().map(|e| e.device).collect();
-        assert_eq!(devs, vec![Some(2), Some(10)]);
-    }
-
-    #[test]
-    fn cuda_id_is_normalized_from_the_parsed_ordinal() {
-        // Id and flag come from one number, so they cannot disagree.
-        let cfg = "\n[miner]\npublic_host = \"h\"\npublic_port = 1\n\n[cuda.01]\n";
-        let c = parse_config(cfg).unwrap();
-        assert_eq!(c.launch.len(), 1);
-        let e = c.launch.first().unwrap();
-        assert_eq!(e.miner_id, "cuda-1");
-        assert_eq!(e.device, Some(1));
-    }
-
-    /// `[metal.1]` used to parse as `metal-0` on device 0, with the nested
-    /// table leaking into the miner's `backend_toml` as a stray `[1]` block
-    /// and the `binary` key under it ignored.
-    #[test]
-    fn indexed_metal_section_is_rejected() {
-        let toml = "[miner]\npublic_host = \"h\"\npublic_port = 1\n\n\
-                    [metal.1]\nbinary = \"quip-metal-sa\"\n";
-        assert_eq!(
-            parse_config(toml).err(),
-            Some(ConfigError::IndexedSingleDeviceSection {
-                backend: "metal",
-                key: "1".to_string()
-            })
-        );
-    }
-
-    /// Same shape under `[cpu]`, which is likewise a single-miner backend.
-    #[test]
-    fn indexed_cpu_section_is_rejected() {
-        let toml = "[miner]\npublic_host = \"h\"\npublic_port = 1\n\n[cpu.0]\n";
-        assert_eq!(
-            parse_config(toml).err(),
-            Some(ConfigError::IndexedSingleDeviceSection {
-                backend: "cpu",
-                key: "0".to_string()
-            })
-        );
-    }
-
-    /// The ordinary unindexed form must keep parsing, scalar keys and all.
-    #[test]
-    fn plain_metal_section_still_launches() {
-        let toml = "[miner]\npublic_host = \"h\"\npublic_port = 1\n\n\
-                    [metal]\nbinary = \"quip-metal-sa\"\nutilization = 50\n";
-        let c = parse_config(toml).unwrap();
-        let e = c.launch.iter().find(|e| e.miner_id == "metal-0").unwrap();
-        assert_eq!(e.binary, "quip-metal-sa");
-        assert_eq!(e.device, None);
-    }
-
-    #[test]
-    fn non_numeric_cuda_section_is_rejected() {
-        let cfg = "\n[miner]\npublic_host = \"h\"\npublic_port = 1\n\n[cuda.gpu0]\n";
-        assert_eq!(
-            parse_config(cfg).err(),
-            Some(ConfigError::CudaSectionNotIndexed {
-                key: "gpu0".to_string()
-            })
-        );
-    }
-
-    #[test]
-    fn duplicate_cuda_ordinal_is_rejected() {
-        let cfg = "\n[miner]\npublic_host = \"h\"\npublic_port = 1\n\n[cuda.1]\n\n[cuda.01]\n";
-        assert_eq!(
-            parse_config(cfg).err(),
-            Some(ConfigError::DuplicateCudaDevice { device: 1 })
-        );
-    }
-
-    #[test]
-    fn binary_override_and_default() {
-        let c = parse_config(SAMPLE).unwrap();
-        let cpu = c.launch.iter().find(|e| e.miner_id == "cpu-0").unwrap();
-        assert_eq!(cpu.binary, "quip-cpu-gibbs");
-        assert_eq!(cpu.configure.queue_depth, 4);
-        assert_eq!(cpu.configure.idle_timeout_s, 120);
-        let cuda = c.launch.iter().find(|e| e.miner_id == "cuda-0").unwrap();
-        assert_eq!(cuda.binary, "quip-cuda-sa");
+    /// The D-Wave launch entry and its parsed `backend_toml`.
+    fn dwave_entry(
+        config: &CoordinatorConfig,
+    ) -> Result<(&LaunchEntry, toml::Table), Box<dyn std::error::Error>> {
+        let dwave = config
+            .launch
+            .iter()
+            .find(|entry| entry.miner_id == "qpu-0")
+            .ok_or("config must launch D-Wave")?;
+        let backend: toml::Table = toml::from_str(&dwave.configure.backend_toml)?;
+        Ok((dwave, backend))
     }
 
     fn assert_dwave_period_budget(backend: &toml::Table) {
@@ -821,23 +698,125 @@ budget_reset_day = 1
         );
     }
 
+    /// The descriptor is the only place an operator can see, remotely, which
+    /// GPU a miner holds. Before the ordinal was forwarded, `cuda-1` was a
+    /// label with nothing behind it.
     #[test]
-    #[expect(
-        clippy::panic_in_result_fn,
-        reason = "Test assertions report mismatches while Result propagates setup errors."
-    )]
-    fn backend_toml_carries_dwave_period_budget() -> Result<(), Box<dyn std::error::Error>> {
-        let config = parse_config(SAMPLE)?;
-        let dwave = config
-            .launch
-            .iter()
-            .find(|entry| entry.miner_id == "qpu-0")
-            .ok_or("missing D-Wave launch entry")?;
-        let backend: toml::Table = toml::from_str(&dwave.configure.backend_toml)?;
+    fn sample_config_maps_sections_to_launch_entries() {
+        let c = parse_config(SAMPLE).unwrap();
+        assert_eq!(c.validators, vec!["ws://127.0.0.1:9944"]);
+        let ids: Vec<&str> = c.launch.iter().map(|e| e.miner_id.as_str()).collect();
+        assert_eq!(ids, vec!["cpu-0", "cuda-0", "cuda-1", "qpu-0"]);
+        let entry = |id: &str| {
+            c.launch
+                .iter()
+                .find(|e| e.miner_id == id)
+                .unwrap_or_else(|| panic!("no {id}"))
+        };
 
+        // The section key is what binds the GPU: it reaches the miner as
+        // `--device N`, so it must survive parsing as a number.
+        assert_eq!(entry("cuda-0").device, Some(0));
+        assert_eq!(entry("cuda-1").device, Some(1));
+        assert_eq!(
+            entry("cuda-0").miner_spec().device_id.as_deref(),
+            Some(b"0".as_slice())
+        );
+        assert_eq!(
+            entry("cuda-1").miner_spec().device_id.as_deref(),
+            Some(b"1".as_slice())
+        );
+        // `--device` is never sprayed at a binary whose CLI rejects it, and a
+        // backend that names no device must not invent one.
+        for id in ["cpu-0", "qpu-0"] {
+            assert_eq!(
+                entry(id).device,
+                None,
+                "{id} must not carry a device ordinal"
+            );
+            assert_eq!(entry(id).miner_spec().device_id, None, "{id}");
+        }
+
+        let cpu = entry("cpu-0");
+        assert_eq!(cpu.binary, "quip-cpu-gibbs");
+        assert_eq!(cpu.configure.queue_depth, 4);
+        assert_eq!(cpu.configure.idle_timeout_s, 120);
+        assert_eq!(entry("cuda-0").binary, "quip-cuda-sa");
+        assert_eq!(entry("qpu-0").binary, "quip-dwave-qa");
+
+        let backend: toml::Table = toml::from_str(&entry("qpu-0").configure.backend_toml).unwrap();
         assert_dwave_period_budget(&backend);
         assert_eq!(backend.len(), 2);
-        Ok(())
+    }
+
+    #[test]
+    fn cuda_sections_order_numerically_and_normalize_ordinals() {
+        // Id and flag come from one number, so they cannot disagree: `01`
+        // normalizes to `cuda-1`, and `10` sorts after `2`.
+        let cfg = "\n[miner]\npublic_host = \"h\"\npublic_port = 1\n\n\
+                   [cuda.10]\n\n[cuda.2]\n\n[cuda.01]\n";
+        let c = parse_config(cfg).unwrap();
+        let ids: Vec<&str> = c.launch.iter().map(|e| e.miner_id.as_str()).collect();
+        assert_eq!(ids, vec!["cuda-1", "cuda-2", "cuda-10"]);
+        let devs: Vec<Option<usize>> = c.launch.iter().map(|e| e.device).collect();
+        assert_eq!(devs, vec![Some(1), Some(2), Some(10)]);
+    }
+
+    #[test]
+    fn malformed_backend_sections_are_rejected() {
+        let head = "[miner]\npublic_host = \"h\"\npublic_port = 1\n\n";
+        let cases = [
+            // `[metal.1]` used to parse as `metal-0` on device 0, with the
+            // nested table leaking into the miner's `backend_toml` as a stray
+            // `[1]` block and the `binary` key under it ignored.
+            (
+                "indexed metal",
+                "[metal.1]\nbinary = \"quip-metal-sa\"\n",
+                ConfigError::IndexedSingleDeviceSection {
+                    backend: "metal",
+                    key: "1".to_string(),
+                },
+            ),
+            // Same shape under `[cpu]`, which is likewise a single-miner backend.
+            (
+                "indexed cpu",
+                "[cpu.0]\n",
+                ConfigError::IndexedSingleDeviceSection {
+                    backend: "cpu",
+                    key: "0".to_string(),
+                },
+            ),
+            (
+                "non-numeric cuda",
+                "[cuda.gpu0]\n",
+                ConfigError::CudaSectionNotIndexed {
+                    key: "gpu0".to_string(),
+                },
+            ),
+            (
+                "duplicate cuda ordinal",
+                "[cuda.1]\n\n[cuda.01]\n",
+                ConfigError::DuplicateCudaDevice { device: 1 },
+            ),
+        ];
+        for (label, body, expected) in cases {
+            assert_eq!(
+                parse_config(&format!("{head}{body}")).err(),
+                Some(expected),
+                "{label}"
+            );
+        }
+    }
+
+    /// The ordinary unindexed form must keep parsing, scalar keys and all.
+    #[test]
+    fn plain_metal_section_still_launches() {
+        let toml = "[miner]\npublic_host = \"h\"\npublic_port = 1\n\n\
+                    [metal]\nbinary = \"quip-metal-sa\"\nutilization = 50\n";
+        let c = parse_config(toml).unwrap();
+        let e = c.launch.iter().find(|e| e.miner_id == "metal-0").unwrap();
+        assert_eq!(e.binary, "quip-metal-sa");
+        assert_eq!(e.device, None);
     }
 
     #[test]
@@ -845,14 +824,9 @@ budget_reset_day = 1
         clippy::panic_in_result_fn,
         reason = "Test assertions report mismatches while Result propagates setup errors."
     )]
-    fn example_dwave_config_is_metered() -> Result<(), Box<dyn std::error::Error>> {
+    fn example_dwave_config_is_metered() -> TestResult {
         let config = parse_config(include_str!("../config.toml.example"))?;
-        let dwave = config
-            .launch
-            .iter()
-            .find(|entry| entry.miner_id == "qpu-0")
-            .ok_or("example config must launch D-Wave")?;
-        let backend: toml::Table = toml::from_str(&dwave.configure.backend_toml)?;
+        let (dwave, backend) = dwave_entry(&config)?;
 
         assert_eq!(dwave.binary, "quip-dwave-qa");
         assert_dwave_period_budget(&backend);
@@ -860,14 +834,30 @@ budget_reset_day = 1
         Ok(())
     }
 
+    /// The shipped v0.3 template must survive its own parser, and its
+    /// commented-out D-Wave section must be metered once enabled.
     #[test]
     #[expect(
         clippy::panic_in_result_fn,
         reason = "Test assertions report mismatches while Result propagates setup errors."
     )]
-    fn docker_dwave_config_is_metered_when_enabled() -> Result<(), Box<dyn std::error::Error>> {
+    fn shipped_docker_template_parses_and_enables_metered_dwave() -> TestResult {
         let template = include_str!("../../../docker/config.toml");
         let config = parse_config(template)?;
+        assert!(
+            !config.launch.is_empty(),
+            "shipped template must declare a backend"
+        );
+        // The image must self-fund out of the box: a bare `docker run` has no
+        // way to hand the account money otherwise.
+        assert!(
+            config.faucet_url.is_some(),
+            "shipped template must configure a faucet"
+        );
+        assert!(
+            !config.signer_key.is_empty(),
+            "shipped template must point at a keystore path"
+        );
         assert!(!config.launch.iter().any(|entry| entry.backend == "dwave"));
 
         let mut enabled = String::new();
@@ -888,12 +878,7 @@ budget_reset_day = 1
         }
 
         let config = parse_config(&enabled)?;
-        let dwave = config
-            .launch
-            .iter()
-            .find(|entry| entry.miner_id == "qpu-0")
-            .ok_or("enabled Docker config must launch D-Wave")?;
-        let backend: toml::Table = toml::from_str(&dwave.configure.backend_toml)?;
+        let (dwave, backend) = dwave_entry(&config)?;
 
         assert_eq!(dwave.binary, "quip-dwave-qa");
         assert_dwave_period_budget(&backend);
@@ -918,8 +903,7 @@ budget_reset_day = 1
         clippy::panic_in_result_fn,
         reason = "Test assertions report mismatches while Result propagates setup errors."
     )]
-    fn qpu_alias_keeps_budget_separate_from_session_settings(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn qpu_alias_keeps_budget_separate_from_session_settings() -> TestResult {
         let config = parse_config(
             r#"
 [miner]
@@ -936,12 +920,7 @@ budget = "2h"
 budget_reset_day = 17
 "#,
         )?;
-        let dwave = config
-            .launch
-            .iter()
-            .find(|entry| entry.miner_id == "qpu-0")
-            .ok_or("qpu alias must launch D-Wave")?;
-        let backend: toml::Table = toml::from_str(&dwave.configure.backend_toml)?;
+        let (dwave, backend) = dwave_entry(&config)?;
 
         assert_eq!(dwave.backend, "dwave");
         assert_eq!(dwave.binary, "/opt/miners/quip-dwave-qa");
@@ -969,8 +948,7 @@ budget_reset_day = 17
         clippy::panic_in_result_fn,
         reason = "Test assertions report mismatches while Result propagates setup errors."
     )]
-    fn dwave_budget_formats_and_reset_days_pass_through() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn dwave_budget_formats_and_reset_days_pass_through() -> TestResult {
         for (budget, expected, reset_day) in [
             ("900", toml::Value::Integer(900), 1_i64),
             ("900.5", toml::Value::Float(900.5), 31),
@@ -989,34 +967,23 @@ budget_reset_day = {reset_day}
 "#
             );
             let config = parse_config(&text)?;
-            let dwave = config
-                .launch
-                .iter()
-                .find(|entry| entry.miner_id == "qpu-0")
-                .ok_or("budget config must launch D-Wave")?;
-            let backend: toml::Table = toml::from_str(&dwave.configure.backend_toml)?;
+            let (_, backend) = dwave_entry(&config)?;
 
-            assert_eq!(backend.get("budget"), Some(&expected));
+            assert_eq!(backend.get("budget"), Some(&expected), "{budget}");
             assert_eq!(
                 backend
                     .get("budget_reset_day")
                     .and_then(toml::Value::as_integer),
-                Some(reset_day)
+                Some(reset_day),
+                "{budget}"
             );
-            assert_eq!(backend.len(), 2);
+            assert_eq!(backend.len(), 2, "{budget}");
         }
         Ok(())
     }
 
     #[test]
-    fn dwave_default_binary_is_qa() {
-        let c = parse_config(SAMPLE).unwrap();
-        let dwave = c.launch.iter().find(|e| e.miner_id == "qpu-0").unwrap();
-        assert_eq!(dwave.binary, "quip-dwave-qa");
-    }
-
-    #[test]
-    fn dashboard_section_parsed_when_present() {
+    fn dashboard_section_requires_both_keys() {
         let c = parse_config(SAMPLE).unwrap();
         assert!(c.dashboard.is_none());
 
@@ -1026,10 +993,7 @@ budget_reset_day = {reset_day}
         let d = parse_config(&with).unwrap().dashboard.unwrap();
         assert_eq!(d.listen, "127.0.0.1:9090");
         assert_eq!(d.data_dir, "/data/attempts");
-    }
 
-    #[test]
-    fn dashboard_ignored_when_missing_keys() {
         // A [dashboard] section missing a required key disables it rather than
         // erroring, so a partial config still boots.
         let partial = format!("{SAMPLE}\n[dashboard]\nlisten = \"127.0.0.1:9090\"\n");
@@ -1054,6 +1018,10 @@ budget_reset_day = {reset_day}
         );
     }
 
+    /// The v0.2 case is the exact failure seen on a live node-manager stack: a
+    /// v0.2.1 `quip-miner` config handed to the v0.3 coordinator. It parses as
+    /// valid TOML and has a `[miner]` section, so nothing rejected it — it just
+    /// launched no miners.
     #[test]
     fn config_without_any_backend_is_rejected() {
         let no_backend =
@@ -1064,13 +1032,7 @@ budget_reset_day = {reset_day}
                 looks_like_v0_2: false
             })
         ));
-    }
 
-    /// The exact failure seen on a live node-manager stack: a v0.2.1 `quip-miner`
-    /// config handed to the v0.3 coordinator. It parses as valid TOML and has a
-    /// `[miner]` section, so nothing rejected it — it just launched no miners.
-    #[test]
-    fn v0_2_miner_config_is_rejected_with_a_format_hint() {
         let v0_2 = r#"
 [miner]
 signer_key = "/data/keystore.json"
@@ -1095,39 +1057,29 @@ rest_port = 8086
     /// v0.2 parity: a config that omits `validators` must still reach a chain.
     /// The node-manager template ships the key commented out, so without the
     /// fallback the coordinator starts with nowhere to connect and never mines.
+    /// An explicit `[]` is a deliberate choice, not an omission.
     #[test]
-    fn omitted_validators_fall_back_to_the_v0_2_pair() {
-        let cfg = parse_config(
-            "[miner]\nsigner_key = \"//Alice\"\n\
-             public_host = \"203.0.113.10\"\npublic_port = 20050\n\n[cpu]\n",
-        )
-        .unwrap();
-        assert_eq!(cfg.validators, DEFAULT_VALIDATORS.to_vec());
+    fn validators_fall_back_only_when_omitted() {
+        let cases = [
+            ("omitted", "", DEFAULT_VALIDATORS.to_vec()),
+            (
+                "explicit",
+                "validators = [\"ws://example:9944\"]\n",
+                vec!["ws://example:9944"],
+            ),
+            ("explicit empty", "validators = []\n", Vec::new()),
+        ];
+        for (label, key, expected) in cases {
+            let cfg = parse_config(&cpu_config(&format!(
+                "{key}public_host = \"203.0.113.10\"\npublic_port = 20050\n"
+            )))
+            .unwrap();
+            assert_eq!(cfg.validators, expected, "{label}");
+        }
     }
 
     #[test]
-    fn explicit_validators_win_over_the_fallback() {
-        let cfg = parse_config(
-            "[miner]\nvalidators = [\"ws://example:9944\"]\nsigner_key = \"//Alice\"\n\
-             public_host = \"203.0.113.10\"\npublic_port = 20050\n\n[cpu]\n",
-        )
-        .unwrap();
-        assert_eq!(cfg.validators, vec!["ws://example:9944".to_string()]);
-    }
-
-    #[test]
-    fn explicit_empty_validators_stay_empty() {
-        // An explicit `[]` is a deliberate choice, not an omission.
-        let cfg = parse_config(
-            "[miner]\nvalidators = []\nsigner_key = \"//Alice\"\n\
-             public_host = \"203.0.113.10\"\npublic_port = 20050\n\n[cpu]\n",
-        )
-        .unwrap();
-        assert!(cfg.validators.is_empty());
-    }
-
-    #[test]
-    fn funding_defaults_apply_when_keys_are_absent() {
+    fn sample_config_applies_defaults() {
         let cfg = parse_config(SAMPLE).unwrap();
         assert_eq!(cfg.faucet_url, None);
         assert_eq!(
@@ -1139,33 +1091,36 @@ rest_port = 8086
             crate::funding::DEFAULT_TOP_UP_PLANCKS
         );
         assert_eq!(cfg.funding_timeout_s, 600);
+        assert_eq!(cfg.max_submit_attempts, 5);
+        assert_eq!(cfg.node_id, None);
+        assert_eq!(cfg.node_name, None);
+        assert_eq!(cfg.public_host, "203.0.113.10");
+        assert_eq!(cfg.public_port, 20050);
+        assert!(cfg.auto_mine);
+        assert_eq!(cfg.node_log_level, NodeLogLevel::Info);
     }
 
     #[test]
-    fn funding_keys_are_parsed_and_overridable() {
+    fn miner_keys_override_defaults() {
         let text = "[miner]\nsigner_key = \"//Alice\"\n\
+                    node_id = \"tesla-1\"\nnode_name = \"Tesla\"\n\
                     public_host = \"203.0.113.10\"\npublic_port = 20050\n\
+                    auto_mine = false\nlog_level = \"debug\"\n\
                     faucet_url = \"https://f.example\"\n\
                     min_balance_plancks = 5\nfaucet_top_up_plancks = 50\n\
-                    funding_timeout_s = 30\n\n[cpu]\n";
-        let cfg = parse_config(text).unwrap();
-        assert_eq!(cfg.faucet_url.as_deref(), Some("https://f.example"));
-        assert_eq!(cfg.min_balance_plancks, 5);
-        assert_eq!(cfg.faucet_top_up_plancks, 50);
-        assert_eq!(cfg.funding_timeout_s, 30);
-    }
-
-    #[test]
-    fn max_submit_attempts_defaults_and_overrides() {
-        let cfg = parse_config(SAMPLE).unwrap();
-        assert_eq!(cfg.max_submit_attempts, 5);
-        let cfg = parse_config(
-            "[miner]\nvalidators = [\"ws://x\"]\nsigner_key = \"//Alice\"\n\
-             public_host = \"203.0.113.10\"\npublic_port = 20050\n\
-             max_submit_attempts = 2\n\n[cpu]\n",
-        )
-        .unwrap();
-        assert_eq!(cfg.max_submit_attempts, 2);
+                    funding_timeout_s = 30\nmax_submit_attempts = 2\n\n[cpu]\n";
+        let c = parse_config(text).unwrap();
+        assert_eq!(c.node_id.as_deref(), Some("tesla-1"));
+        assert_eq!(c.node_name.as_deref(), Some("Tesla"));
+        assert_eq!(c.public_host, "203.0.113.10");
+        assert_eq!(c.public_port, 20050);
+        assert!(!c.auto_mine);
+        assert_eq!(c.node_log_level, NodeLogLevel::Debug);
+        assert_eq!(c.faucet_url.as_deref(), Some("https://f.example"));
+        assert_eq!(c.min_balance_plancks, 5);
+        assert_eq!(c.faucet_top_up_plancks, 50);
+        assert_eq!(c.funding_timeout_s, 30);
+        assert_eq!(c.max_submit_attempts, 2);
     }
 
     /// Emptying the value is how an operator opts out without deleting the key.
@@ -1213,37 +1168,14 @@ idle_after_s = 600
         assert_eq!(c.public_host, "96.233.112.201");
         assert_eq!(c.node_log_level, NodeLogLevel::Info);
         assert_eq!(c.node_id, None);
+        // `rest_port` (20100) is not the descriptor's `public_port`.
         assert_eq!(c.public_port, 20050);
         assert!(c.auto_mine);
         let ids: Vec<&str> = c.launch.iter().map(|e| e.miner_id.as_str()).collect();
         assert_eq!(ids, vec!["cpu-0", "metal-0"]);
         let backends: Vec<&str> = c.launch.iter().map(|e| e.backend.as_str()).collect();
         assert_eq!(backends, vec!["cpu", "metal"]);
-    }
-
-    #[test]
-    fn rest_port_is_not_the_descriptor_public_port() {
-        let c = parse_config(LIVE).unwrap();
-        assert_eq!(c.public_port, 20050);
-        assert_ne!(c.public_port, 20100);
-    }
-
-    #[test]
-    fn metal_section_is_metal_kind() {
-        let c = parse_config(
-            "[miner]\nsigner_key = \"//Alice\"\n\
-             public_host = \"203.0.113.10\"\npublic_port = 20050\n\n[metal]\n",
-        )
-        .unwrap();
-        let metal = c.launch.first().expect("one metal entry");
-        assert_eq!(metal.backend, "metal");
-        assert_eq!(metal.miner_kind(), MinerKind::Metal);
-        assert_eq!(participate_kind(&c.launch), MinerKind::Metal);
-    }
-
-    #[test]
-    fn mixed_cpu_metal_declares_metal_on_participate() {
-        let c = parse_config(LIVE).unwrap();
+        // A mixed cpu+metal host declares metal on participate.
         assert_eq!(
             c.launch
                 .iter()
@@ -1255,51 +1187,20 @@ idle_after_s = 600
     }
 
     #[test]
-    fn descriptor_optional_keys_parse_when_present() {
-        let text = "[miner]\nsigner_key = \"//Alice\"\n\
-                    node_id = \"tesla-1\"\nnode_name = \"Tesla\"\n\
-                    public_host = \"203.0.113.10\"\n\
-                    public_port = 20050\nauto_mine = false\nlog_level = \"debug\"\n\n[cpu]\n";
-        let c = parse_config(text).unwrap();
-        assert_eq!(c.node_id.as_deref(), Some("tesla-1"));
-        assert_eq!(c.node_name.as_deref(), Some("Tesla"));
-        assert_eq!(c.public_host, "203.0.113.10");
-        assert_eq!(c.public_port, 20050);
-        assert!(!c.auto_mine);
-        assert_eq!(c.node_log_level, NodeLogLevel::Debug);
-    }
-
-    #[test]
-    fn missing_descriptor_keys_take_defaults() {
-        let c = parse_config(SAMPLE).unwrap();
-        assert_eq!(c.node_id, None);
-        assert_eq!(c.node_name, None);
-        assert_eq!(c.public_host, "203.0.113.10");
-        assert_eq!(c.public_port, 20050);
-        assert!(c.auto_mine);
-        assert_eq!(c.node_log_level, NodeLogLevel::Info);
-    }
-
-    fn miner_cpu(extra: &str) -> String {
-        format!("[miner]\nsigner_key = \"//Alice\"\n{extra}\n[cpu]\n")
-    }
-
-    const IDENTITY: &str = "public_host = \"h\"\npublic_port = 1\n";
-
-    #[test]
-    fn solver_pin_is_optional_and_accepts_a_solver_id() {
-        let unset = parse_config(&miner_cpu(IDENTITY)).unwrap();
+    fn solver_pin_is_optional_and_validated() {
+        let unset = parse_config(&cpu_config(IDENTITY)).unwrap();
         assert_eq!(unset.solver_pin, None);
-        let set = parse_config(&miner_cpu(&format!(
+        let set = parse_config(&cpu_config(&format!(
             "{IDENTITY}solver_pin = \"quip-cpu-sa/1\"\n"
         )))
         .unwrap();
         assert_eq!(set.solver_pin.as_deref(), Some("quip-cpu-sa/1"));
-    }
 
-    #[test]
-    fn solver_pin_that_can_never_match_is_refused() {
-        let err = parse_config(&miner_cpu(&format!("{IDENTITY}solver_pin = \"Bad Pin\"\n"))).err();
+        // A pin that can never match is refused.
+        let err = parse_config(&cpu_config(&format!(
+            "{IDENTITY}solver_pin = \"Bad Pin\"\n"
+        )))
+        .err();
         assert_eq!(
             err,
             Some(ConfigError::InvalidSolverPin {
@@ -1309,94 +1210,38 @@ idle_after_s = 600
     }
 
     #[test]
-    fn public_host_and_public_port_parse_when_both_present() {
-        let c = parse_config(&miner_cpu(
-            "public_host = \"203.0.113.10\"\npublic_port = 20050\n",
-        ))
-        .unwrap();
-        assert_eq!(c.public_host, "203.0.113.10");
-        assert_eq!(c.public_port, 20050);
-    }
-
-    #[test]
-    fn missing_public_host_is_a_config_error_naming_the_key() {
-        let Err(err) = parse_config(&miner_cpu("public_port = 20050\n")) else {
-            panic!("missing public_host must not parse");
-        };
-        assert!(matches!(
-            err,
-            ConfigError::MissingMinerKey { key: "public_host" }
-        ));
-        let msg = err.to_string();
-        assert!(msg.contains("public_host"), "{msg}");
-        assert!(msg.contains("[miner]"), "{msg}");
-    }
-
-    #[test]
-    fn missing_public_port_is_a_config_error_naming_the_key() {
-        let Err(err) = parse_config(&miner_cpu("public_host = \"203.0.113.10\"\n")) else {
-            panic!("missing public_port must not parse");
-        };
-        assert!(matches!(
-            err,
-            ConfigError::MissingMinerKey { key: "public_port" }
-        ));
-        let msg = err.to_string();
-        assert!(msg.contains("public_port"), "{msg}");
-        assert!(msg.contains("[miner]"), "{msg}");
-    }
-
-    #[test]
-    fn blank_public_host_is_rejected_as_missing() {
-        for blank in ["\"\"", "\"   \""] {
-            let text = miner_cpu(&format!("public_host = {blank}\npublic_port = 20050\n"));
-            let Err(err) = parse_config(&text) else {
-                panic!("blank public_host {blank} must not parse");
+    fn missing_or_invalid_public_identity_names_the_key() {
+        let cases = [
+            ("missing host", "public_port = 20050\n", "public_host"),
+            (
+                "missing port",
+                "public_host = \"203.0.113.10\"\n",
+                "public_port",
+            ),
+            (
+                "empty host",
+                "public_host = \"\"\npublic_port = 20050\n",
+                "public_host",
+            ),
+            (
+                "blank host",
+                "public_host = \"   \"\npublic_port = 20050\n",
+                "public_host",
+            ),
+            (
+                "zero port",
+                "public_host = \"203.0.113.10\"\npublic_port = 0\n",
+                "public_port",
+            ),
+        ];
+        for (label, keys, key) in cases {
+            let Err(err) = parse_config(&cpu_config(keys)) else {
+                panic!("{label}: must not parse");
             };
-            assert!(
-                matches!(err, ConfigError::MissingMinerKey { key: "public_host" }),
-                "{blank}: {err}"
-            );
+            assert_eq!(err, ConfigError::MissingMinerKey { key }, "{label}");
             let msg = err.to_string();
-            assert!(msg.contains("public_host"), "{blank}: {msg}");
-            assert!(msg.contains("[miner]"), "{blank}: {msg}");
+            assert!(msg.contains(key), "{label}: {msg}");
+            assert!(msg.contains("[miner]"), "{label}: {msg}");
         }
-    }
-
-    #[test]
-    fn zero_public_port_is_rejected() {
-        let Err(err) = parse_config(&miner_cpu(
-            "public_host = \"203.0.113.10\"\npublic_port = 0\n",
-        )) else {
-            panic!("public_port = 0 must not parse");
-        };
-        assert!(matches!(
-            err,
-            ConfigError::MissingMinerKey { key: "public_port" }
-        ));
-        let msg = err.to_string();
-        assert!(msg.contains("public_port"), "{msg}");
-        assert!(msg.contains("[miner]"), "{msg}");
-    }
-
-    /// The shipped v0.3 template must survive its own parser.
-    #[test]
-    fn shipped_docker_template_parses() {
-        let text = include_str!("../../../docker/config.toml");
-        let cfg = parse_config(text).expect("docker/config.toml must parse");
-        assert!(
-            !cfg.launch.is_empty(),
-            "shipped template must declare a backend"
-        );
-        // The image must self-fund out of the box: a bare `docker run` has no
-        // way to hand the account money otherwise.
-        assert!(
-            cfg.faucet_url.is_some(),
-            "shipped template must configure a faucet"
-        );
-        assert!(
-            !cfg.signer_key.is_empty(),
-            "shipped template must point at a keystore path"
-        );
     }
 }

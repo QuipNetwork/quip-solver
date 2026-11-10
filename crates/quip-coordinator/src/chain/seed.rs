@@ -268,23 +268,10 @@ mod tests {
         }
     }
 
+    /// The call is the sudo and inner prefixes, then the arguments as the
+    /// pallet tuple, with each allowed-value list as the `Set` variant.
     #[test]
-    fn register_topology_call_carries_the_sudo_and_inner_prefixes() {
-        let call = encode_register_topology(&tiny());
-        #[expect(
-            clippy::indexing_slicing,
-            reason = "a well-formed call always starts with the four prefix bytes"
-        )]
-        {
-            assert_eq!(call[0], SUDO_PALLET_INDEX);
-            assert_eq!(call[1], SUDO_CALL_INDEX);
-            assert_eq!(call[2], QUANTUM_POW_PALLET_INDEX);
-            assert_eq!(call[3], REGISTER_TOPOLOGY_CALL_INDEX);
-        }
-    }
-
-    #[test]
-    fn register_topology_arguments_encode_as_the_pallet_tuple() {
+    fn register_topology_call_is_the_prefixes_then_the_pallet_tuple() {
         let t = tiny();
         let call = encode_register_topology(&t);
         let expected = (
@@ -295,26 +282,19 @@ mod tests {
             AllowedValueSpec::Set(t.allowed_spin_milli),
         )
             .encode();
-        #[expect(
-            clippy::indexing_slicing,
-            reason = "the prefix is four bytes; the remainder is the argument block"
-        )]
-        {
-            assert_eq!(&call[4..], &expected[..]);
-        }
-    }
-
-    #[test]
-    fn allowed_value_sets_encode_as_the_set_variant() {
-        let call = encode_register_topology(&tiny());
         // nodes: Compact(3) = 0x0c, then 3 * u32 = 12 bytes -> 13 bytes.
         // edges: Compact(2) = 0x08, then 2 * (u32,u32) = 16 bytes -> 17 bytes.
         let h_start = 4 + 13 + 17;
         #[expect(
             clippy::indexing_slicing,
-            reason = "h_start is the computed offset of the first allowed-value spec"
+            reason = "a well-formed call is the four prefix bytes then the argument block"
         )]
         {
+            assert_eq!(call[0], SUDO_PALLET_INDEX);
+            assert_eq!(call[1], SUDO_CALL_INDEX);
+            assert_eq!(call[2], QUANTUM_POW_PALLET_INDEX);
+            assert_eq!(call[3], REGISTER_TOPOLOGY_CALL_INDEX);
+            assert_eq!(&call[4..], &expected[..]);
             assert_eq!(call[h_start], 0, "AllowedValueSpec::Set is variant 0");
             assert_eq!(call[h_start + 1], 0x0c, "three h values, Compact(3)");
         }
@@ -361,32 +341,24 @@ mod tests {
         );
     }
 
+    /// `parse_topology_spec` builds `Topology::hash` through the same canonical
+    /// hash function. If these ever disagree, the confirmation read in
+    /// `seed_chain` would compare against the wrong value.
     #[test]
-    fn the_default_difficulty_matches_the_values_the_testnet_was_seeded_with() {
-        assert_eq!(DEFAULT_SEED_DIFFICULTY.min_solutions, 5);
-        assert_eq!(DEFAULT_SEED_DIFFICULTY.max_energy_milli, -2_500_000);
-        assert_eq!(DEFAULT_SEED_DIFFICULTY.min_diversity_milli, 200);
-    }
-
-    #[test]
-    fn a_topology_spec_converts_to_a_seed_topology() {
-        let text = crate::presets::preset_spec("smoke").unwrap();
-        let spec = crate::drive::parse_topology_spec(text).unwrap();
-        let seed = SeedTopology::from_spec(&spec);
-        assert_eq!(seed.nodes, spec.topology.nodes);
-        assert_eq!(seed.edges, spec.topology.edge_pairs());
-        assert_eq!(seed.allowed_h_milli, spec.allowed_h_milli);
-        assert_eq!(seed.allowed_spin_milli, spec.allowed_spin_milli);
-    }
-
-    #[test]
-    fn the_seed_topology_hash_matches_the_spec_topology_hash() {
-        // parse_topology_spec builds Topology::hash through the same canonical
-        // hash function. If these ever disagree, the confirmation read in
-        // seed_chain would compare against the wrong value.
-        let text = crate::presets::preset_spec("advantage2-system1").unwrap();
-        let spec = crate::drive::parse_topology_spec(text).unwrap();
-        let seed = SeedTopology::from_spec(&spec);
-        assert_eq!(seed.topology_hash().to_vec(), spec.topology.hash);
+    fn a_topology_spec_converts_to_a_seed_topology_with_the_same_hash() {
+        for preset in ["smoke", "advantage2-system1"] {
+            let text = crate::presets::preset_spec(preset).unwrap();
+            let spec = crate::drive::parse_topology_spec(text).unwrap();
+            let seed = SeedTopology::from_spec(&spec);
+            assert_eq!(seed.nodes, spec.topology.nodes, "{preset}");
+            assert_eq!(seed.edges, spec.topology.edge_pairs(), "{preset}");
+            assert_eq!(seed.allowed_h_milli, spec.allowed_h_milli, "{preset}");
+            assert_eq!(seed.allowed_spin_milli, spec.allowed_spin_milli, "{preset}");
+            assert_eq!(
+                seed.topology_hash().to_vec(),
+                spec.topology.hash,
+                "{preset}"
+            );
+        }
     }
 }

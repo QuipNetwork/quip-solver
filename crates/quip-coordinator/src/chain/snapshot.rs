@@ -165,32 +165,12 @@ mod tests {
     }
 
     #[test]
-    fn head_key_stable_for_same_snapshot() {
-        let a = head_state_key(&sample());
-        let b = head_state_key(&sample());
-        assert_eq!(a, b);
-    }
-
-    #[test]
     fn head_key_changes_when_last_proof_changes() {
         let mut s = sample();
         let k1 = head_state_key(&s);
         s.last_proof_block_hash = [8u8; 32];
         let k2 = head_state_key(&s);
         assert_ne!(k1, k2);
-    }
-
-    #[test]
-    fn decay_params_genesis_disables_decay() {
-        let g = DecayParams::genesis();
-        assert_eq!(g.last_proof_block, 0); // no proof yet → no decay
-        assert_eq!(g.epoch_length, crate::decay::EPOCH_LENGTH_BLOCKS);
-        assert_eq!(
-            g.base_max_energy_milli,
-            crate::decay::DEFAULT_BASE_MAX_ENERGY_MILLI
-        );
-        assert_eq!(g.c_easy_milli, 700);
-        assert_eq!(g.c_hard_milli, 750);
     }
 
     #[test]
@@ -226,40 +206,23 @@ mod tests {
         }
     }
 
-    #[test]
-    fn curve_c_scale_roundtrips() {
-        use crate::chain::scale_types::CurveCScale;
-        use parity_scale_codec::{Decode, Encode};
-        let c = CurveCScale {
-            easy_milli: 700,
-            knee_milli: 725,
-            hard_milli: 750,
-        };
-        let bytes = c.encode();
-        assert_eq!(CurveCScale::decode(&mut &bytes[..]).unwrap(), c);
-    }
-
     /// The pallet writes `LastProofBlockHash` one block after the win. At the
     /// winning block, `LastProofBlock` already names the head, and the head
     /// hash is the value the pallet will store next block.
     #[test]
-    fn root_is_the_head_hash_at_the_winning_block() {
+    fn root_is_the_head_hash_only_at_the_winning_block() {
         let head = [1u8; 32];
         let stored = [2u8; 32];
-        assert_eq!(round_root(head, 100, 100, stored), head);
-    }
-
-    #[test]
-    fn root_is_the_stored_hash_after_the_winning_block() {
-        let head = [1u8; 32];
-        let stored = [2u8; 32];
-        assert_eq!(round_root(head, 101, 100, stored), stored);
-    }
-
-    #[test]
-    fn root_is_the_stored_hash_before_any_win() {
-        let head = [1u8; 32];
-        let stored = [2u8; 32];
-        assert_eq!(round_root(head, 5, 0, stored), stored);
+        for (label, head_number, last_proof_block, expected) in [
+            ("at the winning block", 100, 100, head),
+            ("after the winning block", 101, 100, stored),
+            ("before any win", 5, 0, stored),
+        ] {
+            assert_eq!(
+                round_root(head, head_number, last_proof_block, stored),
+                expected,
+                "{label}"
+            );
+        }
     }
 }

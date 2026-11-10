@@ -250,7 +250,7 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_counts_pass_and_reject() {
+    fn aggregate_counts_throughput_and_salts() {
         let rows = vec![
             row(true, false, 10),
             row(false, false, 20),
@@ -264,20 +264,15 @@ mod tests {
         assert_eq!(agg.rejected, 1);
         assert_eq!(agg.wall_ms_total, 1500);
         assert!((agg.throughput_per_s - 2.0).abs() < 1e-9);
-    }
 
-    #[test]
-    fn aggregate_of_empty_rows_has_zero_throughput() {
+        // Empty run: zero throughput.
         let agg = aggregate(&[], 0);
         assert_eq!(agg.total_jobs, 0);
         #[expect(clippy::float_cmp, reason = "exact zero throughput on empty run")]
         {
             assert_eq!(agg.throughput_per_s, 0.0);
         }
-    }
 
-    #[test]
-    fn aggregate_reports_salts_per_second() {
         let mut a = row(true, false, 10);
         a.salts_done = 30;
         let mut b = row(false, false, 10);

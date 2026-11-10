@@ -721,6 +721,13 @@ mod tests {
         v.pointer(path).unwrap_or(&Value::Null)
     }
 
+    /// One GET against `app`, whatever the status.
+    async fn fetch(app: Router, uri: &str) -> Response {
+        app.oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
     fn sentinel_line(raw_best_energy_milli: i64) -> String {
         serde_json::json!({
             "ts_ms": 1_700_000_000_000_u64,
@@ -806,54 +813,37 @@ mod tests {
         Submitted,
     }
 
-    fn write_fixture(tmp: &Path, solution_number: u64, fixture: &Fixture) {
+    /// Write `rows` as the attempt trail of `solution_number`.
+    fn write_rows(tmp: &Path, solution_number: u64, rows: &[String]) {
         let dir = tmp.join(solution_number.to_string());
         std::fs::create_dir_all(&dir).unwrap();
-        let body = match fixture {
-            Fixture::Normal => format!(
-                "{}\n{}\n",
+        std::fs::write(dir.join("attempts.jsonl"), rows.join("\n") + "\n").unwrap();
+    }
+
+    fn write_fixture(tmp: &Path, solution_number: u64, fixture: &Fixture) {
+        let rows = match fixture {
+            Fixture::Normal => vec![
                 attempt_line("cpu-0", -14_000, 200, 3, true, false, 0),
                 attempt_line("cpu-0", -14_200, 250, 6, true, true, 12_000),
-            ),
-            Fixture::AllSentinel => {
-                format!("{}\n{}\n", sentinel_line(-500), legacy_sentinel_line())
+            ],
+            Fixture::AllSentinel => vec![sentinel_line(-500), legacy_sentinel_line()],
+            Fixture::HugeDeviceTime => {
+                vec![attempt_line("cpu-0", -14_200, 250, 6, true, true, u64::MAX)]
             }
-            Fixture::HugeDeviceTime => format!(
-                "{}\n",
-                attempt_line("cpu-0", -14_200, 250, 6, true, true, u64::MAX),
-            ),
-            Fixture::Submitted => format!("{}\n", submitted_line()),
+            Fixture::Submitted => vec![submitted_line()],
         };
-        std::fs::write(dir.join("attempts.jsonl"), body).unwrap();
+        write_rows(tmp, solution_number, &rows);
     }
 
     async fn get_body(tmp: &Path, uri: &str) -> Value {
-        let app = router(test_state(tmp));
-        let resp = app
-            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
-            .await
-            .unwrap();
+        let resp = fetch(router(test_state(tmp)), uri).await;
         assert_eq!(resp.status(), StatusCode::OK, "{uri} did not return 200");
         body_json(resp).await
     }
 
-    async fn sweep_all_endpoints(tmp: &Path, solution_number: u64) {
-        for uri in [
-            "/api/v1/status".to_string(),
-            "/api/v1/stats".to_string(),
-            format!("/api/v1/mining/attempts?solution_number={solution_number}"),
-        ] {
-            let body = get_body(tmp, &uri).await;
-            assert_safe_integers(&body, &uri);
-        }
-    }
-
     /// QUI-1391: a response body too large for [`body_json`]'s 1 MB cap.
     async fn get_body_unbounded(tmp: &Path, uri: &str) -> Value {
-        let resp = router(test_state(tmp))
-            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
-            .await
-            .unwrap();
+        let resp = fetch(router(test_state(tmp)), uri).await;
         assert_eq!(resp.status(), StatusCode::OK, "{uri} did not return 200");
         let bytes = axum::body::to_bytes(resp.into_body(), 64 << 20)
             .await
@@ -889,7 +879,9 @@ mod tests {
     }
 
     /// QUI-1391: `limit` returns the newest N rows and totals for the whole
-    /// trail. 10,001 rows is past the ~9,000 a two-GPU node records.
+    /// trail. 10,001 rows is past the ~9,000 a two-GPU node records. A request
+    /// without `limit` keeps the shape it had before, so clients that predate
+    /// the parameter are untouched.
     #[tokio::test]
     async fn attempts_limit_returns_the_newest_rows_with_whole_trail_totals() {
         let tmp = tempfile::tempdir().unwrap();
@@ -913,14 +905,6 @@ mod tests {
         assert_eq!(at(&v, "/data/totals/qpu_access_time_us"), &json!(70_007));
         assert_eq!(at(&v, "/data/totals/num_valid"), &json!(41));
         assert_safe_integers(&v, "attempts?limit=500");
-    }
-
-    /// QUI-1391: a request without `limit` keeps the shape it had before, so
-    /// clients that predate the parameter are untouched.
-    #[tokio::test]
-    async fn attempts_without_limit_are_unchanged() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_long_trail(tmp.path(), 1, 10_001);
 
         let v = get_body_unbounded(tmp.path(), "/api/v1/mining/attempts?solution_number=1").await;
         assert_eq!(at(&v, "/data/attempts").as_array().unwrap().len(), 10_001);
@@ -930,81 +914,23 @@ mod tests {
         );
     }
 
-    /// QUI-1391: a limit past the trail length returns the whole trail, and
-    /// `limit=0` is a totals-only probe rather than an error.
-    #[tokio::test]
-    async fn attempts_limit_handles_the_range_edges() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_fixture(tmp.path(), 1, &Fixture::Normal);
-
-        let v = get_body(
-            tmp.path(),
-            "/api/v1/mining/attempts?solution_number=1&limit=999",
-        )
-        .await;
-        assert_eq!(at(&v, "/data/attempts").as_array().unwrap().len(), 2);
-        assert_eq!(at(&v, "/data/totals/attempt_count"), &json!(2));
-
-        let v = get_body(
-            tmp.path(),
-            "/api/v1/mining/attempts?solution_number=1&limit=0",
-        )
-        .await;
-        assert_eq!(at(&v, "/data/attempts").as_array().unwrap().len(), 0);
-        assert_eq!(at(&v, "/data/totals/attempt_count"), &json!(2));
-    }
-
-    /// QUI-1391: a trail where no row ever cleared the gate reports 0 rather
-    /// than the `i64::MAX` sentinel.
-    #[tokio::test]
-    async fn attempts_totals_never_report_the_energy_sentinel() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_fixture(tmp.path(), 1, &Fixture::AllSentinel);
-
-        let v = get_body(
-            tmp.path(),
-            "/api/v1/mining/attempts?solution_number=1&limit=10",
-        )
-        .await;
-        assert_eq!(at(&v, "/data/totals/best_energy_milli"), &json!(-500));
-        assert_eq!(at(&v, "/data/totals/num_valid"), &Value::Null);
-    }
-
-    /// QUI-1391: a non-numeric limit is a 400, not a silent full trail.
-    #[tokio::test]
-    async fn attempts_reject_a_non_numeric_limit() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_fixture(tmp.path(), 1, &Fixture::Normal);
-        let resp = router(test_state(tmp.path()))
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/mining/attempts?solution_number=1&limit=abc")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        let v = body_json(resp).await;
-        assert_eq!(at(&v, "/code"), &json!("BAD_PARAM"));
-        assert_eq!(at(&v, "/success"), &json!(false));
-    }
-
     /// C3: no response from any endpoint carries an unsafe integer, whatever
-    /// the attempt file holds.
+    /// the attempt file holds. The ordinary, sentinel and huge-device-time
+    /// fixtures are swept by the golden test; this one sits above
+    /// `JS_MAX_SAFE_INTEGER` and exercises the `solution_number` guard itself,
+    /// not just the fields copied from the attempt record.
     #[tokio::test]
     async fn c3_every_response_number_is_a_safe_integer() {
-        for (n, fixture) in [
-            (1_u64, Fixture::Normal),
-            (2, Fixture::AllSentinel),
-            (3, Fixture::HugeDeviceTime),
-            // Above JS_MAX_SAFE_INTEGER: exercises the `solution_number` guard
-            // itself, not just the fields copied from the attempt record.
-            (9_007_199_254_740_992, Fixture::Normal),
+        let n = 9_007_199_254_740_992_u64;
+        let tmp = tempfile::tempdir().unwrap();
+        write_fixture(tmp.path(), n, &Fixture::Normal);
+        for uri in [
+            "/api/v1/status".to_string(),
+            "/api/v1/stats".to_string(),
+            format!("/api/v1/mining/attempts?solution_number={n}"),
         ] {
-            let tmp = tempfile::tempdir().unwrap();
-            write_fixture(tmp.path(), n, &fixture);
-            sweep_all_endpoints(tmp.path(), n).await;
+            let body = get_body(tmp.path(), &uri).await;
+            assert_safe_integers(&body, &uri);
         }
     }
 
@@ -1013,57 +939,65 @@ mod tests {
         get_body(tmp, &uri).await
     }
 
-    /// C1: every row holds the no-solution sentinel; the raw best is served.
+    /// Sentinel handling across the attempt trail, one directory per shape.
     #[tokio::test]
-    async fn c1_no_sentinel_reaches_the_response() {
+    async fn attempt_energy_sentinels_never_reach_the_response() {
         let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("42");
-        std::fs::create_dir_all(&dir).unwrap();
-        let body = format!("{}\n{}\n", sentinel_line(-500), sentinel_line(-500));
-        std::fs::write(dir.join("attempts.jsonl"), body).unwrap();
 
+        // QUI-1391: a trail where no row ever cleared the gate reports 0 rather
+        // than the `i64::MAX` sentinel.
+        write_fixture(tmp.path(), 1, &Fixture::AllSentinel);
+        let v = get_body(
+            tmp.path(),
+            "/api/v1/mining/attempts?solution_number=1&limit=10",
+        )
+        .await;
+        assert_eq!(at(&v, "/data/totals/best_energy_milli"), &json!(-500));
+        assert_eq!(at(&v, "/data/totals/num_valid"), &Value::Null);
+
+        // C1: every row holds the no-solution sentinel; the raw best is served.
+        write_rows(tmp.path(), 42, &[sentinel_line(-500), sentinel_line(-500)]);
         let v = attempts_body(tmp.path(), 42).await;
         assert_eq!(at(&v, "/data/submission/energy_milli"), &json!(-500));
         assert_eq!(at(&v, "/data/attempts/0/best_energy_milli"), &json!(-500));
-    }
 
-    /// C2: the legacy on-disk shape has no raw field. It must read as 0, not
-    /// as the sentinel, and the request must still return 200.
-    #[tokio::test]
-    async fn c2_legacy_rows_without_the_raw_field_read_as_zero() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("42");
-        std::fs::create_dir_all(&dir).unwrap();
-        let body = format!("{}\n{}\n", legacy_sentinel_line(), legacy_sentinel_line());
-        std::fs::write(dir.join("attempts.jsonl"), body).unwrap();
-
-        let v = attempts_body(tmp.path(), 42).await;
+        // C2: the legacy on-disk shape has no raw field. It must read as 0, not
+        // as the sentinel, and the request must still return 200.
+        write_rows(
+            tmp.path(),
+            44,
+            &[legacy_sentinel_line(), legacy_sentinel_line()],
+        );
+        let v = attempts_body(tmp.path(), 44).await;
         assert_eq!(at(&v, "/data/submission/energy_milli"), &json!(0));
         assert_eq!(at(&v, "/data/attempts/0/best_energy_milli"), &json!(0));
-    }
 
-    /// The raw field is a fallback, not an override: a row that cleared the
-    /// gate still serves its gate-passing best.
-    #[tokio::test]
-    async fn gate_passing_rows_keep_their_own_best_energy() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("9");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("attempts.jsonl"),
-            format!(
-                "{}\n",
-                attempt_line("cpu-0", -14_200, 250, 6, true, true, 0)
-            ),
-        )
-        .unwrap();
-
+        // The raw field is a fallback, not an override: a row that cleared the
+        // gate still serves its gate-passing best.
+        write_rows(
+            tmp.path(),
+            9,
+            &[attempt_line("cpu-0", -14_200, 250, 6, true, true, 0)],
+        );
         let v = attempts_body(tmp.path(), 9).await;
         assert_eq!(at(&v, "/data/submission/energy_milli"), &json!(-14_200));
         assert_eq!(
             at(&v, "/data/attempts/0/best_energy_milli"),
             &json!(-14_200)
         );
+
+        // A rejected attempt has no chain outcome. The four nullable fields
+        // stay null and the two non-nullable ones keep their types, or the
+        // dashboard parser throws.
+        write_rows(tmp.path(), 43, &[sentinel_line(-500)]);
+        let v = attempts_body(tmp.path(), 43).await;
+        let s = at(&v, "/data/submission");
+        assert!(at(s, "/extrinsic_hash").is_null());
+        assert!(at(s, "/chain_block_hash").is_null());
+        assert!(at(s, "/chain_block_number").is_null());
+        assert!(at(s, "/pow_sequence").is_null());
+        assert!(at(s, "/threshold_milli").is_number());
+        assert!(at(s, "/miner_type").is_string());
     }
 
     fn submitted_line() -> String {
@@ -1118,13 +1052,7 @@ mod tests {
     #[tokio::test]
     async fn c8_submission_reports_the_real_chain_fields() {
         let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("42");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("attempts.jsonl"),
-            format!("{}\n", submitted_line()),
-        )
-        .unwrap();
+        write_fixture(tmp.path(), 42, &Fixture::Submitted);
 
         let v = attempts_body(tmp.path(), 42).await;
         let s = at(&v, "/data/submission");
@@ -1154,31 +1082,6 @@ mod tests {
         assert_eq!(at(&v, "/data/attempts/0/miner_type"), &json!("CPU"));
     }
 
-    /// A rejected attempt has no chain outcome. The four nullable fields stay
-    /// null and the two non-nullable ones keep their types, or the dashboard
-    /// parser throws.
-    #[tokio::test]
-    async fn a_non_winning_submission_nulls_only_the_nullable_fields() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("43");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("attempts.jsonl"),
-            format!("{}\n", sentinel_line(-500)),
-        )
-        .unwrap();
-
-        let v = attempts_body(tmp.path(), 43).await;
-        let s = at(&v, "/data/submission");
-
-        assert!(at(s, "/extrinsic_hash").is_null());
-        assert!(at(s, "/chain_block_hash").is_null());
-        assert!(at(s, "/chain_block_number").is_null());
-        assert!(at(s, "/pow_sequence").is_null());
-        assert!(at(s, "/threshold_milli").is_number());
-        assert!(at(s, "/miner_type").is_string());
-    }
-
     #[tokio::test]
     async fn serves_attempts_file_and_lists_qblocks() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1192,16 +1095,7 @@ mod tests {
         let app = router(test_state(tmp.path()));
 
         // File download.
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/42/attempts.jsonl")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let resp = fetch(app.clone(), "/42/attempts.jsonl").await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
             .await
@@ -1209,45 +1103,13 @@ mod tests {
         assert!(String::from_utf8_lossy(&body).contains("\"job_id\":\"ab\""));
 
         // Index lists the qblock dir.
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/qblocks")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let resp = fetch(app, "/qblocks").await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
             .await
             .unwrap();
         let ids: Vec<String> = serde_json::from_slice(&body).unwrap();
         assert_eq!(ids, vec!["42".to_string()]);
-    }
-
-    #[tokio::test]
-    async fn status_returns_success_envelope() {
-        let tmp = tempfile::tempdir().unwrap();
-        let app = router(test_state(tmp.path()));
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/status")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let v = body_json(resp).await;
-        assert_eq!(at(&v, "/success"), &json!(true));
-        assert!(at(&v, "/data").is_object());
-        assert!(at(&v, "/data/ss58_address").is_string());
-        assert!(at(&v, "/data/chain").is_object());
-        assert!(at(&v, "/data/miners").is_array());
-        assert!(at(&v, "/data/modes").is_object());
-        assert!(at(&v, "/timestamp").is_number());
     }
 
     fn keyed_state(tmp: &Path) -> DashboardState {
@@ -1281,15 +1143,7 @@ mod tests {
     }
 
     async fn status_body(state: DashboardState) -> Value {
-        let resp = router(state)
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/status")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let resp = fetch(router(state), "/api/v1/status").await;
         assert_eq!(resp.status(), StatusCode::OK);
         body_json(resp).await
     }
@@ -1332,6 +1186,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let v = status_body(keyed_state(tmp.path())).await;
 
+        assert_eq!(at(&v, "/success"), &json!(true));
+        assert!(at(&v, "/data").is_object());
+        assert!(at(&v, "/data/modes").is_object());
+        assert!(at(&v, "/timestamp").is_number());
         assert_eq!(
             at(&v, "/data/ss58_address"),
             &json!("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY")
@@ -1351,6 +1209,7 @@ mod tests {
             assert!(at(&miners[0], "/type").as_str().unwrap().starts_with("CPU"));
         }
 
+        assert!(at(&v, "/data/chain").is_object());
         assert!(at(&v, "/data/chain/head_number").as_u64().unwrap() > 0);
         assert_eq!(at(&v, "/data/chain/head_hash"), &json!("0x00ff"));
 
@@ -1432,21 +1291,15 @@ mod tests {
     }
 
     async fn stats_body(state: DashboardState) -> Value {
-        let resp = router(state)
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/stats")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let resp = fetch(router(state), "/api/v1/stats").await;
         assert_eq!(resp.status(), StatusCode::OK);
         body_json(resp).await
     }
 
     /// C7: dispatch one context and receive one result. Both counters advance
-    /// by exactly one and no counter goes backwards.
+    /// by exactly one and no counter goes backwards. All seven keys must be
+    /// present as numbers, so the dashboard parser never falls back to its
+    /// `?? 0` default and hides a missing counter.
     #[tokio::test]
     async fn c7_stats_counters_advance() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1454,6 +1307,7 @@ mod tests {
         let metrics = Arc::clone(&state.metrics);
 
         let before = stats_body(state.clone()).await;
+        assert_eq!(at(&before, "/success"), &json!(true));
         metrics.record_contexts_dispatched("cpu-0", 1);
         metrics.record_result_received("cpu-0");
         let after = stats_body(state).await;
@@ -1480,58 +1334,28 @@ mod tests {
         ] {
             let b = at(&before, &format!("/data/controller/{key}"))
                 .as_u64()
-                .unwrap();
+                .unwrap_or_else(|| panic!("missing controller.{key}"));
             let a = at(&after, &format!("/data/controller/{key}"))
                 .as_u64()
-                .unwrap();
+                .unwrap_or_else(|| panic!("missing controller.{key}"));
             assert!(a >= b, "{key} decreased from {b} to {a}");
         }
     }
 
-    /// Every one of the seven keys is present, so the dashboard parser never
-    /// falls back to its `?? 0` default and hides a missing counter.
+    /// The attempts endpoint: row projection on the ordinary fixture, then the
+    /// `limit` range edges, then the status-code table. C9: the status code
+    /// and the `code` field agree, for every row of the table. The dashboard
+    /// maps 404 to a skip that still advances the checkpoint, so turning a 404
+    /// into a 200 would stall the walk.
     #[tokio::test]
-    async fn stats_carries_all_seven_controller_counters() {
+    async fn mining_attempts_serves_rows_and_documented_error_codes() {
         let tmp = tempfile::tempdir().unwrap();
-        let v = stats_body(test_state(tmp.path())).await;
-        assert_eq!(at(&v, "/success"), &json!(true));
-        for key in [
-            "heads_observed",
-            "contexts_dispatched",
-            "results_received",
-            "proofs_submitted",
-            "stale_drops",
-            "submission_errors",
-            "duplicate_result_drops",
-        ] {
-            assert!(
-                at(&v, &format!("/data/controller/{key}")).is_number(),
-                "missing controller.{key}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn mining_attempts_happy_path() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("7");
+        write_fixture(tmp.path(), 7, &Fixture::Normal);
+        let dir = tmp.path().join("8");
         std::fs::create_dir_all(&dir).unwrap();
-        let line1 = attempt_line("cpu-0", -14_000, 200, 3, true, false, 0);
-        let line2 = attempt_line("cpu-0", -14_200, 250, 6, true, true, 12_000);
-        std::fs::write(dir.join("attempts.jsonl"), format!("{line1}\n{line2}\n")).unwrap();
+        std::fs::write(dir.join("attempts.jsonl"), "\n\n").unwrap();
 
-        let app = router(test_state(tmp.path()));
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/mining/attempts?solution_number=7")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let v = body_json(resp).await;
+        let v = attempts_body(tmp.path(), 7).await;
         assert_eq!(at(&v, "/success"), &json!(true));
         assert_eq!(at(&v, "/data/submission/solution_number"), &json!(7));
         assert_eq!(at(&v, "/data/submission/miner_id"), &json!("cpu-0"));
@@ -1548,148 +1372,100 @@ mod tests {
         assert_eq!(at(a1, "/iter"), &json!(2));
         assert_eq!(at(a1, "/result_kind"), &json!("submitted"));
         assert_eq!(at(a1, "/qpu_access_time_us"), &json!(12_000));
-    }
 
-    #[tokio::test]
-    async fn mining_attempts_unknown_solution_number_is_404() {
-        let tmp = tempfile::tempdir().unwrap();
-        let app = router(test_state(tmp.path()));
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/mining/attempts?solution_number=999")
-                    .body(Body::empty())
-                    .unwrap(),
+        // QUI-1391: a limit past the trail length returns the whole trail, and
+        // `limit=0` is a totals-only probe rather than an error.
+        let v = get_body(
+            tmp.path(),
+            "/api/v1/mining/attempts?solution_number=7&limit=999",
+        )
+        .await;
+        assert_eq!(at(&v, "/data/attempts").as_array().unwrap().len(), 2);
+        assert_eq!(at(&v, "/data/totals/attempt_count"), &json!(2));
+        let v = get_body(
+            tmp.path(),
+            "/api/v1/mining/attempts?solution_number=7&limit=0",
+        )
+        .await;
+        assert_eq!(at(&v, "/data/attempts").as_array().unwrap().len(), 0);
+        assert_eq!(at(&v, "/data/totals/attempt_count"), &json!(2));
+
+        for (label, query, expected_status, expected_code) in [
+            ("found", "?solution_number=7", StatusCode::OK, ""),
+            (
+                "missing parameter",
+                "",
+                StatusCode::BAD_REQUEST,
+                "BAD_PARAM",
+            ),
+            (
+                "unparsable parameter",
+                "?solution_number=not-a-number",
+                StatusCode::BAD_REQUEST,
+                "BAD_PARAM",
+            ),
+            // QUI-1391: a non-numeric limit is a 400, not a silent full trail.
+            (
+                "non-numeric limit",
+                "?solution_number=7&limit=abc",
+                StatusCode::BAD_REQUEST,
+                "BAD_PARAM",
+            ),
+            (
+                "no directory for that number",
+                "?solution_number=999",
+                StatusCode::NOT_FOUND,
+                "NOT_FOUND",
+            ),
+            // An empty attempt file is a 404, not a 200 with an empty body.
+            // The indexer treats a 404 as a skip; a 200 with no submission
+            // makes the parser throw, which is a hard error that stalls the
+            // checkpoint.
+            (
+                "empty attempt file",
+                "?solution_number=8",
+                StatusCode::NOT_FOUND,
+                "NOT_FOUND",
+            ),
+        ] {
+            let resp = fetch(
+                router(test_state(tmp.path())),
+                &format!("/api/v1/mining/attempts{query}"),
             )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-        let v = body_json(resp).await;
-        assert_eq!(at(&v, "/success"), &json!(false));
-        assert_eq!(at(&v, "/code"), &json!("NOT_FOUND"));
-    }
-
-    #[tokio::test]
-    async fn mining_attempts_missing_query_is_400() {
-        let tmp = tempfile::tempdir().unwrap();
-        let app = router(test_state(tmp.path()));
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/mining/attempts")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        let v = body_json(resp).await;
-        assert_eq!(at(&v, "/success"), &json!(false));
-        assert_eq!(at(&v, "/code"), &json!("BAD_PARAM"));
-    }
-
-    #[tokio::test]
-    async fn mining_attempts_malformed_query_is_400() {
-        let tmp = tempfile::tempdir().unwrap();
-        let app = router(test_state(tmp.path()));
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/mining/attempts?solution_number=not-a-number")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        let v = body_json(resp).await;
-        assert_eq!(at(&v, "/success"), &json!(false));
-        assert_eq!(at(&v, "/code"), &json!("BAD_PARAM"));
-    }
-
-    async fn attempts_status_and_code(tmp: &Path, query: &str) -> (StatusCode, String) {
-        let uri = format!("/api/v1/mining/attempts{query}");
-        let resp = router(test_state(tmp))
-            .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        let status = resp.status();
-        let v = body_json(resp).await;
-        let code = at(&v, "/code").as_str().unwrap_or_default().to_string();
-        (status, code)
-    }
-
-    /// C9: the status code and the `code` field agree, for every row of the
-    /// status-code table. The dashboard maps 404 to a skip that still advances
-    /// the checkpoint, so turning a 404 into a 200 would stall the walk.
-    #[tokio::test]
-    async fn c9_error_paths_return_the_documented_status_and_code() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_fixture(tmp.path(), 7, &Fixture::Normal);
-
-        // Found.
-        let (status, code) = attempts_status_and_code(tmp.path(), "?solution_number=7").await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(code, "", "a 200 carries no error code");
-
-        // Missing parameter.
-        let (status, code) = attempts_status_and_code(tmp.path(), "").await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(code, "BAD_PARAM");
-
-        // Unparsable parameter.
-        let (status, code) =
-            attempts_status_and_code(tmp.path(), "?solution_number=not-a-number").await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(code, "BAD_PARAM");
-
-        // No directory for that number.
-        let (status, code) = attempts_status_and_code(tmp.path(), "?solution_number=999").await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-        assert_eq!(code, "NOT_FOUND");
-    }
-
-    /// An empty attempt file is a 404, not a 200 with an empty body. The
-    /// indexer treats a 404 as a skip; a 200 with no submission makes the
-    /// parser throw, which is a hard error that stalls the checkpoint.
-    #[tokio::test]
-    async fn an_empty_attempts_file_is_a_404() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("8");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("attempts.jsonl"), "\n\n").unwrap();
-
-        let (status, code) = attempts_status_and_code(tmp.path(), "?solution_number=8").await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-        assert_eq!(code, "NOT_FOUND");
+            .await;
+            assert_eq!(resp.status(), expected_status, "{label}");
+            let v = body_json(resp).await;
+            assert_eq!(
+                at(&v, "/code").as_str().unwrap_or_default(),
+                expected_code,
+                "{label}"
+            );
+            assert_eq!(
+                at(&v, "/success"),
+                &json!(expected_status == StatusCode::OK),
+                "{label}"
+            );
+        }
     }
 
     #[test]
-    fn safe_i64_passes_in_range_values_through() {
-        assert_eq!(safe_i64("best_energy_milli", 42, -14_200), json!(-14_200));
-        assert_eq!(safe_i64("best_energy_milli", 42, 0), json!(0));
-        assert_eq!(
-            safe_i64("best_energy_milli", 42, JS_MAX_SAFE_INTEGER),
-            json!(JS_MAX_SAFE_INTEGER)
-        );
-        assert_eq!(
-            safe_i64("best_energy_milli", 42, JS_MIN_SAFE_INTEGER),
-            json!(JS_MIN_SAFE_INTEGER)
-        );
-    }
-
-    #[test]
-    fn safe_i64_clamps_out_of_range_values_to_zero() {
-        assert_eq!(safe_i64("best_energy_milli", 42, i64::MAX), json!(0));
-        assert_eq!(safe_i64("best_energy_milli", 42, i64::MIN), json!(0));
-        assert_eq!(
-            safe_i64("best_energy_milli", 42, JS_MAX_SAFE_INTEGER + 1),
-            json!(0)
-        );
-        assert_eq!(
-            safe_i64("best_energy_milli", 42, JS_MIN_SAFE_INTEGER - 1),
-            json!(0)
-        );
+    fn safe_i64_passes_in_range_values_and_clamps_the_rest_to_zero() {
+        for (value, expected) in [
+            (-14_200, -14_200),
+            (0, 0),
+            (JS_MAX_SAFE_INTEGER, JS_MAX_SAFE_INTEGER),
+            (JS_MIN_SAFE_INTEGER, JS_MIN_SAFE_INTEGER),
+            (i64::MAX, 0),
+            (i64::MIN, 0),
+            (JS_MAX_SAFE_INTEGER + 1, 0),
+            (JS_MIN_SAFE_INTEGER - 1, 0),
+        ] {
+            assert_eq!(
+                safe_i64("best_energy_milli", 42, value),
+                json!(expected),
+                "{value}"
+            );
+        }
     }
 
     #[test]
@@ -1751,10 +1527,7 @@ mod tests {
                     format!("/api/v1/mining/attempts?solution_number={n}"),
                 ),
             ] {
-                let resp = router(state.clone())
-                    .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
-                    .await
-                    .unwrap();
+                let resp = fetch(router(state.clone()), &uri).await;
                 assert_eq!(resp.status(), StatusCode::OK, "{uri}");
                 let mut body = body_json(resp).await;
                 normalize_for_golden(&mut body);

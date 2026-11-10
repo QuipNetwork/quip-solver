@@ -119,23 +119,15 @@ mod tests {
         assert!(matches!(ising.graph, Some(ising_problem::Graph::Edges(_))));
     }
 
-    #[test]
-    fn maps_edge_labels_to_dense_positions() {
-        let job = job_order_to_job(&gapped_order()).unwrap();
-        let edges = edges_of(&job);
-        assert_eq!(edges.u, vec![0, 1]);
-        assert_eq!(edges.v, vec![1, 2]);
-    }
-
     /// Mapping is one-for-one: no endpoint is dropped or reordered, so the
     /// consensus `j`-zip invariant (one coupling per edge, in edge order)
     /// survives it.
     #[test]
-    fn maps_every_edge_exactly_once() {
+    fn maps_edge_labels_to_dense_positions() {
         let order = gapped_order();
         let edges = edges_of(&job_order_to_job(&order).unwrap());
-        assert_eq!(edges.u.len(), order.edges.len());
-        assert_eq!(edges.v.len(), order.edges.len());
+        assert_eq!(edges.u, vec![0, 1]);
+        assert_eq!(edges.v, vec![1, 2]);
         assert_eq!(edges.u.len(), order.j_milli.len());
     }
 
@@ -159,20 +151,25 @@ mod tests {
     }
 
     #[test]
-    fn rejects_an_edge_endpoint_that_is_not_a_node() {
-        let order = JobOrder {
-            edges: vec![(0, 99)],
-            ..gapped_order()
-        };
-        assert!(job_order_to_job(&order).is_none());
-    }
-
-    #[test]
-    fn rejects_a_repeated_node_id() {
-        let order = JobOrder {
-            nodes: vec![0, 12, 12],
-            ..gapped_order()
-        };
-        assert!(job_order_to_job(&order).is_none());
+    fn rejects_orders_whose_nodes_cannot_index_their_edges() {
+        let cases = [
+            (
+                "edge endpoint that is not a node",
+                JobOrder {
+                    edges: vec![(0, 99)],
+                    ..gapped_order()
+                },
+            ),
+            (
+                "repeated node id",
+                JobOrder {
+                    nodes: vec![0, 12, 12],
+                    ..gapped_order()
+                },
+            ),
+        ];
+        for (label, order) in cases {
+            assert!(job_order_to_job(&order).is_none(), "{label}");
+        }
     }
 }

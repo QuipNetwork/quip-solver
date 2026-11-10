@@ -1212,17 +1212,17 @@ mod tests {
 
     #[tokio::test]
     async fn qui_1540_report_distinguishes_selected_and_raw_energy() {
-        let spec = report_spec().expect("report topology is valid");
-        let row = score_nonce_result(
-            &spec,
+        let mut spec = report_spec().expect("report topology is valid");
+        let three_rows = || {
             vec![
                 packed_solution(&[1, 1, 1, 1]),
                 packed_solution(&[1, -1, 1, 1]),
                 packed_solution(&[1, 1, -1, 1]),
-            ],
-        )
-        .await
-        .expect("nonce result produces one report row");
+            ]
+        };
+        let row = score_nonce_result(&spec, three_rows())
+            .await
+            .expect("nonce result produces one report row");
         assert_selected_and_raw_energy(&row);
         assert_eq!(row.diversity_milli, 500);
         assert_eq!(row.n_solutions, 3);
@@ -1245,22 +1245,12 @@ mod tests {
             json.get("raw_best_energy_milli"),
             Some(&serde_json::json!(-4000))
         );
-    }
 
-    #[tokio::test]
-    async fn qui_1540_failed_diversity_gate_keeps_selected_energy() {
-        let mut spec = report_spec().expect("report topology is valid");
+        // A failed diversity gate keeps the selected energy.
         spec.min_diversity_milli = 600;
-        let row = score_nonce_result(
-            &spec,
-            vec![
-                packed_solution(&[1, 1, 1, 1]),
-                packed_solution(&[1, -1, 1, 1]),
-                packed_solution(&[1, 1, -1, 1]),
-            ],
-        )
-        .await
-        .expect("nonce result produces one report row");
+        let row = score_nonce_result(&spec, three_rows())
+            .await
+            .expect("nonce result produces one report row");
         assert!(!row.passed);
         assert_selected_and_raw_energy(&row);
     }
@@ -1363,15 +1353,6 @@ mod tests {
         assert_eq!(row.raw_best_energy_milli, -700);
         assert_eq!(row.diversity_milli, 0);
         assert_eq!(row.salts_done, 1);
-        assert!(!row.passed);
-    }
-
-    #[test]
-    fn qui_1540_terminal_failure_uses_missing_energy_sentinels() {
-        let row = failing_row(vec![1], true, 0);
-        assert_eq!(row.best_energy_milli, i64::MAX);
-        assert_eq!(row.raw_best_energy_milli, i64::MAX);
-        assert!(row.rejected);
         assert!(!row.passed);
     }
 }

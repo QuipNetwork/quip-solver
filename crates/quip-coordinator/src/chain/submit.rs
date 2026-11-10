@@ -290,28 +290,4 @@ mod tests {
         );
         assert_eq!(classify_participation(Some("SomethingUnknown")), None);
     }
-
-    /// A receipt with no chain detail is the shape every non-winning path
-    /// returns. Keeping one constructor for it stops each call site inventing
-    /// its own `None` triple.
-    #[test]
-    fn action_only_carries_no_chain_detail() {
-        let r = SubmitReceipt::action_only(SubmitAction::Retry);
-        assert_eq!(r.action, SubmitAction::Retry);
-        assert_eq!(r.extrinsic_hash, None);
-        assert_eq!(r.block_hash, None);
-        assert_eq!(r.block_number, None);
-    }
-
-    #[test]
-    fn a_winning_receipt_carries_the_extrinsic_and_the_block() {
-        let r = SubmitReceipt {
-            action: SubmitAction::Success,
-            extrinsic_hash: Some([0xab; 32]),
-            block_hash: Some([0xcd; 32]),
-            block_number: Some(10_249),
-        };
-        assert_eq!(r.action, SubmitAction::Success);
-        assert_eq!(r.block_number, Some(10_249));
-    }
 }

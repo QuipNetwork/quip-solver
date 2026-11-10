@@ -60,16 +60,16 @@ mod tests {
     }
 
     #[test]
-    fn problem_milli_rejects_another_encoding() {
-        let mut p = milli_problem(None, &[1000], &[]);
-        p.encoding = CoefficientEncoding::I8 as i32;
-        assert!(problem_milli(&p).is_err());
-    }
-
-    #[test]
-    fn problem_milli_rejects_another_scale() {
-        let mut p = milli_problem(None, &[1000], &[]);
-        p.scale = 1;
-        assert!(problem_milli(&p).is_err());
+    fn problem_milli_rejects_another_encoding_or_scale() {
+        type Mutate = fn(&mut IsingProblem);
+        let cases: [(&str, Mutate); 2] = [
+            ("encoding", |p| p.encoding = CoefficientEncoding::I8 as i32),
+            ("scale", |p| p.scale = 1),
+        ];
+        for (label, mutate) in cases {
+            let mut p = milli_problem(None, &[1000], &[]);
+            mutate(&mut p);
+            assert!(problem_milli(&p).is_err(), "{label}");
+        }
     }
 }

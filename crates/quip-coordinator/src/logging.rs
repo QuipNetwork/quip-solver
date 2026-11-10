@@ -142,31 +142,39 @@ mod tests {
     use std::str::FromStr as _;
 
     #[test]
-    fn explicit_level_beats_rust_log() {
-        let d = resolve_directives(Some(LogLevel::Debug), Some("trace"));
-        assert_eq!(d, default_filter(LogLevel::Debug));
+    fn resolve_directives_prefers_explicit_level_then_rust_log_then_info() {
+        for (label, level, rust_log, expected) in [
+            (
+                "explicit level beats RUST_LOG",
+                Some(LogLevel::Debug),
+                Some("trace"),
+                default_filter(LogLevel::Debug),
+            ),
+            (
+                "RUST_LOG used when no explicit level",
+                None,
+                Some("quip_coordinator=trace"),
+                "quip_coordinator=trace".to_string(),
+            ),
+            (
+                "blank RUST_LOG falls back to info",
+                None,
+                Some("   "),
+                default_filter(LogLevel::Info),
+            ),
+            (
+                "no RUST_LOG falls back to info",
+                None,
+                None,
+                default_filter(LogLevel::Info),
+            ),
+        ] {
+            assert_eq!(resolve_directives(level, rust_log), expected, "{label}");
+        }
     }
 
     #[test]
-    fn rust_log_used_when_no_explicit_level() {
-        let d = resolve_directives(None, Some("quip_coordinator=trace"));
-        assert_eq!(d, "quip_coordinator=trace");
-    }
-
-    #[test]
-    fn blank_rust_log_falls_back_to_info_default() {
-        assert_eq!(
-            resolve_directives(None, Some("   ")),
-            default_filter(LogLevel::Info)
-        );
-        assert_eq!(
-            resolve_directives(None, None),
-            default_filter(LogLevel::Info)
-        );
-    }
-
-    #[test]
-    fn default_filter_keeps_third_party_at_warn() {
+    fn default_filter_keeps_third_party_at_warn_and_parses_at_every_level() {
         let d = default_filter(LogLevel::Debug);
         assert!(d.starts_with("warn,"), "{d}");
         assert!(d.contains("quip_coordinator=debug"), "{d}");
@@ -174,10 +182,7 @@ mod tests {
         assert!(d.contains("quip_solver_core=debug"), "{d}");
         // Miner children write straight to the terminal; no re-emit target.
         assert!(!d.contains("miner="), "{d}");
-    }
 
-    #[test]
-    fn every_default_filter_parses_as_directives() {
         for level in [
             LogLevel::Trace,
             LogLevel::Debug,
@@ -191,29 +196,20 @@ mod tests {
     }
 
     #[test]
-    fn rust_log_still_wins_over_the_default_filter() {
-        let d = resolve_directives(None, Some("warn"));
-        assert_eq!(d, "warn");
-    }
-
-    #[test]
     fn level_display_round_trips_to_directive_text() {
         assert_eq!(LogLevel::Warn.to_string(), "warn");
         assert!(tracing::Level::from_str(LogLevel::Trace.as_str()).is_ok());
     }
 
     #[test]
-    fn energy_units_floors_the_spec_table() {
+    fn energy_units_floors_and_display_prints_none_not_debug() {
         assert_eq!(energy_units(-14_369_000), -14_369);
         assert_eq!(energy_units(-14_535_322), -14_536);
         assert_eq!(energy_units(-14_536_604), -14_537);
         assert_eq!(energy_units(-14_513_000), -14_513);
         assert_eq!(energy_units(0), 0);
         assert_eq!(energy_units(1_500), 1);
-    }
 
-    #[test]
-    fn display_option_prints_none_not_debug() {
         assert_eq!(display_option(Some(10_132_u64)), "10132");
         assert_eq!(display_option(None::<u64>), "none");
         assert_eq!(display_energy(Some(-14_536_604)), "-14537");

@@ -134,24 +134,26 @@ mod tests {
     /// `ApplyExtrinsicResult` is `Result<Result<(), DispatchError>, _>`. The outer
     /// Ok is 0x00, the inner Err is 0x01, then `DispatchError::Module` is
     /// variant 3 followed by the pallet index and a four-byte error index.
+    /// A successful dry run (outer Ok, inner Ok) has no error, and a truncated
+    /// blob yields none rather than a panic.
     #[test]
     fn a_module_error_is_decoded_from_the_documented_layout() {
-        let raw = [0x00, 0x01, 0x03, 10, 7, 0, 0, 0];
-        let e = decode_dispatch_error(&raw).unwrap();
-        assert_eq!(e.pallet, 10);
-        assert_eq!(e.error, [7, 0, 0, 0]);
-    }
-
-    #[test]
-    fn a_successful_dry_run_has_no_error() {
-        // Outer Ok, inner Ok.
-        assert!(decode_dispatch_error(&[0x00, 0x00]).is_none());
-    }
-
-    #[test]
-    fn a_truncated_blob_yields_none_not_a_panic() {
-        assert!(decode_dispatch_error(&[0x00, 0x01, 0x03, 10]).is_none());
-        assert!(decode_dispatch_error(&[]).is_none());
+        let module = Some(ModuleError {
+            pallet: 10,
+            error: [7, 0, 0, 0],
+        });
+        for (label, raw, expected) in [
+            (
+                "module error",
+                &[0x00, 0x01, 0x03, 10, 7, 0, 0, 0][..],
+                module,
+            ),
+            ("successful dry run", &[0x00, 0x00][..], None),
+            ("truncated module error", &[0x00, 0x01, 0x03, 10][..], None),
+            ("empty", &[][..], None),
+        ] {
+            assert_eq!(decode_dispatch_error(raw), expected, "{label}");
+        }
     }
 
     /// The names are diagnostics only. A wrong mapping must never reach control

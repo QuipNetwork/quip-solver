@@ -1233,56 +1233,11 @@ pub struct SessionHarnessReport {
     pub handshake_ok: bool,
 }
 
-/// Spawn `miner_bin` against a coordinator on `sock_path`, expecting `token`.
+/// Spawn `miner_bin` against a coordinator on `sock_path`. The coordinator
+/// expects `coord_token` while the miner is given `miner_token`, so a mismatch
+/// test passes two different values.
 ///
 /// Used by integration tests. `sock_path` is a filesystem path (no `unix://`).
-///
-/// # Errors
-///
-/// Returns [`SessionHarnessError`] when the handshake fails or caps are missing.
-pub async fn serve_one_session(
-    miner_bin: &str,
-    sock_path: &str,
-    miner_id: &str,
-    token: &str,
-) -> Result<MinerCaps, SessionHarnessError> {
-    let report = serve_one_session_expecting(miner_bin, sock_path, miner_id, token, token).await;
-    if report.handshake_ok {
-        report.caps.ok_or(SessionHarnessError {
-            miner_exit_code: report.miner_exit_code,
-            reason: "handshake ok but no caps".into(),
-        })
-    } else {
-        Err(SessionHarnessError {
-            miner_exit_code: report.miner_exit_code,
-            reason: "handshake failed".into(),
-        })
-    }
-}
-
-/// Failure from a one-shot handshake harness run.
-#[derive(Debug)]
-pub struct SessionHarnessError {
-    /// Miner process exit code (`-1` if unknown).
-    pub miner_exit_code: i32,
-    /// Human-readable failure reason.
-    pub reason: String,
-}
-
-impl std::fmt::Display for SessionHarnessError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "session harness error (exit {}): {}",
-            self.miner_exit_code, self.reason
-        )
-    }
-}
-
-impl std::error::Error for SessionHarnessError {}
-
-/// Like [`serve_one_session`], but the coordinator expects `coord_token` while
-/// the miner is given `miner_token` (for mismatch tests).
 ///
 /// # Panics
 ///
@@ -1499,14 +1454,52 @@ mod tests {
         Arc::new(Mutex::new(None))
     }
 
+    /// Run one lease `Result` against a fresh chain. Returns the shared state
+    /// and the proofs the chain received.
+    async fn settle(
+        st: CoordinatorState,
+        result: WireResult,
+    ) -> (Arc<Mutex<CoordinatorState>>, Vec<Proof>) {
+        let state = Arc::new(Mutex::new(st));
+        let chain = FakeChain::new(lease_snapshot(), None);
+        handle_lease_result(&chain, &state, &notify(), "m", result).await;
+        (state, chain.take_submitted())
+    }
+
+    fn target(max_energy_milli: i64) -> SetTarget {
+        SetTarget {
+            max_energy_milli,
+            min_solutions: 1,
+            min_diversity_milli: 0,
+            max_proof_solutions: 32,
+            ..Default::default()
+        }
+    }
+
+    /// A decay model that eases past `energy` within the horizon, so the stash
+    /// holds a candidate at `energy` instead of rejecting it as never viable.
+    fn ease_stash(st: &mut CoordinatorState, generation: u64, energy: i64) {
+        st.stash.reset(
+            generation,
+            Some(crate::decay::DecayModel {
+                base_max_energy_milli: energy,
+                curve: Some(crate::decay::EnergyCurve {
+                    min_milli: energy - 100_000,
+                    knee_milli: energy,
+                    max_milli: energy + 50_000,
+                }),
+                epoch_length: 10,
+                algorithm: crate::decay::DecayAlgorithm::Stepwise,
+            }),
+            0,
+        );
+    }
+
     #[tokio::test]
     async fn verified_lease_winner_is_submitted_with_its_salt() {
         let (st, job) = lease_state();
-        let state = Arc::new(Mutex::new(st));
-        let chain = FakeChain::new(lease_snapshot(), None);
         let r = winner(&job, 2);
-        handle_lease_result(&chain, &state, &notify(), "m", r.clone()).await;
-        let submitted = chain.take_submitted();
+        let (state, submitted) = settle(st, r.clone()).await;
         assert_eq!(submitted.len(), 1);
         assert_eq!(submitted.first().map(|proof| &proof.salt), Some(&r.salt));
         assert_eq!(
@@ -1521,21 +1514,30 @@ mod tests {
         assert!(state.lock().await.round_mined());
     }
 
+    /// None of these is submitted or marks the round. A report that fails
+    /// authenticity verification is a bad miner, not participation. A result
+    /// before the target cannot be judged. Reporting zero solutions is not
+    /// participation.
     #[tokio::test]
-    async fn lease_result_with_a_wrong_energy_is_not_submitted() {
-        let (st, job) = lease_state();
-        let state = Arc::new(Mutex::new(st));
-        let chain = FakeChain::new(lease_snapshot(), None);
-        let mut r = winner(&job, 0);
-        r.solutions
-            .iter_mut()
-            .for_each(|solution| solution.energy_milli -= 1);
-        handle_lease_result(&chain, &state, &notify(), "m", r).await;
-        assert!(chain.take_submitted().is_empty());
-        assert!(
-            !state.lock().await.round_mined(),
-            "a report that fails authenticity verification is a bad miner, not participation"
-        );
+    async fn rejected_lease_results_are_not_submitted_and_do_not_mark_the_round() {
+        type Mutate = fn(&mut CoordinatorState, &mut WireResult);
+        let cases: [(&str, Mutate); 3] = [
+            ("wrong energy", |_, r| {
+                r.solutions
+                    .iter_mut()
+                    .for_each(|solution| solution.energy_milli -= 1);
+            }),
+            ("no target", |st, _| st.target = None),
+            ("no solutions", |_, r| r.solutions.clear()),
+        ];
+        for (label, mutate) in cases {
+            let (mut st, job) = lease_state();
+            let mut r = winner(&job, 0);
+            mutate(&mut st, &mut r);
+            let (state, submitted) = settle(st, r).await;
+            assert!(submitted.is_empty(), "{label}: submitted");
+            assert!(!state.lock().await.round_mined(), "{label}: round mined");
+        }
     }
 
     /// A verified lease Result whose energy does not clear the live target is
@@ -1549,35 +1551,12 @@ mod tests {
         let energy = r.solutions.first().unwrap().energy_milli;
         // Ceiling set to exactly the reported energy: the gate is strict
         // less-than, so this candidate does not clear it.
-        st.target = Some(SetTarget {
-            max_energy_milli: energy,
-            min_solutions: 1,
-            min_diversity_milli: 0,
-            max_proof_solutions: 32,
-            ..Default::default()
-        });
-        // A model that eases past `energy` within the horizon, so the stash
-        // holds the candidate instead of rejecting it as never viable.
-        st.stash.reset(
-            job.generation,
-            Some(crate::decay::DecayModel {
-                base_max_energy_milli: energy,
-                curve: Some(crate::decay::EnergyCurve {
-                    min_milli: energy - 100_000,
-                    knee_milli: energy,
-                    max_milli: energy + 50_000,
-                }),
-                epoch_length: 10,
-                algorithm: crate::decay::DecayAlgorithm::Stepwise,
-            }),
-            0,
-        );
-        let state = Arc::new(Mutex::new(st));
-        let chain = FakeChain::new(lease_snapshot(), None);
+        st.target = Some(target(energy));
+        ease_stash(&mut st, job.generation, energy);
         let (expected_nonce, expected_salt) = (r.nonce.clone(), r.salt.clone());
-        handle_lease_result(&chain, &state, &notify(), "m", r).await;
+        let (state, submitted) = settle(st, r).await;
         assert!(
-            chain.take_submitted().is_empty(),
+            submitted.is_empty(),
             "energy equal to the ceiling does not clear it"
         );
         let st = state.lock().await;
@@ -1604,13 +1583,10 @@ mod tests {
     #[tokio::test]
     async fn lease_result_with_more_reads_than_a_proof_holds_submits_a_capped_set() {
         let (st, job) = lease_state();
-        let state = Arc::new(Mutex::new(st));
-        let chain = FakeChain::new(lease_snapshot(), None);
         let mut r = winner(&job, 1);
         let read = r.solutions.first().cloned().unwrap();
         r.solutions = vec![read; 40];
-        handle_lease_result(&chain, &state, &notify(), "m", r).await;
-        let submitted = chain.take_submitted();
+        let (_, submitted) = settle(st, r).await;
         assert_eq!(submitted.len(), 1, "an unfiltered read set still wins");
         assert!(submitted
             .first()
@@ -1712,11 +1688,8 @@ mod tests {
     #[tokio::test]
     async fn an_honest_family_result_is_submitted() {
         let (st, _, report) = family_state();
-        let state = Arc::new(Mutex::new(st));
-        let chain = FakeChain::new(lease_snapshot(), None);
         let salt = report.salt.clone();
-        handle_lease_result(&chain, &state, &notify(), "m", report).await;
-        let submitted = chain.take_submitted();
+        let (state, submitted) = settle(st, report).await;
         assert_eq!(submitted.len(), 1);
         assert_eq!(submitted.first().map(|proof| &proof.salt), Some(&salt));
         assert!(state.lock().await.round_mined());
@@ -1726,28 +1699,13 @@ mod tests {
     async fn a_forged_family_result_never_reaches_submission_or_the_stash() {
         let (mut st, job, mut report) = family_state();
         let energy = report.solutions.first().unwrap().energy_milli;
-        st.stash.reset(
-            job.generation,
-            Some(crate::decay::DecayModel {
-                base_max_energy_milli: energy,
-                curve: Some(crate::decay::EnergyCurve {
-                    min_milli: energy - 100_000,
-                    knee_milli: energy,
-                    max_milli: energy + 50_000,
-                }),
-                epoch_length: 10,
-                algorithm: crate::decay::DecayAlgorithm::Stepwise,
-            }),
-            0,
-        );
+        ease_stash(&mut st, job.generation, energy);
         report
             .solutions
             .iter_mut()
             .for_each(|solution| solution.energy_milli -= 1);
-        let state = Arc::new(Mutex::new(st));
-        let chain = FakeChain::new(lease_snapshot(), None);
-        handle_lease_result(&chain, &state, &notify(), "m", report).await;
-        assert!(chain.take_submitted().is_empty());
+        let (state, submitted) = settle(st, report).await;
+        assert!(submitted.is_empty());
         let st = state.lock().await;
         assert!(st.stash.is_empty(), "a forgery is not a near miss");
         assert!(!st.round_mined(), "a forgery is not participation");
@@ -1757,31 +1715,10 @@ mod tests {
     async fn an_authentic_family_miss_is_stashed_and_counts_as_participation() {
         let (mut st, job, report) = family_state();
         let energy = report.solutions.first().unwrap().energy_milli;
-        st.target = Some(SetTarget {
-            max_energy_milli: energy,
-            min_solutions: 1,
-            min_diversity_milli: 0,
-            max_proof_solutions: 32,
-            ..Default::default()
-        });
-        st.stash.reset(
-            job.generation,
-            Some(crate::decay::DecayModel {
-                base_max_energy_milli: energy,
-                curve: Some(crate::decay::EnergyCurve {
-                    min_milli: energy - 100_000,
-                    knee_milli: energy,
-                    max_milli: energy + 50_000,
-                }),
-                epoch_length: 10,
-                algorithm: crate::decay::DecayAlgorithm::Stepwise,
-            }),
-            0,
-        );
-        let state = Arc::new(Mutex::new(st));
-        let chain = FakeChain::new(lease_snapshot(), None);
-        handle_lease_result(&chain, &state, &notify(), "m", report).await;
-        assert!(chain.take_submitted().is_empty());
+        st.target = Some(target(energy));
+        ease_stash(&mut st, job.generation, energy);
+        let (state, submitted) = settle(st, report).await;
+        assert!(submitted.is_empty());
         let st = state.lock().await;
         assert!(!st.stash.is_empty(), "held for the decay schedule");
         assert!(st.round_mined());
@@ -1792,10 +1729,8 @@ mod tests {
         let (mut st, job) = lease_state();
         let _ = st.cancel_inflight(1);
         st.generation = 2;
-        let state = Arc::new(Mutex::new(st));
-        let chain = FakeChain::new(lease_snapshot(), None);
-        handle_lease_result(&chain, &state, &notify(), "m", winner(&job, 1)).await;
-        assert!(chain.take_submitted().is_empty());
+        let (state, submitted) = settle(st, winner(&job, 1)).await;
+        assert!(submitted.is_empty());
         let mut st = state.lock().await;
         handle_lease_done(
             &mut st,
@@ -1819,66 +1754,31 @@ mod tests {
         assert!(!st.round_mined());
     }
 
-    #[tokio::test]
-    async fn lease_result_without_target_is_dropped() {
-        let (mut st, job) = lease_state();
-        st.target = None;
-        let state = Arc::new(Mutex::new(st));
-        let chain = FakeChain::new(lease_snapshot(), None);
-        handle_lease_result(&chain, &state, &notify(), "m", winner(&job, 0)).await;
-        assert!(chain.take_submitted().is_empty());
-    }
-
-    #[tokio::test]
-    async fn lease_result_with_no_solutions_is_dropped_without_marking_the_round() {
-        let (st, job) = lease_state();
-        let state = Arc::new(Mutex::new(st));
-        let chain = FakeChain::new(lease_snapshot(), None);
-        let mut r = winner(&job, 0);
-        r.solutions.clear();
-        handle_lease_result(&chain, &state, &notify(), "m", r).await;
-        assert!(chain.take_submitted().is_empty());
-        assert!(
-            !state.lock().await.round_mined(),
-            "reporting zero solutions is not participation"
-        );
-    }
-
+    /// A lease that finished salts marks the round mined; one that finished
+    /// none does not. Either way the lease completes and its salts count.
     #[test]
-    fn lease_done_with_salts_marks_the_round_mined() {
-        let (mut st, job) = lease_state();
-        assert!(st.lease_issued_at.contains_key(&job.job_id));
-        handle_lease_done(
-            &mut st,
-            "m",
-            &LeaseDone {
-                job_id: job.job_id.clone(),
-                salts_done: 4,
-                best_energy_milli: -5,
-            },
-        );
-        assert!(st.round_mined());
-        assert!(!st.inflight.contains_key(&job.job_id));
-        // The issue-instant clock is consumed (and its entry cleared) as part
-        // of reporting elapsed time, not left dangling.
-        assert!(!st.lease_issued_at.contains_key(&job.job_id));
-        assert_eq!(st.router.take_lease_salts("m"), 4);
-        assert_eq!(st.router.round_salts("m"), 4);
-    }
-
-    #[test]
-    fn lease_done_with_no_salts_does_not_mark_the_round() {
-        let (mut st, job) = lease_state();
-        handle_lease_done(
-            &mut st,
-            "m",
-            &LeaseDone {
-                job_id: job.job_id,
-                salts_done: 0,
-                best_energy_milli: i64::MAX,
-            },
-        );
-        assert!(!st.round_mined());
+    fn lease_done_marks_the_round_mined_only_with_salts() {
+        for (salts_done, best_energy_milli) in [(4, -5), (0, i64::MAX)] {
+            let (mut st, job) = lease_state();
+            assert!(st.lease_issued_at.contains_key(&job.job_id));
+            handle_lease_done(
+                &mut st,
+                "m",
+                &LeaseDone {
+                    job_id: job.job_id.clone(),
+                    salts_done,
+                    best_energy_milli,
+                },
+            );
+            let label = format!("salts_done {salts_done}");
+            assert_eq!(st.round_mined(), salts_done > 0, "{label}");
+            assert!(!st.inflight.contains_key(&job.job_id), "{label}");
+            // The issue-instant clock is consumed (and its entry cleared) as
+            // part of reporting elapsed time, not left dangling.
+            assert!(!st.lease_issued_at.contains_key(&job.job_id), "{label}");
+            assert_eq!(st.router.take_lease_salts("m"), salts_done, "{label}");
+            assert_eq!(st.router.round_salts("m"), salts_done, "{label}");
+        }
     }
 
     #[test]
@@ -1890,23 +1790,7 @@ mod tests {
             ..MinerCaps::default()
         };
         st.router.register_miner("m", caps);
-        let snap = crate::chain::snapshot::MiningSnapshot {
-            head_hash: [0; 32],
-            last_proof_block_hash: [7; 32],
-            topology_hash: vec![9; 32],
-            nodes: vec![0, 1],
-            edges: vec![(0, 1)],
-            allowed_h_milli: vec![0],
-            allowed_j_milli: vec![1000],
-            allowed_spin_milli: vec![-1000, 1000],
-            min_solutions: 1,
-            max_energy_milli: 0,
-            min_diversity_milli: 0,
-            block_number: 1,
-            spec_version: 117,
-            family: None,
-        };
-        let job = crate::lease::build_lease_job(&snap, [0; 32], 21, 4, 1);
+        let job = crate::lease::build_lease_job(&lease_snapshot(), [0; 32], 21, 4, 1);
         st.dispatch_inflight("m", job.clone());
         let reclaimed = st.reclaim_miner("m");
         assert_eq!(reclaimed, vec![job.clone()]);
@@ -1961,13 +1845,6 @@ mod tests {
         );
         st.note_result(3);
         assert!(st.round_mined());
-    }
-
-    #[test]
-    fn reseed_clears_the_mined_mark() {
-        let mut st = CoordinatorState::new();
-        st.generation = 3;
-        st.note_result(3);
         st.generation = 4;
         assert!(!st.round_mined(), "a new round starts unmined");
     }
@@ -2020,14 +1897,24 @@ mod tests {
         assert!(st.complete_inflight(b"old").is_none());
     }
 
+    /// Ending a session drops its outbound channel and its wakeup: a dead
+    /// session must not be woken, and waking an unregistered miner is harmless.
     #[test]
-    fn outbound_register_and_deregister() {
+    fn ending_a_session_drops_its_outbound_and_wakeup() {
         let mut st = CoordinatorState::new();
         let (tx, _rx) = mpsc::channel::<Result<CoordMsg, Status>>(1);
+        let (grants, _grant_rx) = mpsc::channel::<u32>(1);
         st.register_outbound("cpu-0", tx);
+        st.register_wakeup("cpu-0", grants);
         assert!(st.outbound.contains_key("cpu-0"));
+        assert!(st.wakeups.contains_key("cpu-0"));
         st.deregister_outbound("cpu-0");
         assert!(!st.outbound.contains_key("cpu-0"));
+        assert!(
+            !st.wakeups.contains_key("cpu-0"),
+            "a dead session must not be woken"
+        );
+        st.wake_dispatcher("cpu-0");
     }
 
     /// A miner that grants its credits before any job is staged must still
@@ -2035,6 +1922,9 @@ mod tests {
     /// so only the feeder's wakeup can start the dispatch. Without that wakeup
     /// the miner waits for a job and the coordinator waits for a request, and
     /// neither side ever moves.
+    ///
+    /// C7 wiring check: `contexts_dispatched` moves at `dispatch_granted`'s real
+    /// call site, not just through the metrics API directly.
     #[tokio::test]
     async fn credits_granted_before_staging_still_dispatch() {
         let state = Arc::new(Mutex::new(CoordinatorState::new()));
@@ -2046,12 +1936,17 @@ mod tests {
             st.register_wakeup("cpu-0", grants);
         }
 
+        let dispatched = |st: &CoordinatorState| st.metrics.global().contexts_dispatched;
+        assert_eq!(dispatched(&*state.lock().await), 0);
+
         // The miner grants credits first. Nothing is staged, so nothing is sent.
         assert!(dispatch_granted(&state, "cpu-0", 32, &tx).await);
         assert!(
             rx.try_recv().is_err(),
             "no job exists yet, so none can dispatch"
         );
+        // This catches a metrics bump placed outside the `while let` drain.
+        assert_eq!(dispatched(&*state.lock().await), 0);
 
         // The feeder stages work and wakes the dispatcher.
         {
@@ -2073,54 +1968,7 @@ mod tests {
             panic!("expected a Job message");
         };
         assert_eq!(j.job_id, b"late".to_vec());
-    }
-
-    /// C7 wiring check: `contexts_dispatched` moves at `dispatch_granted`'s real
-    /// call site, not just through the metrics API directly.
-    #[tokio::test]
-    async fn dispatch_granted_counts_one_context_per_job_dispatched() {
-        let state = Arc::new(Mutex::new(CoordinatorState::new()));
-        let (tx, mut rx) = mpsc::channel::<Result<CoordMsg, Status>>(8);
-        {
-            let mut st = state.lock().await;
-            st.router.register_miner("cpu-0", caps());
-        }
-
-        assert_eq!(state.lock().await.metrics.global().contexts_dispatched, 0);
-
-        // Granting credits with nothing staged dispatches nothing: this catches
-        // a bump placed outside the `while let` drain.
-        assert!(dispatch_granted(&state, "cpu-0", 32, &tx).await);
-        assert!(rx.try_recv().is_err(), "no job exists yet");
-        assert_eq!(state.lock().await.metrics.global().contexts_dispatched, 0);
-
-        // Stage one job and dispatch it.
-        {
-            let mut st = state.lock().await;
-            assert!(st.router.stage_on("cpu-0", job(b"one")));
-        }
-        assert!(dispatch_granted(&state, "cpu-0", 0, &tx).await);
-        assert!(rx.try_recv().is_ok(), "the staged job dispatches");
-        assert_eq!(state.lock().await.metrics.global().contexts_dispatched, 1);
-    }
-
-    #[tokio::test]
-    async fn waking_an_unregistered_miner_is_harmless() {
-        let st = CoordinatorState::new();
-        st.wake_dispatcher("nobody");
-    }
-
-    #[tokio::test]
-    async fn ending_a_session_drops_its_wakeup() {
-        let mut st = CoordinatorState::new();
-        let (grants, _rx) = mpsc::channel::<u32>(1);
-        st.register_wakeup("cpu-0", grants);
-        assert!(st.wakeups.contains_key("cpu-0"));
-        st.deregister_outbound("cpu-0");
-        assert!(
-            !st.wakeups.contains_key("cpu-0"),
-            "a dead session must not be woken"
-        );
+        assert_eq!(dispatched(&*state.lock().await), 1);
     }
 
     #[tokio::test]

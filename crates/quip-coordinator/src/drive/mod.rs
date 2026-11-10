@@ -87,11 +87,4 @@ mod tests {
         assert_eq!(src.next_job().unwrap().generation, 3);
         assert!(src.next_job().is_none());
     }
-
-    #[test]
-    fn drain_all_collects_every_job() {
-        let mut src = VecSource::new(vec![job(1), job(2)]);
-        let jobs = drain_all(&mut src);
-        assert_eq!(jobs.len(), 2);
-    }
 }

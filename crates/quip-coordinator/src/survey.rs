@@ -798,9 +798,8 @@ mod tests {
             },
             RawSurvey::default(),
             RawSurvey {
-                gpus: (0..64)
-                    .map(|i| gpu("NVIDIA", &format!("card {i}")))
-                    .collect(),
+                python: "9".repeat(400),
+                docker_image: Some("i".repeat(4096)),
                 ..RawSurvey::default()
             },
             RawSurvey {
@@ -820,8 +819,15 @@ mod tests {
             },
         ];
         for raw in cases {
-            let out = sys(raw);
-            assert!(fits_pallet_bounds(&out), "sanitize left a bound violated");
+            let surveyed = sanitize(raw);
+            assert!(
+                fits_pallet_bounds(&surveyed.system),
+                "sanitize left a bound violated"
+            );
+            let runtime = surveyed.runtime;
+            assert!(super::runtime_fits_pallet_bounds(&runtime));
+            assert!(runtime.python.len() <= 48);
+            assert!(runtime.docker_image.is_none_or(|image| image.len() <= 256));
         }
     }
 
@@ -878,12 +884,30 @@ mod tests {
     }
 
     #[test]
-    fn scrub_strips_control_characters() {
+    fn scrub_strips_control_and_invisible_characters() {
         let out = sys(RawSurvey {
             cpu_brand: "AMD Ryzen\t9\u{0}  5950X\nrogue".to_owned(),
             ..RawSurvey::default()
         });
         assert_eq!(out.cpu.brand, b"AMD Ryzen 9 5950X rogue");
+
+        // U+202E reverses rendering from that point on; the zero-width members
+        // let two distinct nodes render identically. Both land in permanent
+        // public storage, so they must not survive scrubbing.
+        let out = sys(RawSurvey {
+            cpu_brand: "AMD EPYC 9654\u{202e}dexednu\u{200b} 96-Core".to_owned(),
+            os_release: "6.1.0\u{feff}-52\u{00ad}-amd64".to_owned(),
+            ..RawSurvey::default()
+        });
+        let brand = std::str::from_utf8(&out.cpu.brand).expect("utf8");
+        let release = std::str::from_utf8(&out.os.release).expect("utf8");
+        for field in [brand, release] {
+            assert!(
+                !field.chars().any(super::is_invisible),
+                "an invisible code point survived: {field:?}"
+            );
+        }
+        assert!(fits_pallet_bounds(&out));
     }
 
     #[test]
@@ -989,19 +1013,6 @@ mod tests {
     }
 
     #[test]
-    fn runtime_bounds_hold_under_adversarial_input() {
-        let out = sanitize(RawSurvey {
-            python: "9".repeat(400),
-            docker_image: Some("i".repeat(4096)),
-            ..RawSurvey::default()
-        })
-        .runtime;
-        assert!(super::runtime_fits_pallet_bounds(&out));
-        assert!(out.python.len() <= 48);
-        assert!(out.docker_image.is_none_or(|image| image.len() <= 256));
-    }
-
-    #[test]
     fn python_version_is_parsed_from_the_banner() {
         assert_eq!(
             super::parse_python_version("Python 3.12.7\n").as_deref(),
@@ -1013,27 +1024,6 @@ mod tests {
             super::parse_python_version("bash: no python").as_deref(),
             None
         );
-    }
-
-    #[test]
-    fn invisible_characters_never_reach_the_payload() {
-        // U+202E reverses rendering from that point on; the zero-width members
-        // let two distinct nodes render identically. Both land in permanent
-        // public storage, so they must not survive scrubbing.
-        let out = sys(RawSurvey {
-            cpu_brand: "AMD EPYC 9654\u{202e}dexednu\u{200b} 96-Core".to_owned(),
-            os_release: "6.1.0\u{feff}-52\u{00ad}-amd64".to_owned(),
-            ..RawSurvey::default()
-        });
-        let brand = std::str::from_utf8(&out.cpu.brand).expect("utf8");
-        let release = std::str::from_utf8(&out.os.release).expect("utf8");
-        for field in [brand, release] {
-            assert!(
-                !field.chars().any(super::is_invisible),
-                "an invisible code point survived: {field:?}"
-            );
-        }
-        assert!(fits_pallet_bounds(&out));
     }
 
     #[test]

@@ -1,5 +1,6 @@
-//! Integration: drive `quip-mock-miner` end-to-end over UDS with a 2-entry
-//! JSONL list, via the generalized `JobSource`-driven harness.
+//! Integration: drive `quip-mock-miner` end-to-end over UDS through the
+//! `JobSource`-driven harness: an explicit JSONL list, salt leases, and the
+//! deep-credit-pool flow-control regression.
 
 #![expect(
     clippy::expect_used,
@@ -11,29 +12,15 @@
     reason = "test wall-clock millis fit u64"
 )]
 
-use quip_coordinator::config::LaunchEntry;
-use quip_coordinator::drive::{aggregate, drain_all, DriveManyParams, LeaseSource, ListSource};
-use quip_proto::v1::{Configure, SetTarget};
-use std::time::{SystemTime, UNIX_EPOCH};
+mod common;
 
-/// Sibling `quip-mock-miner` binary (not same package → no `CARGO_BIN_EXE_*`).
-fn mock_miner() -> String {
-    let status = std::process::Command::new(env!("CARGO"))
-        .args(["build", "-p", "quip-mock-miner"])
-        .status()
-        .expect("build quip-mock-miner");
-    assert!(status.success(), "failed to build quip-mock-miner");
-    let name = if cfg!(windows) {
-        "quip-mock-miner.exe"
-    } else {
-        "quip-mock-miner"
-    };
-    let mut p = std::env::current_exe().expect("test exe path");
-    let _ = p.pop();
-    let _ = p.pop();
-    p.push(name);
-    p.to_string_lossy().into_owned()
-}
+use common::mock_miner;
+use quip_coordinator::config::LaunchEntry;
+use quip_coordinator::drive::{
+    aggregate, drain_all, DriveManyParams, JobRow, LeaseSource, ListSource,
+};
+use quip_proto::v1::{ising_problem, Configure, EdgeList, Job, JobKind, SetTarget};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -164,4 +151,112 @@ async fn drives_leases_end_to_end() {
         10,
         "every salt wins an open target"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Flow control
+// ---------------------------------------------------------------------------
+
+/// Jobs shaped like production nonces: an Advantage2-sized ring (4577 nodes)
+/// carries ~73 KB of inline `h`/`J`/edges, so a 480-deep pool puts ~35 MB on
+/// the wire. Volume is the whole trigger — at 5 KB per job the transport
+/// buffers absorb the burst and the deadlock does not appear.
+fn ring_jobs(count: usize, nodes: usize) -> Vec<Job> {
+    let deadline = now_ms() + 3_600_000;
+    let h: Vec<i32> = (0..nodes)
+        .map(|i| if i % 2 == 0 { 1000 } else { -1000 })
+        .collect();
+    let u: Vec<u32> = (0..nodes as u32).collect();
+    let v: Vec<u32> = (0..nodes as u32).map(|i| (i + 1) % nodes as u32).collect();
+    let j: Vec<i32> = vec![500; nodes];
+    (0..count)
+        .map(|n| Job {
+            job_id: format!("job-{n}").into_bytes(),
+            generator: None,
+            kind: JobKind::IsingSample as i32,
+            generation: 0,
+            deadline_ms: deadline,
+            ising: Some({
+                let mut problem = quip_coordinator::producer::problem::milli_problem(
+                    Some(ising_problem::Graph::Edges(EdgeList {
+                        u: u.clone(),
+                        v: v.clone(),
+                    })),
+                    &h,
+                    &j,
+                );
+                problem.num_reads = 1;
+                problem
+            }),
+            provenance: None,
+        })
+        .collect()
+}
+
+/// Regression: a deep credit pool must not deadlock the miner session.
+///
+/// Both peers speak one bidi stream. If either one writes on the same task that
+/// reads, a full outbound channel stops it reading — and since each side's
+/// reads are what free the other side's writes, both park permanently. The
+/// trigger is simply enough bytes in flight: a large credit pool plus jobs
+/// carrying inline `h`/`J`.
+///
+/// This reproduces it through the public drive path. Pre-fix (dispatch on the
+/// coordinator's read loop) the run hangs and this test trips its timeout;
+/// post-fix the dispatcher is a separate task, so results keep draining.
+#[tokio::test]
+async fn deep_credit_pool_does_not_deadlock_the_session() {
+    let miner = mock_miner();
+    let jobs = ring_jobs(480, 4577);
+    let total = jobs.len();
+
+    let entry = LaunchEntry {
+        miner_id: "cpu-0".into(),
+        binary: miner.clone(),
+        backend: "cpu".into(),
+        device: None,
+        configure: Configure {
+            // The lever: `seed_credits` is `queue_depth`, so this grants the
+            // whole pool up front and the coordinator dispatches every staged
+            // job in one uninterrupted burst — exactly the flood that used to
+            // wedge the read path.
+            queue_depth: 480,
+            idle_timeout_s: 30,
+            heartbeat_s: 15,
+            reconnect_window_s: 60,
+            backend_toml: String::new(),
+        },
+    };
+
+    let sock = format!("/tmp/quip-flow-control-{}.sock", std::process::id());
+    let run = quip_coordinator::drive::run_drive(DriveManyParams {
+        miner_bin: &miner,
+        sock_path: &sock,
+        miner_id: "cpu-0",
+        token: "flow-control-token",
+        entry: &entry,
+        topology: None,
+        target: None,
+        jobs,
+        utilization: None,
+        yielding: false,
+        log_level: quip_coordinator::logging::LogLevel::Info,
+    });
+
+    // A generous bound: the mock miner answers instantly, so this only fires if
+    // the session wedged. Without the timeout a regression hangs the suite
+    // instead of failing it.
+    let report = tokio::time::timeout(Duration::from_secs(90), run)
+        .await
+        .expect("session deadlocked: no progress within 90s");
+
+    assert!(report.handshake_ok, "handshake failed");
+    assert_eq!(
+        report.rows.len(),
+        total,
+        "every job must reach a terminal outcome; got {} of {total}",
+        report.rows.len()
+    );
+    let rejected = report.rows.iter().filter(|r: &&JobRow| r.rejected).count();
+    assert_eq!(rejected, 0, "no job should be rejected by the mock miner");
 }

@@ -93,7 +93,7 @@ mod tests {
     }
 
     #[test]
-    fn derives_job_with_correct_shape() {
+    fn derives_a_deterministic_job_with_correct_shape() {
         let snap = fixture();
         let job = derive_pow_job(&snap, [1u8; 32], [2u8; 32], 42, 9999).unwrap();
         assert_eq!(job.kind, JobKind::IsingSample as i32);
@@ -109,16 +109,12 @@ mod tests {
         assert_eq!(j.len(), 4);
         assert!(h.iter().all(|v| [-1000, 0, 1000].contains(v)));
         assert!(j.iter().all(|v| [-1000, 1000].contains(v)));
-    }
 
-    #[test]
-    fn derivation_is_deterministic_for_same_inputs() {
-        let snap = fixture();
-        let a = derive_pow_job(&snap, [1u8; 32], [2u8; 32], 1, 1).unwrap();
-        let b = derive_pow_job(&snap, [1u8; 32], [2u8; 32], 1, 1).unwrap();
+        // The same account and salt derive the same problem.
+        let again = derive_pow_job(&snap, [1u8; 32], [2u8; 32], 1, 1).unwrap();
         assert_eq!(
-            problem_milli(a.ising.as_ref().unwrap()).unwrap(),
-            problem_milli(b.ising.as_ref().unwrap()).unwrap()
+            problem_milli(again.ising.as_ref().unwrap()).unwrap(),
+            (h, j)
         );
     }
 }

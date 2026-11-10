@@ -67,32 +67,31 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn bare_string_statuses_are_recognised() {
-        assert_eq!(parse_tx_status(&json!("ready")), TxStatus::Ready);
-        assert_eq!(parse_tx_status(&json!("broadcast")), TxStatus::Broadcast);
-        assert_eq!(parse_tx_status(&json!("future")), TxStatus::Future);
-    }
-
-    /// Substrate has used both camelCase and lowercase over time. Accept both
-    /// so a node upgrade does not silently stop reporting inclusion.
-    #[test]
-    fn in_block_is_recognised_in_either_casing() {
-        assert_eq!(
-            parse_tx_status(&json!({"inBlock": "0xabc"})),
-            TxStatus::InBlock("0xabc".into())
-        );
-        assert_eq!(
-            parse_tx_status(&json!({"inblock": "0xabc"})),
-            TxStatus::InBlock("0xabc".into())
-        );
-    }
-
-    #[test]
-    fn finalized_carries_its_block_hash() {
-        assert_eq!(
-            parse_tx_status(&json!({"finalized": "0xdef"})),
-            TxStatus::Finalized("0xdef".into())
-        );
+    fn progress_statuses_are_recognised() {
+        for (label, input, expected) in [
+            ("ready", json!("ready"), TxStatus::Ready),
+            ("broadcast", json!("broadcast"), TxStatus::Broadcast),
+            ("future", json!("future"), TxStatus::Future),
+            // Substrate has used both camelCase and lowercase over time. Accept
+            // both so a node upgrade does not silently stop reporting inclusion.
+            (
+                "inBlock camelCase",
+                json!({"inBlock": "0xabc"}),
+                TxStatus::InBlock("0xabc".into()),
+            ),
+            (
+                "inblock lowercase",
+                json!({"inblock": "0xabc"}),
+                TxStatus::InBlock("0xabc".into()),
+            ),
+            (
+                "finalized carries its block hash",
+                json!({"finalized": "0xdef"}),
+                TxStatus::Finalized("0xdef".into()),
+            ),
+        ] {
+            assert_eq!(parse_tx_status(&input), expected, "{label}");
+        }
     }
 
     #[test]

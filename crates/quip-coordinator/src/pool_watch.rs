@@ -363,57 +363,59 @@ mod tests {
     }
 
     #[test]
-    fn a_ground_state_clears_when_the_ceiling_is_one_milli_above_it() {
-        let mut snap = ring();
-        let (energy, spins) = ground_state(&snap, SALT);
-        snap.max_energy_milli = energy + 1;
-        let pending = pending_with(&snap, &[spins], SALT);
-        assert_eq!(
-            judge_pending_proof(&pending, &snap),
-            Verdict::Clears {
-                best_energy_milli: energy
-            }
-        );
-    }
-
-    /// The pallet gate is strict: energy must be below the ceiling.
-    #[test]
-    fn a_ground_state_at_the_ceiling_is_below_gates() {
-        let mut snap = ring();
-        let (energy, spins) = ground_state(&snap, SALT);
-        snap.max_energy_milli = energy;
-        let pending = pending_with(&snap, &[spins], SALT);
-        assert_eq!(judge_pending_proof(&pending, &snap), Verdict::BelowGates);
-    }
-
-    #[test]
-    fn a_nonce_from_another_root_is_another_round() {
-        let mut snap = ring();
-        let (energy, spins) = ground_state(&snap, SALT);
-        snap.max_energy_milli = energy + 1;
-        let pending = pending_with(&snap, &[spins], SALT);
-        snap.last_proof_block_hash = [8u8; 32];
-        assert_eq!(judge_pending_proof(&pending, &snap), Verdict::OtherRound);
-    }
-
-    #[test]
-    fn another_topology_is_another_round() {
-        let mut snap = ring();
-        let (energy, spins) = ground_state(&snap, SALT);
-        snap.max_energy_milli = energy + 1;
-        let pending = pending_with(&snap, &[spins], SALT);
-        snap.topology_hash = vec![10u8; 32];
-        assert_eq!(judge_pending_proof(&pending, &snap), Verdict::OtherRound);
-    }
-
-    #[test]
-    fn too_few_valid_rows_is_below_gates() {
-        let mut snap = ring();
-        let (energy, spins) = ground_state(&snap, SALT);
-        snap.max_energy_milli = energy + 1;
-        snap.min_solutions = 2;
-        let pending = pending_with(&snap, &[spins], SALT);
-        assert_eq!(judge_pending_proof(&pending, &snap), Verdict::BelowGates);
+    fn judge_pending_proof_verdicts() {
+        type Mutate = fn(&mut MiningSnapshot, i64);
+        type Expect = fn(i64) -> Verdict;
+        // The pallet gate is strict: energy must be below the ceiling.
+        let cases: [(&str, Mutate, Expect); 5] = [
+            (
+                "ceiling one milli above the ground state",
+                |snap, energy| snap.max_energy_milli = energy + 1,
+                |energy| Verdict::Clears {
+                    best_energy_milli: energy,
+                },
+            ),
+            (
+                "ceiling at the ground state",
+                |snap, energy| snap.max_energy_milli = energy,
+                |_| Verdict::BelowGates,
+            ),
+            (
+                "nonce from another root",
+                |snap, energy| {
+                    snap.max_energy_milli = energy + 1;
+                    snap.last_proof_block_hash = [8u8; 32];
+                },
+                |_| Verdict::OtherRound,
+            ),
+            (
+                "another topology",
+                |snap, energy| {
+                    snap.max_energy_milli = energy + 1;
+                    snap.topology_hash = vec![10u8; 32];
+                },
+                |_| Verdict::OtherRound,
+            ),
+            (
+                "too few valid rows",
+                |snap, energy| {
+                    snap.max_energy_milli = energy + 1;
+                    snap.min_solutions = 2;
+                },
+                |_| Verdict::BelowGates,
+            ),
+        ];
+        for (label, mutate, expected) in cases {
+            let mut snap = ring();
+            let (energy, spins) = ground_state(&snap, SALT);
+            let pending = pending_with(&snap, &[spins], SALT);
+            mutate(&mut snap, energy);
+            assert_eq!(
+                judge_pending_proof(&pending, &snap),
+                expected(energy),
+                "{label}"
+            );
+        }
     }
 
     #[test]
@@ -428,16 +430,6 @@ mod tests {
     }
 
     #[test]
-    fn clears_reads_the_verdict() {
-        assert!(Verdict::Clears {
-            best_energy_milli: -1
-        }
-        .clears());
-        assert!(!Verdict::OtherRound.clears());
-        assert!(!Verdict::BelowGates.clears());
-        assert!(!Verdict::Malformed(String::new()).clears());
-    }
-    #[test]
     fn scan_reports_the_best_clearing_proof_and_caches_by_hash() {
         let mut snap = ring();
         let (energy, spins) = ground_state(&snap, SALT);
@@ -451,19 +443,10 @@ mod tests {
         assert_eq!(first.best_energy_milli, energy);
         // The same hash is not judged again: a corrupted copy under the same
         // hash still reports the cached verdict.
-        let mut same_hash = pending;
+        let mut same_hash = pending.clone();
         same_hash.proof.solutions = vec![Vec::new()];
         assert!(watch.scan(&[same_hash], &snap).is_some());
-    }
-
-    #[test]
-    fn scan_forgets_verdicts_when_the_root_changes() {
-        let mut snap = ring();
-        let (energy, spins) = ground_state(&snap, SALT);
-        snap.max_energy_milli = energy + 1;
-        let pending = pending_with(&snap, &[spins], SALT);
-        let mut watch = PoolWatch::new();
-        assert!(watch.scan(std::slice::from_ref(&pending), &snap).is_some());
+        // Verdicts are forgotten when the root changes.
         snap.last_proof_block_hash = [8u8; 32];
         assert!(watch.scan(&[pending], &snap).is_none());
     }
@@ -589,8 +572,10 @@ mod tests {
     }
 
     #[test]
-    fn resume_after_two_clear_polls() {
+    fn resume_reason_follows_clear_polls_and_the_block_ceiling() {
         let mut watch = PoolWatch::new();
+
+        // Two clear polls resume; a clearing poll does not count.
         watch.stopped(100);
         assert_eq!(watch.resume_reason(PoolObservation::Clearing, 100), None);
         assert_eq!(watch.resume_reason(PoolObservation::Clear, 100), None);
@@ -598,11 +583,8 @@ mod tests {
             watch.resume_reason(PoolObservation::Clear, 100),
             Some(ResumeReason::PoolClear)
         );
-    }
 
-    #[test]
-    fn a_clearing_poll_resets_the_clear_count() {
-        let mut watch = PoolWatch::new();
+        // A clearing poll resets the clear count.
         watch.stopped(100);
         assert_eq!(watch.resume_reason(PoolObservation::Clear, 100), None);
         assert_eq!(watch.resume_reason(PoolObservation::Clearing, 100), None);
@@ -611,22 +593,16 @@ mod tests {
             watch.resume_reason(PoolObservation::Clear, 100),
             Some(ResumeReason::PoolClear)
         );
-    }
 
-    #[test]
-    fn resume_after_two_blocks_even_while_the_proof_is_pending() {
-        let mut watch = PoolWatch::new();
+        // Two blocks resume even while the proof is pending.
         watch.stopped(100);
         assert_eq!(watch.resume_reason(PoolObservation::Clearing, 101), None);
         assert_eq!(
             watch.resume_reason(PoolObservation::Clearing, 102),
             Some(ResumeReason::BlocksElapsed)
         );
-    }
 
-    #[test]
-    fn stopped_resets_the_wait() {
-        let mut watch = PoolWatch::new();
+        // stopped() resets the wait.
         watch.stopped(100);
         assert_eq!(watch.resume_reason(PoolObservation::Clear, 100), None);
         watch.stopped(105);

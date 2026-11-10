@@ -486,6 +486,7 @@ pub(crate) async fn declare_round_participation<C: ChainClient>(
 
 #[cfg(test)]
 mod tests {
+    use super::ReadinessError;
     use super::{
         build_descriptor_payload, candidate_qblock_id, declare_round_participation,
         file_round_descriptor, prepare_round, register_round_miner, HttpFaucet, ProcessLatches,
@@ -547,27 +548,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn same_qblock_declares_once() {
+    async fn participation_is_declared_once_per_qblock() {
         let chain = FakeChain::new(snap(), None);
-        chain.set_qblock_id(Some(10));
         let mut last = None;
+        // The same qblock declares once.
+        chain.set_qblock_id(Some(10));
         let _ = declare_round_participation(&chain, &mut last, account()).await;
         let _ = declare_round_participation(&chain, &mut last, account()).await;
         assert_eq!(chain.participation_calls(), 1);
-        assert_eq!(chain.take_participations(), vec![11]);
         assert_eq!(last, Some(11));
-    }
-
-    #[tokio::test]
-    async fn different_qblocks_declare_twice() {
-        let chain = FakeChain::new(snap(), None);
-        let mut last = None;
-        chain.set_qblock_id(Some(10));
-        let _ = declare_round_participation(&chain, &mut last, account()).await;
+        // A new qblock declares again.
         chain.set_qblock_id(Some(11));
         let _ = declare_round_participation(&chain, &mut last, account()).await;
         assert_eq!(chain.participation_calls(), 2);
         assert_eq!(chain.take_participations(), vec![11, 12]);
+        // A transient error does not record the qblock, so the next call retries.
+        chain.set_qblock_id(Some(12));
+        chain.set_participation_result(Err(ChainError::Unavailable("rpc down".into())));
+        let _ = declare_round_participation(&chain, &mut last, account()).await;
+        assert_eq!(last, Some(12));
+        chain.set_participation_result(Ok(ParticipationOutcome::Declared));
+        let _ = declare_round_participation(&chain, &mut last, account()).await;
+        assert_eq!(chain.participation_calls(), 2);
+        assert_eq!(last, Some(13));
+    }
+
+    /// Run the startup walk with the given latches against `chain`.
+    async fn prepare(
+        chain: &FakeChain,
+        params: &DescriptorParams,
+        filed: &AtomicBool,
+        registered: &AtomicBool,
+    ) -> Result<MiningSnapshot, ReadinessError> {
+        prepare_round(
+            chain,
+            None::<&HttpFaucet>,
+            account(),
+            &FundingParams::default(),
+            no_sleep,
+            params,
+            &ProcessLatches {
+                descriptor_filed: filed,
+                miner_registered: registered,
+            },
+        )
+        .await
     }
 
     fn named_descriptor() -> DescriptorParams {
@@ -626,16 +651,6 @@ mod tests {
         let payload = build_descriptor_payload(&params, account()).expect("payload");
         assert_eq!(payload.system_info, Some(expected.system));
         assert_eq!(payload.runtime, Some(expected.runtime));
-    }
-
-    #[test]
-    fn descriptor_files_without_a_survey() {
-        let params = DescriptorParams {
-            system_info: None,
-            ..named_descriptor()
-        };
-        let payload = build_descriptor_payload(&params, account()).expect("payload");
-        assert!(payload.system_info.is_none());
     }
 
     #[test]
@@ -707,25 +722,23 @@ token = "{SENTINEL}"
     /// Participation is the feeder's to declare, after a miner has returned a
     /// Result for the round. The process-start walk has no such evidence.
     #[tokio::test]
-    async fn prepare_round_does_not_declare_participation() {
+    async fn prepare_round_registers_and_funds_but_does_not_declare() {
         let chain = FakeChain::new(snap(), None);
         chain.set_qblock_id(Some(20));
-        let _snap = prepare_round(
+        let registered = AtomicBool::new(false);
+        let _snap = prepare(
             &chain,
-            None::<&HttpFaucet>,
-            account(),
-            &FundingParams::default(),
-            no_sleep,
             &DescriptorParams::default(),
-            &ProcessLatches {
-                descriptor_filed: &AtomicBool::new(false),
-                miner_registered: &AtomicBool::new(false),
-            },
+            &AtomicBool::new(false),
+            &registered,
         )
         .await
         .expect("prepare_round");
         assert_eq!(chain.participation_calls(), 0);
         assert_eq!(chain.descriptor_calls(), 0);
+        assert_eq!(chain.registration_submits(), 1);
+        assert!(registered.load(Ordering::Relaxed));
+        assert_eq!(chain.take_balance_accounts(), vec![account()]);
     }
 
     #[tokio::test]
@@ -734,20 +747,9 @@ token = "{SENTINEL}"
         chain.set_qblock_id(Some(20));
         let filed = AtomicBool::new(false);
         let params = named_descriptor();
-        let _snap = prepare_round(
-            &chain,
-            None::<&HttpFaucet>,
-            account(),
-            &FundingParams::default(),
-            no_sleep,
-            &params,
-            &ProcessLatches {
-                descriptor_filed: &filed,
-                miner_registered: &AtomicBool::new(false),
-            },
-        )
-        .await
-        .expect("prepare_round");
+        let _snap = prepare(&chain, &params, &filed, &AtomicBool::new(false))
+            .await
+            .expect("prepare_round");
         assert!(filed.load(Ordering::Relaxed));
         assert_eq!(chain.descriptor_calls(), 1);
         let filed_payload = chain.take_descriptors();
@@ -817,63 +819,15 @@ token = "{SENTINEL}"
     }
 
     #[tokio::test]
-    async fn prepare_round_registers_the_miner_before_reading_requirements() {
-        let chain = FakeChain::new(snap(), None);
-        let registered = AtomicBool::new(false);
-        let _snap = prepare_round(
-            &chain,
-            None::<&HttpFaucet>,
-            account(),
-            &FundingParams::default(),
-            no_sleep,
-            &DescriptorParams::default(),
-            &ProcessLatches {
-                descriptor_filed: &AtomicBool::new(false),
-                miner_registered: &registered,
-            },
-        )
-        .await
-        .expect("prepare_round");
-        assert_eq!(chain.registration_submits(), 1);
-        assert!(registered.load(Ordering::Relaxed));
-    }
-
-    #[tokio::test]
-    async fn prepare_round_funds_the_account_it_was_given() {
-        let chain = FakeChain::new(snap(), None);
-        let _snap = prepare_round(
-            &chain,
-            None::<&HttpFaucet>,
-            account(),
-            &FundingParams::default(),
-            no_sleep,
-            &DescriptorParams::default(),
-            &ProcessLatches {
-                descriptor_filed: &AtomicBool::new(false),
-                miner_registered: &AtomicBool::new(false),
-            },
-        )
-        .await
-        .expect("prepare_round");
-        assert_eq!(chain.take_balance_accounts(), vec![account()]);
-    }
-
-    #[tokio::test]
     async fn a_registration_failure_does_not_fail_the_startup_walk() {
         let chain = FakeChain::new(snap(), None);
         chain.set_registration_result(Err(ChainError::Unavailable("rpc down".into())));
         let registered = AtomicBool::new(false);
-        let _snap = prepare_round(
+        let _snap = prepare(
             &chain,
-            None::<&HttpFaucet>,
-            account(),
-            &FundingParams::default(),
-            no_sleep,
             &DescriptorParams::default(),
-            &ProcessLatches {
-                descriptor_filed: &AtomicBool::new(false),
-                miner_registered: &registered,
-            },
+            &AtomicBool::new(false),
+            &registered,
         )
         .await
         .expect("startup continues so the feeder can retry");
@@ -919,25 +873,29 @@ token = "{SENTINEL}"
     }
 
     #[tokio::test]
-    async fn descriptor_transient_error_retries_then_marks_done() {
-        let chain = FakeChain::new(snap(), None);
-        chain.set_descriptor_result(Err(ChainError::Unavailable("rpc down".into())));
-        let filed = AtomicBool::new(false);
-        file_round_descriptor(&chain, &filed, &named_descriptor(), account()).await;
-        assert_eq!(chain.descriptor_calls(), 3);
-        assert!(filed.load(Ordering::Relaxed));
-        file_round_descriptor(&chain, &filed, &named_descriptor(), account()).await;
-        assert_eq!(chain.descriptor_calls(), 3);
-    }
-
-    #[tokio::test]
-    async fn descriptor_pallet_rejection_does_not_retry() {
-        let chain = FakeChain::new(snap(), None);
-        chain.set_descriptor_result(Ok(DescriptorOutcome::Rejected));
-        let filed = AtomicBool::new(false);
-        file_round_descriptor(&chain, &filed, &named_descriptor(), account()).await;
-        assert_eq!(chain.descriptor_calls(), 1);
-        assert!(filed.load(Ordering::Relaxed));
+    async fn descriptor_outcomes_latch_and_retry_only_when_transient() {
+        let cases = [
+            (
+                "transient error retries then marks done",
+                Err(ChainError::Unavailable("rpc down".into())),
+                3,
+            ),
+            (
+                "pallet rejection does not retry",
+                Ok(DescriptorOutcome::Rejected),
+                1,
+            ),
+        ];
+        for (label, result, calls) in cases {
+            let chain = FakeChain::new(snap(), None);
+            chain.set_descriptor_result(result);
+            let filed = AtomicBool::new(false);
+            file_round_descriptor(&chain, &filed, &named_descriptor(), account()).await;
+            assert_eq!(chain.descriptor_calls(), calls, "{label}");
+            assert!(filed.load(Ordering::Relaxed), "{label}");
+            file_round_descriptor(&chain, &filed, &named_descriptor(), account()).await;
+            assert_eq!(chain.descriptor_calls(), calls, "{label}: latched");
+        }
     }
 
     #[derive(Clone)]
@@ -1009,19 +967,5 @@ token = "{SENTINEL}"
             missing.contains("0xabababab"),
             "DescriptorRequired must name the account, got {missing:?}"
         );
-    }
-
-    #[tokio::test]
-    async fn transient_error_does_not_record_the_qblock() {
-        let chain = FakeChain::new(snap(), None);
-        chain.set_qblock_id(Some(7));
-        chain.set_participation_result(Err(ChainError::Unavailable("rpc down".into())));
-        let mut last = None;
-        let _ = declare_round_participation(&chain, &mut last, account()).await;
-        assert_eq!(last, None);
-        chain.set_participation_result(Ok(ParticipationOutcome::Declared));
-        let _ = declare_round_participation(&chain, &mut last, account()).await;
-        assert_eq!(chain.participation_calls(), 2);
-        assert_eq!(last, Some(8));
     }
 }

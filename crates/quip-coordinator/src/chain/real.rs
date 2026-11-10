@@ -1686,8 +1686,6 @@ mod tests {
         rpc_request, RPC_CONNECT_TIMEOUT, RPC_REQUEST_TIMEOUT,
     };
 
-    /// Losing the qblock to another miner is the one included-but-failed case
-    /// that must not be reported as a rejection: the proof itself was sound.
     #[test]
     fn an_order_deadline_is_absolute_and_honours_block_wait() {
         let timing = super::OrderTiming {
@@ -1714,6 +1712,8 @@ mod tests {
         );
     }
 
+    /// Losing the qblock to another miner is the one included-but-failed case
+    /// that must not be reported as a rejection: the proof itself was sound.
     #[test]
     fn only_a_rival_winner_counts_as_a_lost_race() {
         let ours = [1u8; 32];
@@ -1798,35 +1798,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ws_blackhole_endpoint_errors_within_connect_budget() {
-        let addr = spawn_blackhole_listener().await;
-        let url = format!("ws://{addr}");
-        let started = Instant::now();
-        let outcome = tokio::time::timeout(
-            single_endpoint_budget(),
-            rpc_request(&url, "system_health", JsonValue::Array(vec![])),
-        )
-        .await;
-        assert!(
-            outcome.is_ok(),
-            "ws blackhole call hung past {:?}",
-            single_endpoint_budget()
-        );
-        let err = outcome
-            .expect("outer timeout")
-            .expect_err("blackhole must not succeed");
-        assert!(
-            matches!(err, ChainError::Unavailable(_)),
-            "timeout must classify as Unavailable for failover, got {err}"
-        );
-        assert!(
-            started.elapsed() < single_endpoint_budget(),
-            "elapsed {:?} exceeds budget",
-            started.elapsed()
-        );
-    }
-
-    #[tokio::test]
     async fn http_blackhole_endpoint_errors_within_request_budget() {
         let addr = spawn_blackhole_listener().await;
         let url = format!("http://{addr}");
@@ -1853,24 +1824,64 @@ mod tests {
         );
     }
 
+    /// A single ws blackhole must error within the connect budget, and an
+    /// `rpc_call` whose primary blackholes must fail over to the next
+    /// validator. `rpc_call` fails over on any error, so the failover path
+    /// alone cannot show that the blackhole error classifies as
+    /// `Unavailable`. Both calls wait out one real `RPC_CONNECT_TIMEOUT`, so
+    /// they run concurrently to pay for that wait once.
     #[tokio::test]
-    async fn rpc_call_fails_over_past_blackhole_first_validator() {
+    async fn ws_blackhole_errors_within_connect_budget_and_rpc_call_fails_over_past_it() {
         let addr = spawn_blackhole_listener().await;
+        let url = format!("ws://{addr}");
         // Primary accepts and stays silent. Secondary refuses immediately so
         // the call ends after one connect timeout plus a fast connection error.
         let client = RealChainClient::new(
-            vec![format!("ws://{addr}"), "ws://127.0.0.1:1".to_string()],
+            vec![url.clone(), "ws://127.0.0.1:1".to_string()],
             "//Alice".to_string(),
             MinerKind::Cpu,
         );
-        let started = Instant::now();
-        let outcome = tokio::time::timeout(failover_budget(), client.runtime_version_raw()).await;
+        let single = async {
+            let started = Instant::now();
+            let outcome = tokio::time::timeout(
+                single_endpoint_budget(),
+                rpc_request(&url, "system_health", JsonValue::Array(vec![])),
+            )
+            .await;
+            (outcome, started.elapsed())
+        };
+        let failover = async {
+            let started = Instant::now();
+            let outcome =
+                tokio::time::timeout(failover_budget(), client.runtime_version_raw()).await;
+            (outcome, started.elapsed())
+        };
+        let ((single, single_elapsed), (failover, failover_elapsed)) =
+            tokio::join!(single, failover);
+
         assert!(
-            outcome.is_ok(),
+            single.is_ok(),
+            "ws blackhole call hung past {:?}",
+            single_endpoint_budget()
+        );
+        let err = single
+            .expect("outer timeout")
+            .expect_err("blackhole must not succeed");
+        assert!(
+            matches!(err, ChainError::Unavailable(_)),
+            "timeout must classify as Unavailable for failover, got {err}"
+        );
+        assert!(
+            single_elapsed < single_endpoint_budget(),
+            "elapsed {single_elapsed:?} exceeds budget"
+        );
+
+        assert!(
+            failover.is_ok(),
             "failover hung past {:?}",
             failover_budget()
         );
-        let err = outcome
+        let err = failover
             .expect("outer timeout")
             .expect_err("no working validator in the list");
         assert!(
@@ -1880,16 +1891,14 @@ mod tests {
         // Must have left the blackhole: elapsed is under one connect budget
         // times a small factor, not an unbounded hang.
         assert!(
-            started.elapsed() < failover_budget(),
-            "elapsed {:?} exceeds failover budget",
-            started.elapsed()
+            failover_elapsed < failover_budget(),
+            "elapsed {failover_elapsed:?} exceeds failover budget"
         );
         // And it must have waited long enough that the connect timeout fired
         // (not instant success / skip). A refused-only pair would be near 0.
         assert!(
-            started.elapsed() >= RPC_CONNECT_TIMEOUT,
-            "expected at least one connect timeout ({RPC_CONNECT_TIMEOUT:?}), got {:?}",
-            started.elapsed()
+            failover_elapsed >= RPC_CONNECT_TIMEOUT,
+            "expected at least one connect timeout ({RPC_CONNECT_TIMEOUT:?}), got {failover_elapsed:?}"
         );
     }
 
@@ -1898,25 +1907,26 @@ mod tests {
     /// dispatch, and reporting it as success would mark a losing proof as won.
     #[test]
     fn inclusion_without_a_win_is_not_success() {
-        assert_eq!(
-            classify_state_outcome(true, false),
-            StateOutcome::IncludedButNotWon
-        );
-        assert_eq!(classify_state_outcome(true, true), StateOutcome::Won);
-        assert_eq!(
-            classify_state_outcome(false, false),
-            StateOutcome::NotIncluded
-        );
-    }
-
-    /// A win recorded while our extrinsic never made the block belongs to
-    /// another miner and must not be claimed.
-    #[test]
-    fn a_win_without_our_extrinsic_is_not_ours() {
-        assert_eq!(
-            classify_state_outcome(false, true),
-            StateOutcome::NotIncluded
-        );
+        for (label, included, won, expected) in [
+            (
+                "included, not won",
+                true,
+                false,
+                StateOutcome::IncludedButNotWon,
+            ),
+            ("included and won", true, true, StateOutcome::Won),
+            ("neither", false, false, StateOutcome::NotIncluded),
+            // A win recorded while our extrinsic never made the block belongs
+            // to another miner and must not be claimed.
+            (
+                "won without our extrinsic",
+                false,
+                true,
+                StateOutcome::NotIncluded,
+            ),
+        ] {
+            assert_eq!(classify_state_outcome(included, won), expected, "{label}");
+        }
     }
 
     /// A validator scripted for the snapshot path: a fixed head at block 16,
@@ -2567,8 +2577,11 @@ mod tests {
             assert_eq!(validator.solver_reads.load(Ordering::Relaxed), 1);
         }
 
+        /// A confirmation that reads the wrong type is rejected and caches
+        /// nothing. A later confirmation that reads the right type replaces
+        /// the type cached by the order read in between.
         #[tokio::test]
-        async fn registration_confirmation_refreshes_the_cached_type() {
+        async fn registration_confirmation_checks_and_refreshes_the_cached_type() {
             let account = alice_account();
             let (validator, client) = client_for(
                 account,
@@ -2576,95 +2589,63 @@ mod tests {
                 vec![type_bid(1)],
                 MinerKind::Metal,
             );
+            let head = hex_encode(&HEAD);
+            let confirmation = Confirmation::SolverRegistered { account };
+            assert!(!client
+                .confirmation_present(&head, &confirmation)
+                .await
+                .expect("CPU confirmation"));
             assert_order_count(&client, account, 0).await;
+            assert_eq!(validator.solver_reads.load(Ordering::Relaxed), 2);
+
             *validator.registration.lock().expect("registration") =
                 registration(account, SolverType::Gpu);
             assert!(client
-                .confirmation_present(
-                    &hex_encode(&HEAD),
-                    &Confirmation::SolverRegistered { account }
-                )
+                .confirmation_present(&head, &confirmation)
                 .await
                 .expect("GPU confirmation"));
             assert_order_count(&client, account, 1).await;
-            assert_eq!(validator.solver_reads.load(Ordering::Relaxed), 2);
+            assert_eq!(validator.solver_reads.load(Ordering::Relaxed), 3);
         }
 
+        /// A missing, malformed, or unreachable registration is never cached,
+        /// so the next order read retries it.
         #[tokio::test]
-        async fn registration_confirmation_rejects_the_wrong_type() {
+        async fn a_failed_registration_read_is_retried() {
             let account = alice_account();
-            let (validator, client) = client_for(
-                account,
-                Some(SolverType::Cpu),
-                vec![type_bid(1)],
-                MinerKind::Metal,
-            );
-            assert!(!client
-                .confirmation_present(
-                    &hex_encode(&HEAD),
-                    &Confirmation::SolverRegistered { account }
-                )
-                .await
-                .expect("confirmation"));
-            assert_order_count(&client, account, 0).await;
-            assert_eq!(validator.solver_reads.load(Ordering::Relaxed), 2);
-        }
-
-        #[tokio::test]
-        async fn missing_registration_is_not_cached_as_a_permanent_absence() {
-            let account = alice_account();
-            let (validator, client) = client_for(account, None, vec![type_bid(0)], MinerKind::Cpu);
-            assert_order_count(&client, account, 0).await;
-            *validator.registration.lock().expect("registration") =
-                registration(account, SolverType::Cpu);
-            assert_order_count(&client, account, 1).await;
-            assert_eq!(validator.solver_reads.load(Ordering::Relaxed), 2);
-        }
-
-        #[tokio::test]
-        async fn malformed_registration_is_an_error_and_can_be_retried() {
-            let account = alice_account();
-            let (validator, client) = client_for(
-                account,
-                Some(SolverType::Cpu),
-                vec![type_bid(0)],
-                MinerKind::Cpu,
-            );
-            *validator.registration.lock().expect("registration") = Value::String("0xff".into());
-            let error = client
-                .fetch_mempool_orders(account)
-                .await
-                .expect_err("truncated registration");
-            assert_decode_error(&error);
-            *validator.registration.lock().expect("registration") =
-                registration(account, SolverType::Cpu);
-            assert_order_count(&client, account, 1).await;
-            assert_eq!(validator.solver_reads.load(Ordering::Relaxed), 2);
-        }
-
-        #[tokio::test]
-        async fn solver_registration_outage_is_retryable() {
-            let account = alice_account();
-            let (validator, client) = client_for(
-                account,
-                Some(SolverType::Cpu),
-                vec![type_bid(0)],
-                MinerKind::Cpu,
-            );
-            *validator.registration.lock().expect("registration") =
-                serde_json::json!({ "rpc_error": "scripted outage" });
-            let error = client
-                .fetch_mempool_orders(account)
-                .await
-                .expect_err("RPC failure");
-            assert!(match error {
-                ChainError::Unavailable(_) => true,
-                ChainError::Decode(_) | ChainError::Submit(_) => false,
-            });
-            *validator.registration.lock().expect("registration") =
-                registration(account, SolverType::Cpu);
-            assert_order_count(&client, account, 1).await;
-            assert_eq!(validator.solver_reads.load(Ordering::Relaxed), 2);
+            for (label, stored, expected_error) in [
+                ("missing", Value::Null, None),
+                (
+                    "malformed",
+                    Value::String("0xff".into()),
+                    Some(ChainError::Decode(String::new())),
+                ),
+                (
+                    "outage",
+                    serde_json::json!({ "rpc_error": "scripted outage" }),
+                    Some(ChainError::Unavailable(String::new())),
+                ),
+            ] {
+                let (validator, client) =
+                    client_for(account, None, vec![type_bid(0)], MinerKind::Cpu);
+                *validator.registration.lock().expect("registration") = stored;
+                let first = client.fetch_mempool_orders(account).await;
+                match expected_error {
+                    None => assert_eq!(first.expect(label).len(), 0, "{label}"),
+                    Some(expected) => {
+                        let error = first.expect_err(label);
+                        assert_eq!(
+                            std::mem::discriminant(&error),
+                            std::mem::discriminant(&expected),
+                            "{label}: {error}"
+                        );
+                    }
+                }
+                *validator.registration.lock().expect("registration") =
+                    registration(account, SolverType::Cpu);
+                assert_order_count(&client, account, 1).await;
+                assert_eq!(validator.solver_reads.load(Ordering::Relaxed), 2, "{label}");
+            }
         }
 
         #[tokio::test]
@@ -2845,15 +2826,6 @@ mod default_topology_tests {
             .is_empty());
     }
 
-    fn assert_topology_read_error(error: &ChainError, expected: &ChainError, message: &str) {
-        assert_eq!(
-            std::mem::discriminant(error),
-            std::mem::discriminant(expected),
-            "unexpected chain error variant: {error}"
-        );
-        assert!(error.to_string().contains(message), "{error}");
-    }
-
     #[tokio::test]
     async fn default_topology_uses_one_head_and_needs_no_signer() {
         let hash = [0x11; 32];
@@ -2881,62 +2853,55 @@ mod default_topology_tests {
         assert_drained(&transport);
     }
 
+    /// Transport and decode errors keep their variant. A stored default with
+    /// no metadata is an error, and a non-string head fails before any
+    /// storage read.
     #[tokio::test]
-    async fn stored_default_without_metadata_is_an_error() {
-        let response = Value::String(hex_encode(&Option::<TopologyMetaScale>::None.encode()));
-        let (client, transport) = client(topology_steps(Some([0x11; 32]), Ok(response)));
-        let error = client
-            .fetch_default_topology()
-            .await
-            .expect_err("expected missing metadata error");
-        assert_topology_read_error(
-            &error,
-            &ChainError::Decode(String::new()),
-            "is not registered",
-        );
-        assert_drained(&transport);
-    }
-
-    #[tokio::test]
-    async fn topology_read_preserves_transport_and_decode_errors() {
-        for (response, expected_variant, expected) in [
+    async fn topology_read_errors_keep_their_variant_and_message() {
+        let unregistered = Value::String(hex_encode(&Option::<TopologyMetaScale>::None.encode()));
+        let stored = Some([0x11; 32]);
+        for (label, steps, expected_variant, expected) in [
             (
-                Err(ChainError::Unavailable("fixture unavailable".into())),
+                "stored default without metadata",
+                topology_steps(stored, Ok(unregistered)),
+                ChainError::Decode(String::new()),
+                "is not registered",
+            ),
+            (
+                "transport error",
+                topology_steps(
+                    stored,
+                    Err(ChainError::Unavailable("fixture unavailable".into())),
+                ),
                 ChainError::Unavailable(String::new()),
                 "chain unavailable: fixture unavailable",
             ),
             (
-                Ok(Value::String("0x03".into())),
+                "undecodable metadata",
+                topology_steps(stored, Ok(Value::String("0x03".into()))),
                 ChainError::Decode(String::new()),
                 "decode error:",
             ),
+            (
+                "non-string head",
+                vec![ExpectedCall {
+                    method: "chain_getBlockHash",
+                    params: serde_json::json!([]),
+                    response: Ok(Value::Null),
+                }],
+                ChainError::Decode(String::new()),
+                "chain_getBlockHash not a string",
+            ),
         ] {
-            let (client, transport) = client(topology_steps(Some([0x11; 32]), response));
-            let error = client
-                .fetch_default_topology()
-                .await
-                .expect_err("expected topology read failure");
-            assert_topology_read_error(&error, &expected_variant, expected);
+            let (client, transport) = client(steps);
+            let error = client.fetch_default_topology().await.expect_err(label);
+            assert_eq!(
+                std::mem::discriminant(&error),
+                std::mem::discriminant(&expected_variant),
+                "{label}: unexpected chain error variant: {error}"
+            );
+            assert!(error.to_string().contains(expected), "{label}: {error}");
             assert_drained(&transport);
         }
-    }
-
-    #[tokio::test]
-    async fn non_string_head_fails_before_storage_reads() {
-        let (client, transport) = client(vec![ExpectedCall {
-            method: "chain_getBlockHash",
-            params: serde_json::json!([]),
-            response: Ok(Value::Null),
-        }]);
-        let error = client
-            .fetch_default_topology()
-            .await
-            .expect_err("expected invalid head error");
-        assert_topology_read_error(
-            &error,
-            &ChainError::Decode(String::new()),
-            "chain_getBlockHash not a string",
-        );
-        assert_drained(&transport);
     }
 }

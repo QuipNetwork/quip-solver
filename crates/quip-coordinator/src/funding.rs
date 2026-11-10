@@ -456,6 +456,7 @@ mod tests {
         .unwrap();
         assert_eq!(got, 500);
         assert_eq!(faucet.calls(), 0, "must not hit the faucet when funded");
+        assert_eq!(chain.calls(), 1, "the balance is read once when funded");
     }
 
     #[tokio::test]
@@ -478,64 +479,60 @@ mod tests {
             }
         ));
         assert!(err.to_string().contains("no faucet_url"), "{err}");
+        // Retrying cannot conjure funds, so the hopeless case must fail at once.
+        assert_eq!(chain.calls(), 1, "must not retry a hopeless case");
     }
 
+    /// Cases where the faucet is asked and the balance eventually reaches the
+    /// target: (label, balances, faucet outcomes, expected faucet calls).
     #[tokio::test]
-    async fn funds_on_the_first_attempt() {
-        // Short, then funded after the request settles.
-        let chain = ScriptedChain::new(vec![5, 1000]);
-        let faucet = ScriptedFaucet::new(vec![Ok(())]);
-        let got = ensure_funded(
-            &chain,
-            Some(&faucet),
-            [0u8; 32],
-            &params(Some("u")),
-            no_sleep,
-        )
-        .await
-        .unwrap();
-        assert_eq!(got, 1000);
-        assert_eq!(faucet.calls(), 1);
-    }
-
-    #[tokio::test]
-    async fn retries_through_transient_failures() {
-        // Two transient failures, then the mint lands.
-        let chain = ScriptedChain::new(vec![5, 5, 5, 1000]);
-        let faucet = ScriptedFaucet::new(vec![
-            Err(FaucetError::Transient("429".into())),
-            Err(FaucetError::Transient("502".into())),
-            Ok(()),
-        ]);
-        let got = ensure_funded(
-            &chain,
-            Some(&faucet),
-            [0u8; 32],
-            &params(Some("u")),
-            no_sleep,
-        )
-        .await
-        .unwrap();
-        assert_eq!(got, 1000);
-        assert_eq!(faucet.calls(), 3);
-    }
-
-    /// 403 means the faucet thinks the account is capped. That is not fatal —
-    /// only the on-chain balance decides.
-    #[tokio::test]
-    async fn already_funded_response_still_defers_to_the_balance() {
-        let chain = ScriptedChain::new(vec![5, 5, 1000]);
-        let faucet = ScriptedFaucet::new(vec![Err(FaucetError::AlreadyFunded("403".into()))]);
-        let got = ensure_funded(
-            &chain,
-            Some(&faucet),
-            [0u8; 32],
-            &params(Some("u")),
-            no_sleep,
-        )
-        .await
-        .unwrap();
-        assert_eq!(got, 1000);
+    async fn funds_after_faucet_requests() {
+        type Case = (
+            &'static str,
+            Vec<u128>,
+            Vec<Result<(), FaucetError>>,
+            Option<usize>,
+        );
+        let cases: Vec<Case> = vec![
+            // Short, then funded after the request settles.
+            ("first attempt", vec![5, 1000], vec![Ok(())], Some(1)),
+            // Two transient failures, then the mint lands.
+            (
+                "transient failures",
+                vec![5, 5, 5, 1000],
+                vec![
+                    Err(FaucetError::Transient("429".into())),
+                    Err(FaucetError::Transient("502".into())),
+                    Ok(()),
+                ],
+                Some(3),
+            ),
+            // 403 means the faucet thinks the account is capped. That is not
+            // fatal: only the on-chain balance decides.
+            (
+                "already-funded response",
+                vec![5, 5, 1000],
+                vec![Err(FaucetError::AlreadyFunded("403".into()))],
+                None,
+            ),
+        ];
+        for (label, balances, outcomes, expected_calls) in cases {
+            let chain = ScriptedChain::new(balances);
+            let faucet = ScriptedFaucet::new(outcomes);
+            let got = ensure_funded(
+                &chain,
+                Some(&faucet),
+                [0u8; 32],
+                &params(Some("u")),
+                no_sleep,
+            )
+            .await
+            .unwrap();
+            assert_eq!(got, 1000, "{label}");
+            if let Some(calls) = expected_calls {
+                assert_eq!(faucet.calls(), calls, "{label}");
+            }
+        }
     }
 
     #[tokio::test]
@@ -641,23 +638,6 @@ mod tests {
         assert_eq!(faucet.calls(), 0);
     }
 
-    /// Underfunded with no faucet must fail immediately, not burn the budget:
-    /// retrying cannot conjure funds.
-    #[tokio::test]
-    async fn underfunded_without_faucet_does_not_retry() {
-        let chain = ScriptedChain::new(vec![5]);
-        let _ = ensure_funded(
-            &chain,
-            None::<&ScriptedFaucet>,
-            [0u8; 32],
-            &params(None),
-            no_sleep,
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(chain.calls(), 1, "must not retry a hopeless case");
-    }
-
     #[test]
     fn status_classification_matches_the_v0_2_contract() {
         assert!(classify_status(200, "").is_ok());
@@ -711,20 +691,5 @@ mod tests {
             Duration::from_secs(30)
         );
         assert_eq!(next_backoff(BACKOFF_MAX), BACKOFF_MAX);
-    }
-
-    #[tokio::test]
-    async fn balance_is_read_once_when_already_funded() {
-        let chain = ScriptedChain::new(vec![1000]);
-        let _ = ensure_funded(
-            &chain,
-            None::<&ScriptedFaucet>,
-            [0u8; 32],
-            &params(None),
-            no_sleep,
-        )
-        .await
-        .unwrap();
-        assert_eq!(chain.calls(), 1);
     }
 }

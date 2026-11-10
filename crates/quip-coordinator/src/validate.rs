@@ -522,52 +522,67 @@ mod tests {
     use super::*;
     use quip_protocol::wire::encode_spins_packed;
 
+    fn edge_graph() -> ising_problem::Graph {
+        ising_problem::Graph::Edges(quip_proto::v1::EdgeList {
+            u: vec![0],
+            v: vec![1],
+        })
+    }
+
+    fn problem_with(
+        graph: Option<ising_problem::Graph>,
+        h: &[i32],
+        j: &[i32],
+        num_reads: u32,
+    ) -> IsingProblem {
+        let mut problem = crate::producer::problem::milli_problem(graph, h, j);
+        problem.num_reads = num_reads;
+        problem
+    }
+
+    fn gates(min_energy_milli: i64, min_diversity_milli: u32, min_solutions: u32) -> QualityGates {
+        QualityGates {
+            min_energy_milli,
+            min_diversity_milli,
+            min_solutions,
+        }
+    }
+
+    fn packed(spins: &[i8]) -> Solution {
+        Solution {
+            spins: encode_spins_packed(spins),
+            energy_milli: 0,
+        }
+    }
+
     #[test]
     fn packed_row_with_padding_bit_is_dropped() {
         // Three nodes, one byte. Bit 3 is padding and is set.
-        let problem = crate::producer::problem::milli_problem(
-            Some(ising_problem::Graph::Edges(quip_proto::v1::EdgeList {
-                u: vec![0],
-                v: vec![1],
-            })),
-            &[0, 0, 0],
-            &[1000],
-        );
+        let problem = problem_with(Some(edge_graph()), &[0, 0, 0], &[1000], 0);
         let bad = Solution {
             spins: vec![0b0000_1111],
             energy_milli: 0,
         };
-        let gates = QualityGates {
-            min_energy_milli: i64::MAX,
-            min_diversity_milli: 0,
-            min_solutions: 1,
-        };
-        let v = validate_result(&problem, &[bad], &gates, &ResolvedTopo::default());
+        let v = validate_result(
+            &problem,
+            &[bad],
+            &gates(i64::MAX, 0, 1),
+            &ResolvedTopo::default(),
+        );
         assert_eq!(v.n_valid, 0);
         assert!(!v.accepted);
     }
 
     #[test]
     fn packed_rows_score_like_the_consensus_energy() {
-        let problem = crate::producer::problem::milli_problem(
-            Some(ising_problem::Graph::Edges(quip_proto::v1::EdgeList {
-                u: vec![0],
-                v: vec![1],
-            })),
-            &[1000, -1000],
-            &[1500],
-        );
+        let problem = problem_with(Some(edge_graph()), &[1000, -1000], &[1500], 0);
         let spins = [1i8, -1];
-        let sol = Solution {
-            spins: encode_spins_packed(&spins),
-            energy_milli: 0,
-        };
-        let gates = QualityGates {
-            min_energy_milli: i64::MAX,
-            min_diversity_milli: 0,
-            min_solutions: 1,
-        };
-        let v = validate_result(&problem, &[sol], &gates, &ResolvedTopo::default());
+        let v = validate_result(
+            &problem,
+            &[packed(&spins)],
+            &gates(i64::MAX, 0, 1),
+            &ResolvedTopo::default(),
+        );
         let expected =
             quip_protocol::scoring::energy_from_milli(&spins, &[1000, -1000], &[1500], &[(0, 1)]);
         assert_eq!(v.best_energy_milli, expected);
@@ -578,33 +593,53 @@ mod tests {
     }
 
     #[test]
-    fn golden_energy_and_strict_tiebreak() {
-        // E = 1*1 + (-0.5)*(-1) + 2.0*1*(-1) = 1 + 0.5 - 2 = -0.5 → -500 milli
-        let problem = {
-            let mut problem = crate::producer::problem::milli_problem(
-                Some(ising_problem::Graph::Edges(quip_proto::v1::EdgeList {
-                    u: vec![0],
-                    v: vec![1],
-                })),
-                &[1000, -500],
-                &[2000],
-            );
-            problem.num_reads = 1;
-            problem
-        };
-        let sol = Solution {
-            spins: encode_spins_packed(&[1, -1]),
-            energy_milli: -500,
-        };
-        let gates = QualityGates {
-            min_energy_milli: 0, // accept anything < 0
-            min_diversity_milli: 0,
-            min_solutions: 1,
-        };
-        let v = validate_result(&problem, &[sol], &gates, &ResolvedTopo::default());
-        assert_eq!(v.best_energy_milli, -500);
-        assert!(v.accepted);
-        assert_eq!(v.n_valid, 1);
+    fn golden_energy_gate_and_topology_node_ids() {
+        type Case<'a> = (&'a str, IsingProblem, &'a [i8], &'a ResolvedTopo, u32, bool);
+        // E([1,-1]) = 1*1 + (-0.5)*(-1) + 2.0*1*(-1) = -0.5 -> -500 milli.
+        // The topology case maps nodes [10, 20] with edge (10, 20): edges must
+        // use node ids, not spin indices.
+        let topo = ResolvedTopo::new(&[10, 20], &[(10, 20)]);
+        let no_topo = ResolvedTopo::default();
+        let cases: [Case<'_>; 3] = [
+            (
+                "golden energy accepted",
+                problem_with(Some(edge_graph()), &[1000, -500], &[2000], 1),
+                &[1, -1],
+                &no_topo,
+                1,
+                true,
+            ),
+            (
+                // 1000 is not < 0
+                "energy not below ceiling",
+                problem_with(None, &[1000], &[], 1),
+                &[1],
+                &no_topo,
+                0,
+                false,
+            ),
+            (
+                "topology node ids",
+                problem_with(
+                    Some(ising_problem::Graph::TopologyHash(vec![0u8; 32])),
+                    &[1000, -500],
+                    &[2000],
+                    1,
+                ),
+                &[1, -1],
+                &topo,
+                1,
+                true,
+            ),
+        ];
+        for (label, problem, spins, topo, n_valid, accepted) in cases {
+            let v = validate_result(&problem, &[packed(spins)], &gates(0, 0, 1), topo);
+            assert_eq!(v.n_valid, n_valid, "{label}: n_valid");
+            assert_eq!(v.accepted, accepted, "{label}: accepted");
+            if accepted {
+                assert_eq!(v.best_energy_milli, -500, "{label}: best energy");
+            }
+        }
 
         assert!(beats_current(-501, Some(-500)));
         assert!(!beats_current(-500, Some(-500))); // strict <
@@ -619,28 +654,13 @@ mod tests {
         // raw best (-500) and the candidate rows survive so the decay-ratchet
         // stash can retain what will win once the gate eases. F1: the submit
         // subset is capped at MAX_PROOF_SOLUTIONS.
-        let problem = {
-            let mut problem = crate::producer::problem::milli_problem(
-                Some(ising_problem::Graph::Edges(quip_proto::v1::EdgeList {
-                    u: vec![0],
-                    v: vec![1],
-                })),
-                &[1000, -500],
-                &[2000],
-            );
-            problem.num_reads = 1;
-            problem
-        };
-        let sol = Solution {
-            spins: encode_spins_packed(&[1, -1]),
-            energy_milli: -500,
-        };
-        let gates = QualityGates {
-            min_energy_milli: -1000,
-            min_diversity_milli: 0,
-            min_solutions: 1,
-        };
-        let v = validate_result(&problem, &[sol], &gates, &ResolvedTopo::default());
+        let problem = problem_with(Some(edge_graph()), &[1000, -500], &[2000], 1);
+        let v = validate_result(
+            &problem,
+            &[packed(&[1, -1])],
+            &gates(-1000, 0, 1),
+            &ResolvedTopo::default(),
+        );
         assert!(!v.accepted);
         assert_eq!(v.n_valid, 0);
         assert_eq!(v.best_energy_milli, i64::MAX); // nothing cleared the gate
@@ -714,137 +734,48 @@ mod tests {
     }
 
     #[test]
-    fn rejects_when_below_min_solutions() {
-        let problem = {
-            let mut problem = crate::producer::problem::milli_problem(None, &[1000], &[]);
-            problem.num_reads = 1;
-            problem
-        };
-        let sol = Solution {
-            spins: encode_spins_packed(&[1]),
-            energy_milli: 1000,
-        };
-        let gates = QualityGates {
-            min_energy_milli: 0, // 1000 is not < 0
-            min_diversity_milli: 0,
-            min_solutions: 1,
-        };
-        let v = validate_result(&problem, &[sol], &gates, &ResolvedTopo::default());
-        assert!(!v.accepted);
-        assert_eq!(v.n_valid, 0);
-    }
-
-    #[test]
-    fn topology_edges_use_node_ids_not_spin_indices() {
-        // nodes [10, 20]; edge (10, 20); h/j aligned to node positions.
-        // spins [1, -1] → E = 1000*1 + (-500)*(-1) + 2000*1*(-1) = -500
-        let problem = {
-            let mut problem = crate::producer::problem::milli_problem(
-                Some(ising_problem::Graph::TopologyHash(vec![0u8; 32])),
-                &[1000, -500],
-                &[2000],
-            );
-            problem.num_reads = 1;
-            problem
-        };
-        let sol = Solution {
-            spins: encode_spins_packed(&[1, -1]),
-            energy_milli: -500,
-        };
-        let gates = QualityGates {
-            min_energy_milli: 0,
-            min_diversity_milli: 0,
-            min_solutions: 1,
-        };
-        let topo = ResolvedTopo::new(&[10, 20], &[(10, 20)]);
-        let v = validate_result(&problem, &[sol], &gates, &topo);
-        assert_eq!(v.best_energy_milli, -500);
-        assert!(v.accepted);
-    }
-
-    #[test]
     fn diversity_uses_quantum_validation_rounding() {
-        // Two fully opposite solutions on 3 spins: hamming=3, symmetric=0
-        // under flip → diversity 0. Two solutions that differ in 1 of 2:
-        // dist=1, pairs=1, n=2 → round(1000*1/(1*2)) = 500.
-        let problem = {
-            let mut problem = crate::producer::problem::milli_problem(None, &[0, 0], &[]);
-            problem.num_reads = 2;
-            problem
-        };
-        let sols = [
-            Solution {
-                spins: encode_spins_packed(&[1, 1]),
-                energy_milli: 0,
-            },
-            Solution {
-                spins: encode_spins_packed(&[1, -1]),
-                energy_milli: 0,
-            },
-        ];
-        let gates = QualityGates {
-            min_energy_milli: 1, // 0 < 1 → both valid
-            min_diversity_milli: 0,
-            min_solutions: 2,
-        };
-        let v = validate_result(&problem, &sols, &gates, &ResolvedTopo::default());
+        // Two solutions that differ in 1 of 2: dist=1, pairs=1, n=2 ->
+        // round(1000*1/(1*2)) = 500.
+        let problem = problem_with(None, &[0, 0], &[], 2);
+        let sols = [packed(&[1, 1]), packed(&[1, -1])];
+        let v = validate_result(
+            &problem,
+            &sols,
+            &gates(1, 0, 2), // 0 < 1 -> both valid
+            &ResolvedTopo::default(),
+        );
         assert_eq!(v.n_valid, 2);
         assert_eq!(v.diversity_milli, 500);
         assert!(v.accepted);
     }
 
     #[test]
-    fn dedup_collapses_exact_duplicate_solutions() {
-        let problem = {
-            let mut problem = crate::producer::problem::milli_problem(None, &[0, 0], &[]);
-            problem.num_reads = 2;
-            problem
-        };
-        let sols = [
-            Solution {
-                spins: encode_spins_packed(&[1, -1]),
-                energy_milli: 0,
-            },
-            Solution {
-                spins: encode_spins_packed(&[1, -1]),
-                energy_milli: 0,
-            },
+    fn dedup_collapses_duplicates_but_not_distinct_solutions() {
+        // Z2 case: with h = 0 a solution and its global flip are energy-equal
+        // and are the same physical state, so they must collapse to one.
+        type Case = (&'static str, Vec<i32>, [Vec<i8>; 2], u32);
+        let cases: [Case; 3] = [
+            ("exact duplicate", vec![0, 0], [vec![1, -1], vec![1, -1]], 1),
+            (
+                "z2 flip twin at h zero",
+                vec![0, 0, 0],
+                [vec![1, -1, 1], vec![-1, 1, -1]],
+                1,
+            ),
+            (
+                "genuinely distinct",
+                vec![0, 0],
+                [vec![1, 1], vec![1, -1]],
+                2,
+            ),
         ];
-        let gates = QualityGates {
-            min_energy_milli: 1, // 0 < 1 → both energy-valid
-            min_diversity_milli: 0,
-            min_solutions: 1,
-        };
-        let v = validate_result(&problem, &sols, &gates, &ResolvedTopo::default());
-        assert_eq!(v.n_valid, 1);
-    }
-
-    #[test]
-    fn dedup_collapses_z2_flip_twin_at_h_zero() {
-        // h = 0: a solution and its global flip are energy-equal and are the
-        // same physical state, so they must collapse to one.
-        let problem = {
-            let mut problem = crate::producer::problem::milli_problem(None, &[0, 0, 0], &[]);
-            problem.num_reads = 2;
-            problem
-        };
-        let sols = [
-            Solution {
-                spins: encode_spins_packed(&[1, -1, 1]),
-                energy_milli: 0,
-            },
-            Solution {
-                spins: encode_spins_packed(&[-1, 1, -1]),
-                energy_milli: 0,
-            },
-        ];
-        let gates = QualityGates {
-            min_energy_milli: 1,
-            min_diversity_milli: 0,
-            min_solutions: 1,
-        };
-        let v = validate_result(&problem, &sols, &gates, &ResolvedTopo::default());
-        assert_eq!(v.n_valid, 1);
+        for (label, h, rows, expected) in cases {
+            let problem = problem_with(None, &h, &[], 2);
+            let sols = [packed(&rows[0]), packed(&rows[1])];
+            let v = validate_result(&problem, &sols, &gates(1, 0, 1), &ResolvedTopo::default());
+            assert_eq!(v.n_valid, expected, "{label}");
+        }
     }
 
     fn wire_rows(rows: &[SpinRow]) -> Vec<Solution> {
@@ -1027,43 +958,26 @@ mod tests {
     }
 
     #[test]
-    fn stash_keeps_the_best_row_and_drops_only_its_near_twins() {
+    fn stash_row_selection_depends_on_diversity_gate() {
         let problem = level_fixture_problem();
         let rows = clustered_optimum_rows();
-        let v = validate_result(
-            &problem,
-            &wire_rows(&rows),
-            &fixture_gates(),
-            &ResolvedTopo::default(),
-        );
+        let kept_under = |gates: &QualityGates| -> (i64, Vec<i64>) {
+            let v = validate_result(&problem, &wire_rows(&rows), gates, &ResolvedTopo::default());
+            let kept = v.stash_solutions.iter().map(|s| s.energy_milli).collect();
+            (v.raw_best_energy_milli, kept)
+        };
 
-        assert_eq!(v.raw_best_energy_milli, -15_000);
+        let (raw_best, kept) = kept_under(&fixture_gates());
+        assert_eq!(raw_best, -15_000);
         assert_eq!(
-            v.stash_solutions.first().map(|s| s.energy_milli),
+            kept.first().copied(),
             Some(-15_000),
             "the decay projection rides on the best row, which must always be stashed"
         );
         // The three near-twins of the best row are the only rows dropped.
-        let kept: Vec<i64> = v.stash_solutions.iter().map(|s| s.energy_milli).collect();
         assert_eq!(kept, vec![-15_000, 5_000, 7_000, 9_000, 11_000, 13_000]);
-    }
 
-    #[test]
-    fn stash_falls_back_to_energy_order_when_no_diversity_is_demanded() {
-        let problem = level_fixture_problem();
-        let rows = clustered_optimum_rows();
-        let gates = QualityGates {
-            min_energy_milli: -100_000,
-            min_diversity_milli: 0,
-            min_solutions: FIXTURE_MIN_SOLUTIONS,
-        };
-        let v = validate_result(
-            &problem,
-            &wire_rows(&rows),
-            &gates,
-            &ResolvedTopo::default(),
-        );
-        let kept: Vec<i64> = v.stash_solutions.iter().map(|s| s.energy_milli).collect();
+        let (_, kept) = kept_under(&gates(-100_000, 0, FIXTURE_MIN_SOLUTIONS));
         assert_eq!(
             kept,
             vec![-15_000, -13_000, -11_000, -9_000, 5_000, 7_000, 9_000, 11_000, 13_000],
@@ -1072,7 +986,7 @@ mod tests {
     }
 
     #[test]
-    fn proof_gate_check_tracks_the_live_ceiling() {
+    fn proof_gate_check_tracks_the_live_ceiling_and_rejects_diversity_collapse() {
         let problem = level_fixture_problem();
         let rows = clustered_optimum_rows();
         let stashed = validate_result(
@@ -1082,91 +996,37 @@ mod tests {
             &ResolvedTopo::default(),
         )
         .stash_solutions;
+        let live = |ceiling: i64| gates(ceiling, FIXTURE_MIN_DIVERSITY, FIXTURE_MIN_SOLUTIONS);
 
         // Too early: the ceiling admits only the best row, short of the
         // solution count the chain demands.
-        let early = check_proof_gates(
-            &stashed,
-            &QualityGates {
-                min_energy_milli: 0,
-                min_diversity_milli: FIXTURE_MIN_DIVERSITY,
-                min_solutions: FIXTURE_MIN_SOLUTIONS,
-            },
-        );
+        let early = check_proof_gates(&stashed, &live(0));
         assert_eq!(early.n_valid, 1);
         assert!(!early.accepted);
 
         // Eased far enough to admit the whole stash: every gate clears.
-        let ready = check_proof_gates(
-            &stashed,
-            &QualityGates {
-                min_energy_milli: 20_000,
-                min_diversity_milli: FIXTURE_MIN_DIVERSITY,
-                min_solutions: FIXTURE_MIN_SOLUTIONS,
-            },
-        );
+        let ready = check_proof_gates(&stashed, &live(20_000));
         assert_eq!(ready.n_valid, 6);
         assert_eq!(ready.best_energy_milli, -15_000);
         assert!(ready.accepted);
 
         // The check must agree with the chain's own procedure at every ceiling.
         for ceiling in ceiling_sweep(&stashed) {
-            let gates = QualityGates {
-                min_energy_milli: ceiling,
-                min_diversity_milli: FIXTURE_MIN_DIVERSITY,
-                min_solutions: FIXTURE_MIN_SOLUTIONS,
-            };
-            let (n_valid, diversity) = pallet_gates(&stashed, ceiling, gates.min_solutions);
-            let got = check_proof_gates(&stashed, &gates);
+            let (n_valid, diversity) = pallet_gates(&stashed, ceiling, FIXTURE_MIN_SOLUTIONS);
+            let got = check_proof_gates(&stashed, &live(ceiling));
             assert_eq!(got.n_valid, n_valid, "ceiling {ceiling}");
             assert_eq!(got.diversity_milli, diversity, "ceiling {ceiling}");
         }
-    }
 
-    #[test]
-    fn proof_gate_check_rejects_a_diversity_collapse() {
         // The rows a pure energy sort would have stashed, re-checked at the
         // ceiling that admits exactly the clustered prefix: the count gate
-        // clears and the diversity gate does not — the chain's
+        // clears and the diversity gate does not -- the chain's
         // `InsufficientDiversity` rejection.
         let mut energy_sorted = clustered_optimum_rows();
         energy_sorted.sort_by_key(|s| s.energy_milli);
-        let got = check_proof_gates(
-            &energy_sorted,
-            &QualityGates {
-                min_energy_milli: -8_000,
-                min_diversity_milli: FIXTURE_MIN_DIVERSITY,
-                min_solutions: FIXTURE_MIN_SOLUTIONS,
-            },
-        );
+        let got = check_proof_gates(&energy_sorted, &live(-8_000));
         assert_eq!(got.n_valid, 4);
         assert!(got.diversity_milli < FIXTURE_MIN_DIVERSITY);
         assert!(!got.accepted);
-    }
-
-    #[test]
-    fn dedup_does_not_collapse_genuinely_distinct_solutions() {
-        let problem = {
-            let mut problem = crate::producer::problem::milli_problem(None, &[0, 0], &[]);
-            problem.num_reads = 2;
-            problem
-        };
-        let sols = [
-            Solution {
-                spins: encode_spins_packed(&[1, 1]),
-                energy_milli: 0,
-            },
-            Solution {
-                spins: encode_spins_packed(&[1, -1]),
-                energy_milli: 0,
-            },
-        ];
-        let gates = QualityGates {
-            min_energy_milli: 1,
-            min_diversity_milli: 0,
-            min_solutions: 2,
-        };
-        let v = validate_result(&problem, &sols, &gates, &ResolvedTopo::default());
-        assert_eq!(v.n_valid, 2);
     }
 }
