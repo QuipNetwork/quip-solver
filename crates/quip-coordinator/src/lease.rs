@@ -428,12 +428,8 @@ mod tests {
         assert_eq!((spec.salt_start, spec.salt_count), (11, 5));
         assert_eq!(spec.miner_account, [1u8; 32]);
         assert_eq!(spec.last_proof_block_hash, [7u8; 32]);
-    }
 
-    #[test]
-    fn lease_salts_equal_the_counter_salts() {
-        let job = build_lease_job(&snap(), [1u8; 32], 11, 5, 3);
-        let spec = LeaseSpec::from_proto(job.generator.as_ref().unwrap()).unwrap();
+        // Lease salts equal the counter salts: index 2 of a range from 11 is 13.
         let mut expected = [0u8; 32];
         expected[..8].copy_from_slice(&13u64.to_le_bytes());
         assert_eq!(spec.salt(2), Some(expected));
@@ -446,12 +442,6 @@ mod tests {
         assert_ne!(id.len(), 32);
         assert_ne!(lease_job_id(11), lease_job_id(12));
         assert!(is_lease(&build_lease_job(&snap(), [0; 32], 11, 1, 1)));
-    }
-
-    #[test]
-    fn salt_count_starts_from_stream_width_without_a_rate() {
-        assert_eq!(lease_salt_count(0.0, 81), 364_500);
-        assert_eq!(lease_salt_count(0.0, 0), 4_500);
     }
 
     #[test]
@@ -475,13 +465,21 @@ mod tests {
 
     #[test]
     fn salt_count_covers_the_target_duration_within_bounds() {
-        assert_eq!(lease_salt_count(10.0, 1), 600);
-        assert_eq!(lease_salt_count(0.1, 8), 8, "never below one pipeline fill");
-        assert_eq!(lease_salt_count(1e12, 1), LEASE_MAX_SALTS);
-        assert_eq!(
-            lease_salt_count(f64::NAN, 2),
-            9_000,
-            "a bad rate falls back to the initial size"
-        );
+        let cases = [
+            ("no rate: sized from stream width", 0.0, 81, 364_500),
+            ("no rate, zero stream width", 0.0, 0, 4_500),
+            ("rate covers the target duration", 10.0, 1, 600),
+            ("never below one pipeline fill", 0.1, 8, 8),
+            ("capped at the maximum", 1e12, 1, LEASE_MAX_SALTS),
+            (
+                "a bad rate falls back to the initial size",
+                f64::NAN,
+                2,
+                9_000,
+            ),
+        ];
+        for (label, rate, stream_width, expected) in cases {
+            assert_eq!(lease_salt_count(rate, stream_width), expected, "{label}");
+        }
     }
 }

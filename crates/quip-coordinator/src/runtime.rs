@@ -1504,57 +1504,42 @@ mod tests {
         assert_eq!(gates.min_solutions, 2);
     }
 
+    /// depth = ceil(ema * headroom), floor when that is smaller.
     #[test]
-    fn adaptive_depth_holds_floor_when_idle() {
-        // No consumption -> stay at the floor, never below it.
-        assert_eq!(adaptive_depth(0.0, 8), 8);
-        assert_eq!(adaptive_depth(0.0, 0), 0);
-    }
-
-    #[test]
-    fn adaptive_depth_grows_with_consumption_no_ceiling() {
-        // depth = ceil(ema * headroom), floor when that is smaller.
+    fn adaptive_depth_is_the_ceiled_headroom_product_above_the_floor() {
         #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
             reason = "test fixture: exact integer headroom product"
         )]
-        let expected = (10.0 * WINDOW_HEADROOM) as usize;
-        assert_eq!(adaptive_depth(10.0, 8), expected);
-        // A many-core miner grows far past the floor — no upper cap.
-        assert_eq!(adaptive_depth(250.0, 8), 500);
+        let headroom_10 = (10.0 * WINDOW_HEADROOM) as usize;
+        let cases = [
+            ("idle holds the floor", 0.0, 8, 8),
+            ("idle with a zero floor", 0.0, 0, 0),
+            ("grows with consumption", 10.0, 8, headroom_10),
+            ("a many-core miner has no upper cap", 250.0, 8, 500),
+            ("2.5 * 2.0 = 5.0 exactly", 2.5, 2, 5),
+            ("0.8 ceils to 1, but floor 4 wins", 0.4, 4, 4),
+        ];
+        for (label, ema, floor, expected) in cases {
+            assert_eq!(adaptive_depth(ema, floor), expected, "{label}");
+        }
     }
 
     #[test]
-    fn adaptive_depth_ceils_fractional_ema_and_respects_floor() {
-        // 2.5 * 2.0 = 5.0 exactly.
-        assert_eq!(adaptive_depth(2.5, 2), 5);
-        // Fractional below the floor rounds up but the floor still wins:
-        // 0.4 * 2.0 = 0.8 -> ceil 1, floor 4 -> 4.
-        assert_eq!(adaptive_depth(0.4, 4), 4);
-    }
-
-    #[test]
-    fn stage_ceiling_never_binds_on_dev_topology() {
+    fn stage_ceiling_binds_only_on_large_topologies_and_never_below_the_floor() {
         // 2 nodes / 1 edge -> ~12 bytes/job -> the byte budget allows millions
         // of staged jobs, so the ceiling never clamps a real drain-driven depth.
         let cap = stage_ceiling(2, 1, 8);
         assert!(cap > 1_000_000, "dev topology must not be capped: {cap}");
         assert!(cap >= MAX_STAGE_BYTES_PER_MINER / 12);
-    }
 
-    #[test]
-    fn stage_ceiling_caps_large_topology_below_uncapped_depth() {
         // Zephyr-scale: ~4577 nodes / 41515 edges -> ~184 KB/job. A fast miner
         // (ema 250 -> uncapped depth 500) is clamped to the byte budget.
         let cap = stage_ceiling(4577, 41515, 8);
-        let uncapped = adaptive_depth(250.0, 8); // 500
         assert!(cap >= 8, "never below floor: {cap}");
-        assert!(cap < uncapped, "large topology is memory-capped: {cap}");
-    }
+        assert!(cap < 500, "large topology is memory-capped: {cap}");
 
-    #[test]
-    fn stage_ceiling_holds_floor_when_budget_smaller_than_floor() {
         // Pathological topology where even one job exceeds the budget: the floor
         // still wins so the miner never idles for lack of a staged job.
         assert_eq!(stage_ceiling(usize::MAX / 8, 0, 8), 8);

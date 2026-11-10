@@ -134,46 +134,24 @@ mod tests {
             .collect()
     }
 
+    /// Mining to paused emits `EnteredPaused` with the reason, staying paused
+    /// emits nothing, and returning to mining emits `Resumed`.
     #[test]
-    fn mining_to_paused_emits_entered_paused_with_reason() {
-        let prev = MinerLiveness::default();
-        let (next, events) = evaluate_status(
-            &prev,
-            &stats(&[("state", "paused"), ("reason", "budget")]),
-            5,
-        );
+    fn pause_walk_emits_entered_paused_once_then_resumed() {
+        let paused = stats(&[("state", "paused"), ("reason", "budget")]);
+        let (next, events) = evaluate_status(&MinerLiveness::default(), &paused, 5);
         assert!(next.paused);
         assert_eq!(next.reason.as_deref(), Some("budget"));
         assert!(matches!(
             events.as_slice(),
             [LivenessEvent::EnteredPaused { reason }] if reason.as_deref() == Some("budget")
         ));
-    }
 
-    #[test]
-    fn staying_paused_emits_nothing() {
-        let prev = MinerLiveness {
-            paused: true,
-            reason: Some("budget".into()),
-            generation: None,
-        };
-        let (_next, events) = evaluate_status(
-            &prev,
-            &stats(&[("state", "paused"), ("reason", "budget")]),
-            5,
-        );
-        assert!(events.is_empty());
-    }
+        let (next, events) = evaluate_status(&next, &paused, 5);
+        assert!(events.is_empty(), "staying paused emits nothing");
 
-    #[test]
-    fn paused_to_mining_emits_resumed() {
-        let prev = MinerLiveness {
-            paused: true,
-            reason: Some("budget".into()),
-            generation: Some(5),
-        };
         let (next, events) = evaluate_status(
-            &prev,
+            &next,
             &stats(&[("state", "mining"), ("generation", "5")]),
             5,
         );
@@ -181,14 +159,13 @@ mod tests {
         assert!(events.iter().any(|e| matches!(e, LivenessEvent::Resumed)));
     }
 
+    /// A stale generation emits `StaleRound` once per distinct value, and the
+    /// current generation is never stale.
     #[test]
     fn stale_generation_emits_stale_round_once_per_distinct_value() {
-        let prev = MinerLiveness::default();
-        let (next, events) = evaluate_status(
-            &prev,
-            &stats(&[("state", "mining"), ("generation", "4")]),
-            7,
-        );
+        let is_stale = |e: &LivenessEvent| matches!(e, LivenessEvent::StaleRound { .. });
+        let stale = stats(&[("state", "mining"), ("generation", "4")]);
+        let (next, events) = evaluate_status(&MinerLiveness::default(), &stale, 7);
         assert!(events.iter().any(|e| matches!(
             e,
             LivenessEvent::StaleRound {
@@ -196,27 +173,21 @@ mod tests {
                 current: 7
             }
         )));
-        let (_n2, events2) = evaluate_status(
-            &next,
-            &stats(&[("state", "mining"), ("generation", "4")]),
-            7,
+        let (_n2, events2) = evaluate_status(&next, &stale, 7);
+        assert!(
+            !events2.iter().any(is_stale),
+            "repeat value is not re-emitted"
         );
-        assert!(!events2
-            .iter()
-            .any(|e| matches!(e, LivenessEvent::StaleRound { .. })));
-    }
 
-    #[test]
-    fn current_generation_is_not_stale() {
-        let prev = MinerLiveness::default();
         let (_next, events) = evaluate_status(
-            &prev,
+            &MinerLiveness::default(),
             &stats(&[("state", "mining"), ("generation", "7")]),
             7,
         );
-        assert!(!events
-            .iter()
-            .any(|e| matches!(e, LivenessEvent::StaleRound { .. })));
+        assert!(
+            !events.iter().any(is_stale),
+            "current generation is not stale"
+        );
     }
 
     #[tokio::test]

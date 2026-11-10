@@ -170,33 +170,26 @@ mod tests {
     }
 
     #[test]
-    fn hash_is_order_independent_for_nodes_and_edges() {
-        let h: &[i32] = &[-1000, 0, 1000];
-        let j: &[i32] = &[-1000, 1000];
+    fn hash_is_set_canonical_and_sensitive_to_specs() {
         let spin: &[i32] = &DEFAULT_SPIN_SET;
-        let a = topology_hash_sets(&[2, 0, 1], &[(1, 0), (2, 1)], h, j, spin);
-        let b = topology_hash_sets(&[0, 1, 2], &[(0, 1), (1, 2)], h, j, spin);
-        assert_eq!(a, b);
-    }
 
-    #[test]
-    fn hash_is_order_independent_for_set_elements() {
+        // Order-independent for nodes and edges.
+        let h_set: &[i32] = &[-1000, 0, 1000];
+        let j_set: &[i32] = &[-1000, 1000];
+        let shuffled = topology_hash_sets(&[2, 0, 1], &[(1, 0), (2, 1)], h_set, j_set, spin);
+        let sorted = topology_hash_sets(&[0, 1, 2], &[(0, 1), (1, 2)], h_set, j_set, spin);
+        assert_eq!(shuffled, sorted, "node and edge order");
+
+        // Order-independent for set elements.
         let nodes = [0u32, 1];
         let edges = [(0u32, 1)];
-        let spin: &[i32] = &DEFAULT_SPIN_SET;
-        let a = topology_hash_sets(&nodes, &edges, &[1000, -1000, 0], &[-1000, 1000], spin);
-        let b = topology_hash_sets(&nodes, &edges, &[-1000, 0, 1000], &[1000, -1000], spin);
-        assert_eq!(a, b);
-    }
+        let shuffled = topology_hash_sets(&nodes, &edges, &[1000, -1000, 0], &[-1000, 1000], spin);
+        let sorted = topology_hash_sets(&nodes, &edges, &[-1000, 0, 1000], &[1000, -1000], spin);
+        assert_eq!(shuffled, sorted, "set element order");
 
-    #[test]
-    fn hash_changes_when_specs_differ() {
-        let nodes = [0u32, 1];
-        let edges = [(0u32, 1)];
-        let spin: &[i32] = &DEFAULT_SPIN_SET;
-        let a = topology_hash_sets(&nodes, &edges, &[-1000, 0, 1000], &[-1000, 1000], spin);
-        let b = topology_hash_sets(&nodes, &edges, &[-1000, 1000], &[-1000, 1000], spin);
-        assert_ne!(a, b);
+        // Different specs hash differently.
+        let other = topology_hash_sets(&nodes, &edges, &[-1000, 1000], &[-1000, 1000], spin);
+        assert_ne!(sorted, other, "different h sets");
     }
 
     #[test]

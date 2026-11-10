@@ -75,7 +75,7 @@ mod tests {
     }
 
     #[test]
-    fn splits_salts_into_contiguous_leases() {
+    fn splits_salts_into_contiguous_leases_and_treats_zero_size_as_one() {
         let jobs = drain_all(&mut LeaseSource::new(&spec(), [0; 32], 1, 10, 4));
         let ranges: Vec<(u64, u64)> = jobs
             .iter()
@@ -87,6 +87,10 @@ mod tests {
             })
             .collect();
         assert_eq!(ranges, vec![(0, 4), (4, 4), (8, 2)]);
+        assert_eq!(
+            drain_all(&mut LeaseSource::new(&spec(), [0; 32], 1, 3, 0)).len(),
+            3
+        );
     }
 
     #[test]
@@ -100,13 +104,5 @@ mod tests {
         let c = drain_all(&mut LeaseSource::new(&spec(), [0; 32], 6, 4, 4));
         assert_eq!(a, b);
         assert_ne!(a[0].generator, c[0].generator);
-    }
-
-    #[test]
-    fn zero_lease_size_is_treated_as_one() {
-        assert_eq!(
-            drain_all(&mut LeaseSource::new(&spec(), [0; 32], 1, 3, 0)).len(),
-            3
-        );
     }
 }

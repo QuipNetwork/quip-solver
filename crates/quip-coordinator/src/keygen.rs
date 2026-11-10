@@ -122,75 +122,41 @@ mod tests {
     }
 
     #[test]
-    fn writes_a_32_byte_seed_as_hex() {
-        let out = temp_path("basic");
-        write_keystore(&out).expect("keygen should succeed");
-
-        let hex = read_seed_hex(&out);
-        assert_eq!(hex.len(), 64, "32 bytes is 64 hex characters");
-        assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
-        assert!(!hex.starts_with("0x"), "keystore hex carries no 0x prefix");
-
-        let _ = std::fs::remove_file(&out);
-    }
-
-    #[test]
-    fn refuses_to_overwrite_an_existing_file() {
-        let out = temp_path("exists");
-        std::fs::write(&out, b"do not clobber").expect("setup write should succeed");
-
-        let err = write_keystore(&out).expect_err("must refuse to overwrite");
-        assert!(matches!(err, KeygenError::Exists(_)));
-        assert_eq!(
-            std::fs::read(&out).expect("file should still be readable"),
-            b"do not clobber"
-        );
-
-        let _ = std::fs::remove_file(&out);
-    }
-
-    #[test]
-    fn successive_runs_produce_different_seeds() {
-        let a = temp_path("rand-a");
-        let b = temp_path("rand-b");
+    fn writes_a_random_owner_only_loadable_seed_and_never_overwrites() {
+        let a = temp_path("a");
+        let b = temp_path("b");
         write_keystore(&a).expect("first keygen should succeed");
         write_keystore(&b).expect("second keygen should succeed");
 
-        assert_ne!(read_seed_hex(&a), read_seed_hex(&b));
+        let hex = read_seed_hex(&a);
+        assert_eq!(hex.len(), 64, "32 bytes is 64 hex characters");
+        assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(!hex.starts_with("0x"), "keystore hex carries no 0x prefix");
+        assert_ne!(hex, read_seed_hex(&b), "successive runs must differ");
 
-        let _ = std::fs::remove_file(&a);
-        let _ = std::fs::remove_file(&b);
-    }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&a)
+                .expect("keystore should exist")
+                .permissions()
+                .mode();
+            assert_eq!(
+                mode & 0o777,
+                0o600,
+                "keystore must not be group/world readable"
+            );
+        }
 
-    #[cfg(unix)]
-    #[test]
-    fn keystore_is_owner_read_write_only() {
-        use std::os::unix::fs::PermissionsExt as _;
-        let out = temp_path("mode");
-        write_keystore(&out).expect("keygen should succeed");
-
-        let mode = std::fs::metadata(&out)
-            .expect("keystore should exist")
-            .permissions()
-            .mode();
-        assert_eq!(
-            mode & 0o777,
-            0o600,
-            "keystore must not be group/world readable"
-        );
-
-        let _ = std::fs::remove_file(&out);
-    }
-
-    #[test]
-    fn output_is_loadable_by_load_hybrid_pair() {
-        let out = temp_path("loadable");
-        write_keystore(&out).expect("keygen should succeed");
-
-        let path = out.to_string_lossy().to_string();
+        let path = a.to_string_lossy().to_string();
         let _pair = crate::chain::extrinsic::load_hybrid_pair(&path)
             .expect("the coordinator must be able to load what keygen writes");
 
-        let _ = std::fs::remove_file(&out);
+        let err = write_keystore(&a).expect_err("must refuse to overwrite");
+        assert!(matches!(err, KeygenError::Exists(_)));
+        assert_eq!(read_seed_hex(&a), hex, "refused write must not clobber");
+
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
     }
 }

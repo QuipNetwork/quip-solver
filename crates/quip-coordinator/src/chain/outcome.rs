@@ -97,22 +97,29 @@ mod tests {
 
     const JOB: &[u8] = b"job-1";
 
-    #[test]
-    fn failures_below_the_bound_ask_for_a_retry() {
-        let mut led = SubmitLedger::new(3);
-        assert_eq!(led.record_failure(5, JOB), SubmitAction::Retry);
-        assert_eq!(led.record_failure(5, JOB), SubmitAction::Retry);
-        assert_eq!(led.attempts(5, JOB), 2);
-    }
-
-    /// The bound is what restores fail-loud. Without it a proof the runtime
-    /// will never accept retries until the round ends.
+    /// Failures below the bound ask for a retry. The bound is what restores
+    /// fail-loud. Without it a proof the runtime will never accept retries
+    /// until the round ends. A bound of one must stop on the first failure,
+    /// not allow a free retry.
     #[test]
     fn the_bound_turns_a_retry_into_a_fatal_stop() {
-        let mut led = SubmitLedger::new(3);
-        assert_eq!(led.record_failure(5, JOB), SubmitAction::Retry);
-        assert_eq!(led.record_failure(5, JOB), SubmitAction::Retry);
-        assert_eq!(led.record_failure(5, JOB), SubmitAction::StopFatal);
+        use SubmitAction::{Retry, StopFatal};
+        for (label, bound, expected) in [
+            ("bound of three", 3, &[Retry, Retry, StopFatal][..]),
+            ("bound of one", 1, &[StopFatal][..]),
+        ] {
+            let mut led = SubmitLedger::new(bound);
+            for (attempt, want) in (1..).zip(expected) {
+                assert_eq!(
+                    led.record_failure(5, JOB),
+                    *want,
+                    "{label}, failure {attempt}"
+                );
+                if *want == Retry {
+                    assert_eq!(led.attempts(5, JOB), attempt, "{label}, failure {attempt}");
+                }
+            }
+        }
     }
 
     /// A new qblock is a new round with new difficulty. Counting across rounds
@@ -141,13 +148,6 @@ mod tests {
         led.record_success(5, JOB);
         assert_eq!(led.attempts(5, JOB), 0);
         assert_eq!(led.record_failure(5, JOB), SubmitAction::Retry);
-    }
-
-    /// A bound of one must stop on the first failure, not allow a free retry.
-    #[test]
-    fn a_bound_of_one_stops_immediately() {
-        let mut led = SubmitLedger::new(1);
-        assert_eq!(led.record_failure(5, JOB), SubmitAction::StopFatal);
     }
 
     /// Old rounds must not accumulate forever in a long-running process.

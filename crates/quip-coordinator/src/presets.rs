@@ -58,39 +58,42 @@ mod tests {
     use crate::drive::parse_topology_spec;
 
     #[test]
-    fn advantage2_preset_matches_the_committed_fixture() {
-        let text = preset_spec("advantage2-system1").expect("preset resolves");
-        let spec = parse_topology_spec(text).expect("preset parses");
-        assert_eq!(spec.topology.nodes.len(), 4577);
-        assert_eq!(spec.topology.edges.0.len(), 41515);
-        assert_eq!(spec.allowed_h_milli, vec![-1000, 0, 1000]);
-        assert_eq!(spec.allowed_j_milli, vec![-1000, 1000]);
-    }
-
-    #[test]
-    fn smoke_preset_resolves_and_parses() {
-        let text = preset_spec("smoke").expect("preset resolves");
-        assert!(parse_topology_spec(text).is_ok());
-    }
-
-    #[test]
-    fn unknown_preset_names_the_valid_choices() {
-        let err = preset_spec("nope").expect_err("unknown preset is an error");
-        assert!(err.contains("nope"), "error names the input: {err}");
-        assert!(
-            err.contains("advantage2-system1"),
-            "error lists choices: {err}"
-        );
-    }
-
-    #[test]
-    fn every_listed_preset_resolves() {
+    fn every_listed_preset_resolves_and_parses_and_unknown_names_the_choices() {
         for name in PRESET_NAMES {
+            let text = preset_spec(name)
+                .unwrap_or_else(|e| panic!("listed preset {name} must resolve: {e}"));
             assert!(
-                preset_spec(name).is_ok(),
-                "listed preset {name} must resolve"
+                parse_topology_spec(text).is_ok(),
+                "listed preset {name} must parse"
             );
         }
+        assert!(PRESET_NAMES.contains(&"aglais"));
+
+        for name in ["nope", "unknown"] {
+            let err = preset_spec(name).expect_err("unknown preset is an error");
+            assert!(err.contains(name), "error names the input: {err}");
+            assert!(
+                err.contains("advantage2-system1"),
+                "error lists choices: {err}"
+            );
+            assert!(err.contains("aglais"), "error lists choices: {err}");
+        }
+    }
+
+    /// Resolving Aglais, which derives from the Advantage2 graph, must leave
+    /// the Advantage2 fixture itself untouched.
+    #[test]
+    fn advantage2_preset_matches_the_committed_fixture() {
+        let before = preset_spec("advantage2-system1").expect("Advantage2 preset resolves");
+        let _ = preset_spec("aglais").expect("Aglais preset resolves");
+        let after = preset_spec("advantage2-system1").expect("Advantage2 preset resolves");
+        assert_eq!(before, after);
+        let spec = parse_topology_spec(after).expect("preset parses");
+        assert_eq!(spec.topology.nodes.len(), 4577);
+        assert_eq!(spec.topology.edges.0.len(), 41515);
+        assert_eq!(spec.topology.edge_pairs().len(), 41_515);
+        assert_eq!(spec.allowed_h_milli, vec![-1000, 0, 1000]);
+        assert_eq!(spec.allowed_j_milli, vec![-1000, 1000]);
     }
 
     #[test]
@@ -147,20 +150,6 @@ mod tests {
         assert_eq!(spec.min_solutions, base.min_solutions);
         assert_eq!(spec.max_energy_milli, base.max_energy_milli);
         assert_eq!(spec.min_diversity_milli, base.min_diversity_milli);
-    }
-
-    #[test]
-    fn aglais_resolution_keeps_the_original_fixture() {
-        let before = preset_spec("advantage2-system1").expect("Advantage2 preset resolves");
-        let _ = preset_spec("aglais").expect("Aglais preset resolves");
-        let after = preset_spec("advantage2-system1").expect("Advantage2 preset resolves");
-        assert_eq!(before, after);
-        let base = parse_topology_spec(after).expect("Advantage2 preset parses");
-        assert_eq!(base.topology.edge_pairs().len(), 41_515);
-        assert_eq!(base.allowed_h_milli, vec![-1000, 0, 1000]);
-        assert!(PRESET_NAMES.contains(&"aglais"));
-        let error = preset_spec("unknown").expect_err("unknown preset is an error");
-        assert!(error.contains("aglais"));
     }
 
     #[test]

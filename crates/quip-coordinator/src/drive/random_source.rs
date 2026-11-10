@@ -85,19 +85,11 @@ mod tests {
     }"#;
 
     #[test]
-    fn draws_exactly_count_jobs() {
+    fn same_seed_and_topology_yields_identical_jobs_and_another_seed_differs() {
         let spec = parse_topology_spec(SPEC).unwrap();
-        let mut src = RandomSource::new(&spec, [1u8; 32], 42, 5, 9_999_999);
-        assert_eq!(drain_all(&mut src).len(), 5);
-    }
-
-    #[test]
-    fn same_seed_and_topology_yields_identical_jobs() {
-        let spec = parse_topology_spec(SPEC).unwrap();
-        let mut a = RandomSource::new(&spec, [1u8; 32], 7, 3, 9_999_999);
-        let mut b = RandomSource::new(&spec, [1u8; 32], 7, 3, 9_999_999);
-        let jobs_a = drain_all(&mut a);
-        let jobs_b = drain_all(&mut b);
+        let draw = |seed| drain_all(&mut RandomSource::new(&spec, [1u8; 32], seed, 3, 9_999_999));
+        let jobs_a = draw(7);
+        let jobs_b = draw(7);
         assert_eq!(jobs_a.len(), jobs_b.len());
         for (ja, jb) in jobs_a.iter().zip(&jobs_b) {
             assert_eq!(ja.job_id, jb.job_id);
@@ -106,25 +98,20 @@ mod tests {
                 crate::producer::problem::problem_milli(jb.ising.as_ref().unwrap()).unwrap()
             );
         }
+        let jobs_c = draw(8);
+        assert_ne!(
+            jobs_a.first().map(|j| &j.job_id),
+            jobs_c.first().map(|j| &j.job_id)
+        );
     }
 
     #[test]
-    fn different_seed_yields_different_jobs() {
+    fn draws_exactly_count_jobs_with_values_in_allowed_sets() {
         let spec = parse_topology_spec(SPEC).unwrap();
-        let mut a = RandomSource::new(&spec, [1u8; 32], 1, 3, 9_999_999);
-        let mut b = RandomSource::new(&spec, [1u8; 32], 2, 3, 9_999_999);
-        let jobs_a = drain_all(&mut a);
-        let jobs_b = drain_all(&mut b);
-        let id_a = jobs_a.first().map(|j| &j.job_id);
-        let id_b = jobs_b.first().map(|j| &j.job_id);
-        assert_ne!(id_a, id_b);
-    }
-
-    #[test]
-    fn drawn_values_stay_within_allowed_sets() {
-        let spec = parse_topology_spec(SPEC).unwrap();
-        let mut src = RandomSource::new(&spec, [1u8; 32], 99, 4, 9_999_999);
-        for job in drain_all(&mut src) {
+        let mut src = RandomSource::new(&spec, [1u8; 32], 99, 5, 9_999_999);
+        let jobs = drain_all(&mut src);
+        assert_eq!(jobs.len(), 5);
+        for job in jobs {
             let ising = job.ising.unwrap();
             let (h, j) = crate::producer::problem::problem_milli(&ising).unwrap();
             assert!(h.iter().all(|v| [-1000, 0, 1000].contains(v)));

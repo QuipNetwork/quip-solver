@@ -210,23 +210,24 @@ mod tests {
     #[test]
     fn finds_quantum_pow_api_version() {
         let want = format!("0x{}", hex_lower(&api_id(QUANTUM_POW_API)));
-        let apis = json!([["0xdf6acb689907609b", 5], [want, 2]]);
-        assert_eq!(find_api_version(&apis, QUANTUM_POW_API), Some(2));
-    }
-
-    #[test]
-    fn api_lookup_is_case_insensitive_on_hex() {
-        let want = format!("0X{}", hex_lower(&api_id(QUANTUM_POW_API)).to_uppercase());
-        let apis = json!([[want, 7]]);
-        assert_eq!(find_api_version(&apis, QUANTUM_POW_API), Some(7));
-    }
-
-    #[test]
-    fn missing_api_reads_as_none() {
-        let apis = json!([["0xdf6acb689907609b", 5]]);
-        assert_eq!(find_api_version(&apis, QUANTUM_POW_API), None);
-        assert_eq!(find_api_version(&json!([]), QUANTUM_POW_API), None);
-        assert_eq!(find_api_version(&json!(null), QUANTUM_POW_API), None);
+        let upper = format!("0X{}", hex_lower(&api_id(QUANTUM_POW_API)).to_uppercase());
+        for (label, apis, expected) in [
+            (
+                "listed after Core",
+                json!([["0xdf6acb689907609b", 5], [want, 2]]),
+                Some(2),
+            ),
+            ("upper-case hex", json!([[upper, 7]]), Some(7)),
+            ("only Core", json!([["0xdf6acb689907609b", 5]]), None),
+            ("empty list", json!([]), None),
+            ("null", json!(null), None),
+        ] {
+            assert_eq!(
+                find_api_version(&apis, QUANTUM_POW_API),
+                expected,
+                "{label}"
+            );
+        }
     }
 
     fn rv_with(api: Option<u32>) -> Value {
@@ -245,13 +246,18 @@ mod tests {
         })
     }
 
+    /// The deployed v0.2.2-rc4 validator: spec 114, `QuantumPowApi` v2. This is
+    /// the pairing the coordinator must accept.
     #[test]
-    fn parses_a_full_runtime_version() {
+    fn v0_2_2_rc4_runtime_parses_and_is_accepted() {
         let info = parse_runtime_version(&rv_with(Some(2))).unwrap();
         assert_eq!(info.spec_name, "quip-runtime");
         assert_eq!(info.spec_version, 114);
         assert_eq!(info.transaction_version, 6);
         assert_eq!(info.quantum_pow_api, Some(2));
+        assert!(info
+            .quantum_pow_api
+            .is_some_and(|v| v >= MIN_QUANTUM_POW_API));
     }
 
     #[test]
@@ -261,16 +267,6 @@ mod tests {
             parse_runtime_version(&rv),
             Err(PreflightError::Malformed(_))
         ));
-    }
-
-    /// The deployed v0.2.2-rc4 validator: spec 114, `QuantumPowApi` v2. This is
-    /// the pairing the coordinator must accept.
-    #[test]
-    fn v0_2_2_rc4_runtime_is_accepted() {
-        let info = parse_runtime_version(&rv_with(Some(2))).unwrap();
-        assert!(info
-            .quantum_pow_api
-            .is_some_and(|v| v >= MIN_QUANTUM_POW_API));
     }
 
     #[test]

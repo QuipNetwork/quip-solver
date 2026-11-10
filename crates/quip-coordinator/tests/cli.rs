@@ -6,6 +6,8 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_quip-coordinator")
 }
 
+const MISSING: &str = "/nonexistent/quip-coordinator-config.toml";
+
 #[test]
 fn help_exits_zero() {
     let out = Command::new(bin())
@@ -19,27 +21,18 @@ fn help_exits_zero() {
     );
 }
 
+/// A missing config is `ConfigInvalid` (64), and the error reaches stderr
+/// through the installed `tracing` subscriber as structured plain text.
+/// Before the subscriber was installed every `tracing` call in the binary was
+/// a silent no-op and the output was empty.
 #[test]
-fn missing_config_exits_64() {
+fn missing_config_exits_64_and_logs_the_error() {
     let out = Command::new(bin())
-        .arg("--config")
-        .arg("/nonexistent/quip-coordinator-config.toml")
-        .output()
-        .expect("run --config");
-    assert_eq!(out.status.code(), Some(64));
-}
-
-/// The whole point of the logging fix: a subscriber is installed, so `tracing`
-/// events reach stderr. Before this, every `tracing` call in the binary was a
-/// silent no-op and this assertion failed on empty output.
-#[test]
-fn errors_reach_stderr_through_the_subscriber() {
-    let out = Command::new(bin())
-        .arg("--config")
-        .arg("/nonexistent/quip-coordinator-config.toml")
+        .args(["--config", MISSING])
         .env_remove("RUST_LOG")
         .output()
         .expect("run --config");
+    assert_eq!(out.status.code(), Some(64));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("ERROR"), "no level in stderr: {stderr:?}");
     assert!(
@@ -48,7 +41,7 @@ fn errors_reach_stderr_through_the_subscriber() {
     );
     // Structured fields, not an interpolated blob.
     assert!(
-        stderr.contains("path=/nonexistent/quip-coordinator-config.toml"),
+        stderr.contains(&format!("path={MISSING}")),
         "no fields in stderr: {stderr:?}"
     );
     // Captured (non-tty) output must be plain text. The node manager redirects
@@ -59,54 +52,37 @@ fn errors_reach_stderr_through_the_subscriber() {
     );
 }
 
-/// `--log-level` is a global flag, so it parses ahead of a subcommand too.
+/// `--log-level` is a global flag that parses ahead of a subcommand, it
+/// overrides an ambient `RUST_LOG`, and logs never land on stdout: `drive`
+/// prints its timing table there, and a caller parsing that report would
+/// choke on interleaved log lines.
 #[test]
-fn log_level_flag_is_accepted() {
-    for args in [
-        vec!["--log-level", "debug", "--config", "/nonexistent/x.toml"],
-        vec!["--log-level", "trace", "--config", "/nonexistent/x.toml"],
-    ] {
-        let out = Command::new(bin()).args(&args).output().expect("run");
+fn log_level_flag_parses_and_logs_stay_on_stderr() {
+    for level in ["debug", "trace", "error"] {
+        let out = Command::new(bin())
+            .args(["--log-level", level, "--config", MISSING])
+            .env("RUST_LOG", "quip_coordinator=trace")
+            .output()
+            .expect("run");
         // 64 = ConfigInvalid (the missing file), not 2 (clap usage error).
-        assert_eq!(out.status.code(), Some(64), "args: {args:?}");
+        assert_eq!(out.status.code(), Some(64), "level: {level}");
+        assert!(
+            out.stdout.is_empty(),
+            "stdout at {level}: {:?}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("ERROR"), "stderr at {level}: {stderr:?}");
     }
 }
 
 #[test]
 fn log_level_rejects_unknown_value() {
     let out = Command::new(bin())
-        .args(["--log-level", "verbose", "--config", "/nonexistent/x.toml"])
+        .args(["--log-level", "verbose", "--config", MISSING])
         .output()
         .expect("run");
     assert_eq!(out.status.code(), Some(2), "clap should reject the value");
-}
-
-/// `--log-level` overrides an ambient `RUST_LOG`, and quieting to `error` drops
-/// warn-level events while keeping errors.
-#[test]
-fn explicit_log_level_overrides_rust_log() {
-    let out = Command::new(bin())
-        .args(["--log-level", "error", "--config", "/nonexistent/x.toml"])
-        .env("RUST_LOG", "quip_coordinator=trace")
-        .output()
-        .expect("run");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("ERROR"), "stderr: {stderr:?}");
-}
-
-/// Logs must never land on stdout: `drive` prints its timing table there, and a
-/// caller parsing that report would choke on interleaved log lines.
-#[test]
-fn logs_do_not_pollute_stdout() {
-    let out = Command::new(bin())
-        .args(["--log-level", "trace", "--config", "/nonexistent/x.toml"])
-        .output()
-        .expect("run");
-    assert!(
-        out.stdout.is_empty(),
-        "stdout: {:?}",
-        String::from_utf8_lossy(&out.stdout)
-    );
 }
 
 #[test]

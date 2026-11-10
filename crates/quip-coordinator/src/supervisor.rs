@@ -305,16 +305,6 @@ mod tests {
     }
 
     #[test]
-    fn cuda_child_argv_carries_its_device() {
-        let args = child_args(
-            &cuda_entry("cuda-1", Some(1)),
-            "unix:///s.sock",
-            LogLevel::Info,
-        );
-        assert_eq!(value_after(&args, "--device"), Some("1"));
-    }
-
-    #[test]
     fn cpu_child_argv_has_no_device_flag() {
         // A binary whose clap has no `--device` exits 2 on the flag, which the
         // restart policy turns into a backoff loop.
@@ -355,15 +345,18 @@ mod tests {
         );
         assert_eq!(value_after(&args, "--miner-id"), Some("cuda-0"));
         assert_eq!(value_after(&args, "--log-level"), Some("debug"));
+        assert_eq!(value_after(&args, "--device"), Some("0"));
     }
 
+    /// Exit codes map to a restart policy, and an operator error never
+    /// restarts through the tracker either.
     #[test]
     fn restart_policy_matches_exit_codes() {
+        for code in [64, 69, 77, 2] {
+            assert!(matches!(restart_policy(code), Restart::Never), "{code}");
+            assert_eq!(tracker().on_exit(code, 0), RestartAction::Never, "{code}");
+        }
         assert!(matches!(restart_policy(0), Restart::OnDemand));
-        assert!(matches!(restart_policy(64), Restart::Never));
-        assert!(matches!(restart_policy(69), Restart::Never));
-        assert!(matches!(restart_policy(77), Restart::Never));
-        assert!(matches!(restart_policy(2), Restart::Never));
         assert!(matches!(restart_policy(70), Restart::Backoff));
         assert!(matches!(restart_policy(-9), Restart::Backoff)); // SIGKILL
     }
@@ -389,21 +382,9 @@ mod tests {
     }
 
     #[test]
-    fn operator_error_never_restarts() {
-        let mut t = tracker();
-        assert_eq!(t.on_exit(64, 0), RestartAction::Never);
-        assert_eq!(t.on_exit(69, 0), RestartAction::Never);
-        assert_eq!(t.on_exit(77, 0), RestartAction::Never);
-    }
-
-    #[test]
     fn backoff_doubles_and_caps_at_max() {
-        let mut t = tracker(); // base 500, max 4000
-        assert_eq!(t.on_exit(70, 0), RestartAction::Backoff(500));
-        assert_eq!(t.on_exit(70, 1), RestartAction::Backoff(1000));
-        assert_eq!(t.on_exit(70, 2), RestartAction::Backoff(2000));
-        // budget is 3 crashes in window; the 4th trips Unhealthy before capping,
-        // so widen the window via fresh trackers to exercise the cap directly.
+        // The default tracker's budget of 3 crashes trips Unhealthy before the
+        // cap, so a wide budget and window exercise the cap directly.
         let mut t2 = RestartTracker::new(BackoffPolicy {
             base_ms: 500,
             max_ms: 4_000,

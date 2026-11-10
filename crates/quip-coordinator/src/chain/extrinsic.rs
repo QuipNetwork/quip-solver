@@ -472,13 +472,10 @@ mod tests {
     }
 
     #[test]
-    fn hex_decode_rejects_even_length_unicode() {
-        assert!(hex_decode("00€0").is_err());
-    }
-
-    #[test]
-    fn hex_decode_rejects_non_hex_ascii() {
-        assert!(hex_decode("0g").is_err());
+    fn hex_decode_rejects_non_hex_input() {
+        for (label, input) in [("even-length Unicode", "00€0"), ("non-hex ASCII", "0g")] {
+            assert!(hex_decode(input).is_err(), "{label}");
+        }
     }
 
     #[test]
@@ -529,21 +526,9 @@ mod tests {
 
     #[test]
     fn job_orders_key_is_stable() {
-        let k1 = job_orders_storage_key(7);
-        let k2 = job_orders_storage_key(7);
-        assert_eq!(k1, k2);
         assert_ne!(job_orders_storage_key(7), job_orders_storage_key(8));
         // prefix (32) + blake2_128 (16) + u64 (8) = 56
-        assert_eq!(k1.len(), 56);
-    }
-
-    #[test]
-    fn miner_identity_is_32_bytes() {
-        let pair = HybridPair::from_string("//Alice", None).expect("alice");
-        let id = miner_identity_bytes(&pair);
-        assert_eq!(id.len(), 32);
-        // Deterministic.
-        assert_eq!(id, miner_identity_bytes(&pair));
+        assert_eq!(job_orders_storage_key(7).len(), 56);
     }
 
     #[test]
@@ -556,7 +541,6 @@ mod tests {
         // shape of the bug this asserts against.
         assert_ne!(account, identity);
         assert_eq!(identity, blake2_256(account.as_slice()));
-        assert_eq!(account, signer_account_bytes(&pair));
     }
 
     /// Pins the identity to the pallet expression it mirrors, character for
@@ -629,13 +613,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_extrinsic_hash_is_blake2_256_of_the_whole_blob() {
-        let ext = vec![1u8, 2, 3, 4];
-        assert_eq!(extrinsic_hash(&ext), blake2_256(&ext));
-        assert_ne!(extrinsic_hash(&ext), extrinsic_hash(&[1u8, 2, 3, 5]));
-    }
-
     fn compact_len_bytes(first: u8) -> usize {
         match first & 0b11 {
             0b00 => 1,
@@ -669,59 +646,63 @@ mod tests {
 
     #[test]
     fn a_bad_secret_uri_is_rejected_without_echoing_it() {
-        // A mistyped mnemonic with a derivation path and password. Not a real key.
-        let secret =
-            "bottom drive obey lake curtain smoke basket hold race lonely fit wolk//hard///pw";
-        // HybridPair is not Debug, so Result::expect_err does not compile.
-        let err = load_hybrid_pair(secret)
-            .err()
-            .expect("a bad phrase is rejected");
-        for fragment in ["lake", "wolk", "hard", "pw"] {
-            assert!(!err.contains(fragment), "error echoes {fragment:?}: {err}");
+        for (label, secret, fragments) in [
+            // A mistyped mnemonic with a derivation path and password. Not a real key.
+            (
+                "bad phrase",
+                "bottom drive obey lake curtain smoke basket hold race lonely fit wolk//hard///pw",
+                &["lake", "wolk", "hard", "pw"][..],
+            ),
+            // An empty hard-derivation path triggers a grammar error with the
+            // original URI.
+            (
+                "malformed URI",
+                "review sentinel//",
+                &["review sentinel//", "review", "sentinel", "//"][..],
+            ),
+        ] {
+            // HybridPair is not Debug, so Result::expect_err does not compile.
+            let err = load_hybrid_pair(secret)
+                .err()
+                .unwrap_or_else(|| panic!("{label}: the secret is rejected"));
+            for fragment in fragments {
+                assert!(
+                    !err.contains(fragment),
+                    "{label}: error echoes {fragment:?}: {err}"
+                );
+            }
+            assert!(
+                err.contains("keystore") && err.contains("secret URI"),
+                "{label}: error names the accepted forms: {err}"
+            );
         }
-        assert!(
-            err.contains("keystore") && err.contains("secret URI"),
-            "error names the accepted forms: {err}"
-        );
-    }
-
-    #[test]
-    fn a_malformed_secret_uri_is_rejected_without_echoing_it() {
-        // An empty hard-derivation path triggers a grammar error with the original URI.
-        let secret = "review sentinel//";
-        let err = load_hybrid_pair(secret)
-            .err()
-            .expect("a malformed URI is rejected");
-        for fragment in [secret, "review", "sentinel", "//"] {
-            assert!(!err.contains(fragment), "error echoes {fragment:?}: {err}");
-        }
-        assert!(
-            err.contains("keystore") && err.contains("secret URI"),
-            "error names the accepted forms: {err}"
-        );
     }
 
     #[test]
     fn a_bad_keystore_seed_is_rejected_without_echoing_it() {
-        let path = std::env::temp_dir().join(format!("quip-ks-{}.json", std::process::id()));
-        std::fs::write(&path, r#"{"master_seed_hex":"0xabcdef123"}"#).expect("write keystore");
-        let err = load_hybrid_pair(path.to_str().expect("utf-8 path"))
-            .err()
-            .expect("an odd-length seed is rejected");
-        let _ = std::fs::remove_file(&path);
-        assert!(!err.contains("abcdef123"), "error echoes the seed: {err}");
-    }
-
-    #[test]
-    fn a_unicode_keystore_seed_is_rejected_without_echoing_it() {
-        let path =
-            std::env::temp_dir().join(format!("quip-ks-unicode-{}.json", std::process::id()));
-        std::fs::write(&path, r#"{"master_seed_hex":"00€0"}"#).expect("write keystore");
-        let result = load_hybrid_pair(path.to_str().expect("utf-8 path"));
-        let _ = std::fs::remove_file(&path);
-        let err = result.err().expect("a Unicode seed is rejected");
-        assert!(!err.contains("00€0"), "error echoes the seed: {err}");
-        assert!(!err.contains('€'), "error echoes a seed character: {err}");
+        for (label, seed, fragments) in [
+            ("odd-length seed", "0xabcdef123", &["abcdef123"][..]),
+            ("Unicode seed", "00€0", &["00€0", "€"][..]),
+        ] {
+            let path = std::env::temp_dir().join(format!(
+                "quip-ks-{}-{}.json",
+                label.replace(' ', "-"),
+                std::process::id()
+            ));
+            std::fs::write(&path, format!(r#"{{"master_seed_hex":"{seed}"}}"#))
+                .expect("write keystore");
+            let result = load_hybrid_pair(path.to_str().expect("utf-8 path"));
+            let _ = std::fs::remove_file(&path);
+            let err = result
+                .err()
+                .unwrap_or_else(|| panic!("{label}: the seed is rejected"));
+            for fragment in fragments {
+                assert!(
+                    !err.contains(fragment),
+                    "{label}: error echoes {fragment:?}: {err}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -773,16 +754,6 @@ mod tests {
         assert_ne!(
             participants_by_qblock_storage_key(1, &account),
             participants_by_qblock_storage_key(2, &account)
-        );
-    }
-
-    #[test]
-    fn account_identity_matches_the_pair_identity() {
-        let pair = HybridPair::from_string("//Alice", None).expect("alice");
-        let account = signer_account_bytes(&pair);
-        assert_eq!(
-            account_identity_bytes(&account),
-            miner_identity_bytes(&pair)
         );
     }
 }

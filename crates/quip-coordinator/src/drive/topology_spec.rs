@@ -248,17 +248,19 @@ mod tests {
     }"#;
 
     #[test]
-    fn parses_valid_spec_with_default_gates() {
+    fn parses_valid_specs() {
+        // Default gates and snapshot.
         let spec = parse_topology_spec(VALID).unwrap();
         assert_eq!(spec.topology.nodes.len(), 4);
         assert_eq!(spec.topology.edge_pairs().len(), 4);
         assert_eq!(spec.min_solutions, 0);
         assert_eq!(spec.max_energy_milli, i64::MAX);
         assert_eq!(spec.min_diversity_milli, 0);
-    }
+        let snap = spec.to_snapshot();
+        assert_eq!(snap.topology_hash, spec.topology.hash);
+        assert_eq!(snap.nodes, spec.topology.nodes);
 
-    #[test]
-    fn parses_explicit_gates() {
+        // Explicit gates.
         let text = r#"{
             "nodes": [0, 1],
             "edges": [[0, 1]],
@@ -270,68 +272,9 @@ mod tests {
         assert_eq!(spec.min_solutions, 5);
         assert_eq!(spec.max_energy_milli, -100);
         assert_eq!(spec.min_diversity_milli, 200);
-    }
 
-    #[test]
-    fn snapshot_reuses_topology_hash() {
-        let spec = parse_topology_spec(VALID).unwrap();
-        let snap = spec.to_snapshot();
-        assert_eq!(snap.topology_hash, spec.topology.hash);
-        assert_eq!(snap.nodes, spec.topology.nodes);
-    }
-
-    #[test]
-    fn rejects_malformed_json() {
-        assert!(matches!(
-            parse_topology_spec("not json"),
-            Err(TopologySpecError::Json(_))
-        ));
-    }
-
-    #[test]
-    fn rejects_empty_nodes() {
-        let text = r#"{"nodes":[],"edges":[],"allowed_h_milli":[1],"allowed_j_milli":[1]}"#;
-        assert_eq!(
-            parse_topology_spec(text).unwrap_err(),
-            TopologySpecError::EmptyNodes
-        );
-    }
-
-    #[test]
-    fn rejects_empty_allowed_sets() {
-        let no_h = r#"{"nodes":[0],"edges":[],"allowed_h_milli":[],"allowed_j_milli":[1]}"#;
-        assert_eq!(
-            parse_topology_spec(no_h).unwrap_err(),
-            TopologySpecError::EmptyAllowedH
-        );
-        let no_j = r#"{"nodes":[0],"edges":[],"allowed_h_milli":[1],"allowed_j_milli":[]}"#;
-        assert_eq!(
-            parse_topology_spec(no_j).unwrap_err(),
-            TopologySpecError::EmptyAllowedJ
-        );
-    }
-
-    #[test]
-    fn rejects_edge_with_unknown_node_id() {
-        let text = r#"{
-            "nodes": [0, 1],
-            "edges": [[0, 5]],
-            "allowed_h_milli": [1000],
-            "allowed_j_milli": [1000]
-        }"#;
-        assert_eq!(
-            parse_topology_spec(text).unwrap_err(),
-            TopologySpecError::EdgeUnknownNode {
-                edge_index: 0,
-                endpoint: 5,
-            }
-        );
-    }
-
-    #[test]
-    fn accepts_sparse_native_node_ids() {
         // Native D-Wave-style sparse ids (gaps): edges reference ids, not
-        // positions. The miner and consensus scorer map ids → positions.
+        // positions. The miner and consensus scorer map ids to positions.
         let text = r#"{
             "nodes": [0, 12, 2400],
             "edges": [[0, 12], [12, 2400]],
@@ -341,6 +284,42 @@ mod tests {
         let spec = parse_topology_spec(text).unwrap();
         assert_eq!(spec.topology.nodes, vec![0, 12, 2400]);
         assert_eq!(spec.topology.edge_pairs(), vec![(0, 12), (12, 2400)]);
+    }
+
+    #[test]
+    fn rejects_invalid_specs() {
+        assert!(matches!(
+            parse_topology_spec("not json"),
+            Err(TopologySpecError::Json(_))
+        ));
+        let cases = [
+            (
+                "empty nodes",
+                r#"{"nodes":[],"edges":[],"allowed_h_milli":[1],"allowed_j_milli":[1]}"#,
+                TopologySpecError::EmptyNodes,
+            ),
+            (
+                "empty allowed h",
+                r#"{"nodes":[0],"edges":[],"allowed_h_milli":[],"allowed_j_milli":[1]}"#,
+                TopologySpecError::EmptyAllowedH,
+            ),
+            (
+                "empty allowed j",
+                r#"{"nodes":[0],"edges":[],"allowed_h_milli":[1],"allowed_j_milli":[]}"#,
+                TopologySpecError::EmptyAllowedJ,
+            ),
+            (
+                "edge with unknown node id",
+                r#"{"nodes":[0,1],"edges":[[0,5]],"allowed_h_milli":[1000],"allowed_j_milli":[1000]}"#,
+                TopologySpecError::EdgeUnknownNode {
+                    edge_index: 0,
+                    endpoint: 5,
+                },
+            ),
+        ];
+        for (label, text, expected) in cases {
+            assert_eq!(parse_topology_spec(text).unwrap_err(), expected, "{label}");
+        }
     }
 
     fn chain_meta_fixture() -> Result<([u8; 32], TopologyMetaScale), String> {
@@ -371,6 +350,7 @@ mod tests {
         let (hash, meta) = chain_meta_fixture().expect("valid Aglais metadata");
         let expected_nodes = meta.nodes.clone();
         let expected_edges = meta.edges.clone();
+        let mut late_registration = meta.clone();
         let spec = TopologySpec::from_chain_meta(hash, meta).expect("valid chain topology");
         assert_eq!(spec.topology.hash, hash.to_vec());
         assert_eq!(spec.topology.nodes, expected_nodes);
@@ -387,18 +367,16 @@ mod tests {
         assert_eq!(snapshot.block_number, 0);
         assert_eq!(snapshot.spec_version, 0);
         assert_eq!(snapshot.topology_hash, hash.to_vec());
-    }
 
-    #[test]
-    fn from_chain_meta_does_not_hash_registration_height() {
-        let (hash, mut meta) = chain_meta_fixture().expect("valid Aglais metadata");
-        meta.registered_at = u32::MAX;
-        let spec = TopologySpec::from_chain_meta(hash, meta).expect("valid chain topology");
+        // The registration height is not part of the topology hash.
+        late_registration.registered_at = u32::MAX;
+        let spec =
+            TopologySpec::from_chain_meta(hash, late_registration).expect("valid chain topology");
         assert_eq!(spec.topology.hash, hash.to_vec());
     }
 
     #[test]
-    fn from_chain_meta_rejects_ranges_and_empty_sets() {
+    fn from_chain_meta_rejects_unsupported_sets_bad_graphs_and_hashes() {
         let (hash, meta) = chain_meta_fixture().expect("valid Aglais metadata");
         let mut integer_h = meta.clone();
         integer_h.allowed_h_values = AllowedValueSpec::IntegerRange { min: -1, max: 1 };
@@ -407,36 +385,46 @@ mod tests {
             min: -1000,
             max: 1000,
         };
-        let mut empty_spin = meta;
+        let mut empty_spin = meta.clone();
         empty_spin.allowed_spin_values = AllowedValueSpec::Set(vec![]);
-        for (meta, message) in [
-            (integer_h, "requires AllowedValueSpec::Set"),
-            (continuous_j, "requires AllowedValueSpec::Set"),
-            (empty_spin, "Set is empty"),
-        ] {
-            let error = TopologySpec::from_chain_meta(hash, meta)
-                .expect_err("expected unsupported allowed-value error");
-            assert!(error.contains(message), "{error}");
-        }
-    }
-
-    #[test]
-    fn from_chain_meta_rejects_bad_graphs_and_hashes() {
-        let (hash, meta) = chain_meta_fixture().expect("valid Aglais metadata");
-        let mut empty = meta.clone();
-        empty.nodes.clear();
-        let error =
-            TopologySpec::from_chain_meta(hash, empty).expect_err("expected empty graph error");
-        assert!(error.contains("nodes must be non-empty"));
+        let mut empty_nodes = meta.clone();
+        empty_nodes.nodes.clear();
         let mut bad_edge = meta.clone();
         bad_edge.edges.push((938, u32::MAX));
-        let error =
-            TopologySpec::from_chain_meta(hash, bad_edge).expect_err("expected unknown node error");
-        assert!(error.contains("references node id"));
         let mut incorrect_hash = hash;
         *incorrect_hash.first_mut().expect("nonempty hash") ^= 1;
-        let error = TopologySpec::from_chain_meta(incorrect_hash, meta)
-            .expect_err("expected hash mismatch");
-        assert!(error.contains("topology hash mismatch"));
+        let cases = [
+            (
+                "integer range h",
+                hash,
+                integer_h,
+                "requires AllowedValueSpec::Set",
+            ),
+            (
+                "continuous range j",
+                hash,
+                continuous_j,
+                "requires AllowedValueSpec::Set",
+            ),
+            ("empty spin set", hash, empty_spin, "Set is empty"),
+            ("empty nodes", hash, empty_nodes, "nodes must be non-empty"),
+            (
+                "edge with unknown node",
+                hash,
+                bad_edge,
+                "references node id",
+            ),
+            (
+                "hash mismatch",
+                incorrect_hash,
+                meta,
+                "topology hash mismatch",
+            ),
+        ];
+        for (label, hash, meta, message) in cases {
+            let error = TopologySpec::from_chain_meta(hash, meta)
+                .expect_err("expected a chain topology error");
+            assert!(error.contains(message), "{label}: {error}");
+        }
     }
 }

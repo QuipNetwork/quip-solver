@@ -239,34 +239,43 @@ mod tests {
     use std::sync::Mutex;
 
     #[test]
-    fn parses_a_syncing_health_response() {
-        let v = json!({ "peers": 3, "isSyncing": true, "shouldHavePeers": true });
-        assert_eq!(parse_health(&v).unwrap(), (true, 3, true));
+    fn parses_health_responses() {
+        for (label, v, expected) in [
+            (
+                "syncing",
+                json!({ "peers": 3, "isSyncing": true, "shouldHavePeers": true }),
+                Some((true, 3, true)),
+            ),
+            // Missing peer fields do not fail the read.
+            (
+                "no peer fields",
+                json!({ "isSyncing": false }),
+                Some((false, 0, false)),
+            ),
+            // Guessing "not syncing" here would defeat the gate entirely.
+            ("no isSyncing", json!({ "peers": 3 }), None),
+        ] {
+            assert_eq!(parse_health(&v).ok(), expected, "{label}");
+        }
     }
 
     #[test]
-    fn health_without_is_syncing_is_an_error() {
-        // Guessing "not syncing" here would defeat the gate entirely.
-        assert!(parse_health(&json!({ "peers": 3 })).is_err());
-    }
-
-    #[test]
-    fn missing_peer_fields_do_not_fail_the_read() {
-        let v = json!({ "isSyncing": false });
-        assert_eq!(parse_health(&v).unwrap(), (false, 0, false));
-    }
-
-    #[test]
-    fn sync_state_reports_both_heights() {
-        let v = json!({ "startingBlock": 0, "currentBlock": 1_108_021, "highestBlock": 1_240_333 });
-        assert_eq!(parse_sync_state(&v), (Some(1_108_021), Some(1_240_333)));
-    }
-
-    #[test]
-    fn a_missing_highest_block_falls_back_to_current() {
-        let v = json!({ "currentBlock": 1_108_021 });
-        assert_eq!(parse_sync_state(&v), (Some(1_108_021), Some(1_108_021)));
-        assert_eq!(parse_sync_state(&json!({})), (None, None));
+    fn parses_sync_state_heights() {
+        for (label, v, expected) in [
+            (
+                "both heights",
+                json!({ "startingBlock": 0, "currentBlock": 1_108_021, "highestBlock": 1_240_333 }),
+                (Some(1_108_021), Some(1_240_333)),
+            ),
+            (
+                "a missing highest block falls back to current",
+                json!({ "currentBlock": 1_108_021 }),
+                (Some(1_108_021), Some(1_108_021)),
+            ),
+            ("empty", json!({}), (None, None)),
+        ] {
+            assert_eq!(parse_sync_state(&v), expected, "{label}");
+        }
     }
 
     fn syncing_at(current: u64, highest: u64) -> SyncStatus {
@@ -296,11 +305,7 @@ mod tests {
             "at block 1108021 of 1240333 (132312 behind)"
         );
         assert_eq!(syncing_at(1_108_021, 1_240_333).behind(), Some(132_312));
-    }
-
-    /// A node ahead of the announced head is not "negative blocks behind".
-    #[test]
-    fn a_current_block_past_the_highest_reads_as_caught_up() {
+        // A node ahead of the announced head is not "negative blocks behind".
         assert_eq!(syncing_at(1_240_333, 1_108_021).behind(), Some(0));
     }
 
@@ -341,62 +346,66 @@ mod tests {
     async fn no_sleep(_: Duration) {}
 
     #[tokio::test]
-    async fn a_synced_validator_returns_immediately() {
-        let chain = Scripted::new(vec![Ok(synced())]);
-        assert_eq!(
-            wait_until_synced(&chain, no_sleep).await,
-            SyncOutcome::Synced
-        );
-        assert_eq!(chain.calls(), 1);
-    }
-
-    #[tokio::test]
-    async fn a_syncing_validator_is_waited_out() {
-        let chain = Scripted::new(vec![
-            Ok(syncing_at(1_108_021, 1_240_333)),
-            Ok(syncing_at(1_200_000, 1_240_333)),
-            Ok(synced()),
-        ]);
-        assert_eq!(
-            wait_until_synced(&chain, no_sleep).await,
-            SyncOutcome::Synced
-        );
-        // Two syncing polls, then two clear ones: a node that has been syncing
-        // has to say so twice.
-        assert_eq!(chain.calls(), 4);
-    }
-
-    /// Nodes drop `isSyncing` for a poll as they approach the tip and then pick
-    /// it up again. One clear poll in the middle of a sync is not the end of it.
-    #[tokio::test]
-    async fn a_single_clear_poll_mid_sync_does_not_open_the_gate() {
-        let chain = Scripted::new(vec![
-            Ok(syncing_at(1_108_021, 1_240_333)),
-            Ok(synced()),
-            Ok(syncing_at(1_200_000, 1_240_333)),
-            Ok(synced()),
-            Ok(synced()),
-        ]);
-        assert_eq!(
-            wait_until_synced(&chain, no_sleep).await,
-            SyncOutcome::Synced
-        );
-        assert_eq!(chain.calls(), 5);
-    }
-
-    /// The wait has no ceiling while the node reports progress: an initial sync
-    /// runs far longer than the funding budget, and cutting it short is what
-    /// produced the misleading "not funded" exit.
-    #[tokio::test]
-    async fn a_long_sync_is_not_abandoned() {
-        let mut steps = vec![Ok(syncing_at(0, 5_000_000)); 4096];
-        steps.push(Ok(synced()));
-        let chain = Scripted::new(steps);
-        assert_eq!(
-            wait_until_synced(&chain, no_sleep).await,
-            SyncOutcome::Synced
-        );
-        assert_eq!(chain.calls(), 4098);
+    async fn the_gate_opens_once_the_validator_is_synced() {
+        let refused = || Err("connection refused".to_owned());
+        let mut long_sync = vec![Ok(syncing_at(0, 5_000_000)); 4096];
+        long_sync.push(Ok(synced()));
+        // Two silences that each fit inside the grace, but together exceed it.
+        let mut two_silences = vec![refused(); 10];
+        two_silences.push(Ok(syncing_at(10, 1_000)));
+        two_silences.extend(vec![refused(); 10]);
+        two_silences.push(Ok(synced()));
+        for (label, steps, expected_calls) in [
+            (
+                "a synced validator returns immediately",
+                vec![Ok(synced())],
+                1,
+            ),
+            // Two syncing polls, then two clear ones: a node that has been
+            // syncing has to say so twice.
+            (
+                "a syncing validator is waited out",
+                vec![
+                    Ok(syncing_at(1_108_021, 1_240_333)),
+                    Ok(syncing_at(1_200_000, 1_240_333)),
+                    Ok(synced()),
+                ],
+                4,
+            ),
+            // Nodes drop `isSyncing` for a poll as they approach the tip and
+            // then pick it up again. One clear poll in the middle of a sync is
+            // not the end of it.
+            (
+                "a single clear poll mid-sync does not open the gate",
+                vec![
+                    Ok(syncing_at(1_108_021, 1_240_333)),
+                    Ok(synced()),
+                    Ok(syncing_at(1_200_000, 1_240_333)),
+                    Ok(synced()),
+                    Ok(synced()),
+                ],
+                5,
+            ),
+            // The wait has no ceiling while the node reports progress: an
+            // initial sync runs far longer than the funding budget, and cutting
+            // it short is what produced the misleading "not funded" exit.
+            ("a long sync is not abandoned", long_sync, 4098),
+            // A validator that is slow to boot must not spend its grace period:
+            // the budget covers consecutive silence, not silence in total.
+            (
+                "a validator that comes back resets the grace period",
+                two_silences,
+                23,
+            ),
+        ] {
+            let chain = Scripted::new(steps);
+            assert_eq!(
+                wait_until_synced(&chain, no_sleep).await,
+                SyncOutcome::Synced,
+                "{label}"
+            );
+            assert_eq!(chain.calls(), expected_calls, "{label}");
+        }
     }
 
     #[tokio::test]
@@ -407,21 +416,5 @@ mod tests {
         // Grace divided by the poll interval, plus the pass that trips it.
         let expected = (UNREACHABLE_GRACE.as_secs() / POLL_INTERVAL.as_secs()) + 1;
         assert_eq!(chain.calls(), usize::try_from(expected).unwrap());
-    }
-
-    /// A validator that is slow to boot must not spend its grace period: the
-    /// budget covers consecutive silence, not silence in total.
-    #[tokio::test]
-    async fn a_validator_that_comes_back_resets_the_grace_period() {
-        // Two silences that each fit inside the grace, but together exceed it.
-        let mut steps = vec![Err("connection refused".to_owned()); 10];
-        steps.push(Ok(syncing_at(10, 1_000)));
-        steps.extend(vec![Err("connection refused".to_owned()); 10]);
-        steps.push(Ok(synced()));
-        let chain = Scripted::new(steps);
-        assert_eq!(
-            wait_until_synced(&chain, no_sleep).await,
-            SyncOutcome::Synced
-        );
     }
 }

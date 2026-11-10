@@ -136,10 +136,11 @@ fn signature_holds(
 mod tests {
     use super::*;
     use crate::chain::extrinsic::{
-        build_hybrid_signed_extrinsic, extrinsic_hash, signer_account_bytes, SignedExtensionContext,
+        build_hybrid_signed_extrinsic, signer_account_bytes, SignedExtensionContext,
     };
     use crate::chain::scale_types::{encode_register_miner_call, encode_submit_proof_call};
     use parity_scale_codec::Encode;
+    use sp_core::hashing::blake2_256;
     use sp_core::{H256, U256};
 
     fn proof() -> QuantumProof {
@@ -223,61 +224,6 @@ mod tests {
     }
 
     #[test]
-    fn a_short_or_long_compact_length_decodes_to_nothing() {
-        let (_, ext) = signed(&encode_submit_proof_call(&proof()));
-        assert!(decode_pending_proof(&with_length_off_by(&ext, -1), &CTX).is_none());
-        assert!(decode_pending_proof(&with_length_off_by(&ext, 1), &CTX).is_none());
-    }
-
-    #[test]
-    fn a_signature_for_another_chain_decodes_to_nothing() {
-        let (_, ext) = signed(&encode_submit_proof_call(&proof()));
-        let other = RuntimeTxContext {
-            genesis_hash: [0x22; 32],
-            ..CTX
-        };
-        assert!(decode_pending_proof(&ext, &other).is_none());
-    }
-
-    #[test]
-    fn a_signature_for_another_runtime_decodes_to_nothing() {
-        let (_, ext) = signed(&encode_submit_proof_call(&proof()));
-        let upgraded = RuntimeTxContext {
-            spec_version: 101,
-            ..CTX
-        };
-        assert!(decode_pending_proof(&ext, &upgraded).is_none());
-    }
-
-    #[test]
-    fn a_tampered_call_decodes_to_nothing() {
-        let (_, mut ext) = signed(&encode_submit_proof_call(&proof()));
-        // The last byte belongs to `device_access_time_us`, so the bytes still
-        // decode and only the signature catches the change.
-        *ext.last_mut().expect("byte") ^= 0x01;
-        assert!(decode_pending_proof(&ext, &CTX).is_none());
-    }
-
-    #[test]
-    fn a_swapped_account_decodes_to_nothing() {
-        let (alice, ext) = signed(&encode_submit_proof_call(&proof()));
-        assert!(decode_pending_proof(&with_bob_as_signer(ext, &alice), &CTX).is_none());
-    }
-
-    #[test]
-    fn a_mortal_era_decodes_to_nothing() {
-        let alice = HybridPair::from_string("//Alice", None).expect("alice");
-        let call = encode_submit_proof_call(&proof());
-        let ext = signed_with(
-            &alice,
-            &call,
-            &extra_with(&[0x15, 0x00], 0x00),
-            &encode_additional(100, 1, &[0x11; 32]),
-        );
-        assert!(decode_pending_proof(&ext, &CTX).is_none());
-    }
-
-    #[test]
     fn a_metadata_hash_signer_is_accepted_on_its_account_binding() {
         let alice = HybridPair::from_string("//Alice", None).expect("alice");
         let call = encode_submit_proof_call(&proof());
@@ -292,69 +238,92 @@ mod tests {
     }
 
     #[test]
-    fn a_metadata_hash_entry_with_a_foreign_account_decodes_to_nothing() {
-        let alice = HybridPair::from_string("//Alice", None).expect("alice");
-        let call = encode_submit_proof_call(&proof());
-        let ext = signed_with(
-            &alice,
-            &call,
-            &extra_with(&[0x00], 0x01),
-            &additional_with_metadata_hash(),
-        );
-        assert!(decode_pending_proof(&with_bob_as_signer(ext, &alice), &CTX).is_none());
-    }
-
-    #[test]
-    fn an_unknown_metadata_hash_mode_decodes_to_nothing() {
-        let alice = HybridPair::from_string("//Alice", None).expect("alice");
-        let call = encode_submit_proof_call(&proof());
-        let ext = signed_with(
-            &alice,
-            &call,
-            &extra_with(&[0x00], 0x02),
-            &encode_additional(100, 1, &[0x11; 32]),
-        );
-        assert!(decode_pending_proof(&ext, &CTX).is_none());
-    }
-
-    #[test]
     fn a_signed_submit_proof_round_trips() {
         let (pair, ext) = signed(&encode_submit_proof_call(&proof()));
         let pending = decode_pending_proof(&ext, &CTX).expect("decodes");
         assert_eq!(pending.account, signer_account_bytes(&pair));
         assert_eq!(pending.proof, proof());
-        assert_eq!(pending.extrinsic_hash, extrinsic_hash(&ext));
+        // The pool hash is `blake2_256` of the whole blob, length prefix included.
+        assert_eq!(pending.extrinsic_hash, blake2_256(&ext));
     }
 
     #[test]
-    fn another_call_decodes_to_nothing() {
-        let (_, ext) = signed(&encode_register_miner_call());
-        assert!(decode_pending_proof(&ext, &CTX).is_none());
-    }
-
-    #[test]
-    fn an_unsigned_extrinsic_decodes_to_nothing() {
+    fn a_malformed_or_foreign_entry_decodes_to_nothing() {
         let call = encode_submit_proof_call(&proof());
-        let mut body = vec![0x04];
-        body.extend_from_slice(&call);
-        let mut ext = Compact(u32::try_from(body.len()).expect("len")).encode();
-        ext.extend_from_slice(&body);
-        assert!(decode_pending_proof(&ext, &CTX).is_none());
-    }
+        let (alice, ext) = signed(&call);
 
-    #[test]
-    fn trailing_bytes_decode_to_nothing() {
-        let mut call = encode_submit_proof_call(&proof());
-        call.push(0xff);
-        let (_, ext) = signed(&call);
-        assert!(decode_pending_proof(&ext, &CTX).is_none());
-    }
+        // The last byte belongs to `device_access_time_us`, so the bytes still
+        // decode and only the signature catches the change.
+        let mut tampered = ext.clone();
+        *tampered.last_mut().expect("byte") ^= 0x01;
 
-    #[test]
-    fn truncated_bytes_decode_to_nothing() {
-        let mut call = encode_submit_proof_call(&proof());
-        call.truncate(call.len() - 10);
-        let (_, ext) = signed(&call);
-        assert!(decode_pending_proof(&ext, &CTX).is_none());
+        let metadata_hash_ext = signed_with(
+            &alice,
+            &call,
+            &extra_with(&[0x00], 0x01),
+            &additional_with_metadata_hash(),
+        );
+
+        let mut unsigned = Compact(u32::try_from(call.len() + 1).expect("len")).encode();
+        unsigned.push(0x04);
+        unsigned.extend_from_slice(&call);
+
+        let mut trailing = call.clone();
+        trailing.push(0xff);
+        let mut truncated = call.clone();
+        truncated.truncate(call.len() - 10);
+
+        let other_chain = RuntimeTxContext {
+            genesis_hash: [0x22; 32],
+            ..CTX
+        };
+        let other_runtime = RuntimeTxContext {
+            spec_version: 101,
+            ..CTX
+        };
+
+        for (label, entry, ctx) in [
+            (
+                "compact length one short",
+                with_length_off_by(&ext, -1),
+                CTX,
+            ),
+            ("compact length one long", with_length_off_by(&ext, 1), CTX),
+            ("signed for another chain", ext.clone(), other_chain),
+            ("signed for another runtime", ext.clone(), other_runtime),
+            ("tampered call", tampered, CTX),
+            ("swapped account", with_bob_as_signer(ext, &alice), CTX),
+            (
+                "mortal era",
+                signed_with(
+                    &alice,
+                    &call,
+                    &extra_with(&[0x15, 0x00], 0x00),
+                    &encode_additional(100, 1, &[0x11; 32]),
+                ),
+                CTX,
+            ),
+            (
+                "metadata-hash entry with a foreign account",
+                with_bob_as_signer(metadata_hash_ext, &alice),
+                CTX,
+            ),
+            (
+                "unknown metadata-hash mode",
+                signed_with(
+                    &alice,
+                    &call,
+                    &extra_with(&[0x00], 0x02),
+                    &encode_additional(100, 1, &[0x11; 32]),
+                ),
+                CTX,
+            ),
+            ("another call", signed(&encode_register_miner_call()).1, CTX),
+            ("unsigned extrinsic", unsigned, CTX),
+            ("trailing call bytes", signed(&trailing).1, CTX),
+            ("truncated call bytes", signed(&truncated).1, CTX),
+        ] {
+            assert!(decode_pending_proof(&entry, &ctx).is_none(), "{label}");
+        }
     }
 }

@@ -264,22 +264,16 @@ mod tests {
     }
 
     #[test]
-    fn nonce_ref_without_topology_errors() {
+    fn invalid_entries_error_and_name_the_line() {
         let nonce_hex = "22".repeat(32);
         let text = format!(r#"{{"nonce":"{nonce_hex}"}}"#);
         let err = ListSource::parse(&text, None, 9_999_999).unwrap_err();
         assert_eq!(err, ListSourceError::MissingTopologyForNonceRef { line: 1 });
-    }
 
-    #[test]
-    fn ambiguous_entry_names_the_line() {
         let text = "{}\n{\"h_milli\":[1],\"nonce\":\"aa\"}";
         let err = ListSource::parse(text, None, 9_999_999).unwrap_err();
         assert_eq!(err, ListSourceError::AmbiguousEntry { line: 1 });
-    }
 
-    #[test]
-    fn malformed_json_names_the_line() {
         let text = "{\"h_milli\":[1]}\nnot json";
         let err = ListSource::parse(text, None, 9_999_999).unwrap_err();
         assert!(matches!(err, ListSourceError::Parse { line: 2, .. }));

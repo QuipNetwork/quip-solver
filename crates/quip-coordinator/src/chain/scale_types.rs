@@ -725,45 +725,52 @@ mod tests {
     }
 
     #[test]
-    fn require_set_values_accepts_nonempty_set() {
-        let spec = AllowedValueSpec::Set(vec![-1000, 0, 1000]);
-        assert_eq!(require_set_values(&spec).unwrap(), vec![-1000, 0, 1000]);
-    }
-
-    #[test]
-    fn require_set_values_rejects_empty_set() {
-        let spec = AllowedValueSpec::Set(Vec::new());
-        assert!(require_set_values(&spec).is_err());
-    }
-
-    #[test]
-    fn require_set_values_rejects_ranges() {
+    fn require_set_values_accepts_only_a_nonempty_set() {
+        assert_eq!(
+            require_set_values(&AllowedValueSpec::Set(vec![-1000, 0, 1000])).ok(),
+            Some(vec![-1000, 0, 1000])
+        );
         // Range specs sample differently on-chain; the coordinator must not
         // silently expand them into a Set (would diverge from consensus).
-        assert!(require_set_values(&AllowedValueSpec::IntegerRange { min: -2, max: 2 }).is_err());
-        assert!(require_set_values(&AllowedValueSpec::ContinuousRange {
-            min: -1000,
-            max: 1000
-        })
-        .is_err());
+        for (label, spec) in [
+            ("empty set", AllowedValueSpec::Set(Vec::new())),
+            (
+                "integer range",
+                AllowedValueSpec::IntegerRange { min: -2, max: 2 },
+            ),
+            (
+                "continuous range",
+                AllowedValueSpec::ContinuousRange {
+                    min: -1000,
+                    max: 1000,
+                },
+            ),
+        ] {
+            assert!(require_set_values(&spec).is_err(), "{label}");
+        }
+    }
+
+    fn assert_roundtrip<T: Encode + Decode + PartialEq + std::fmt::Debug>(label: &str, value: &T) {
+        let encoded = value.encode();
+        assert_eq!(
+            T::decode(&mut &encoded[..]).ok().as_ref(),
+            Some(value),
+            "{label}"
+        );
     }
 
     #[test]
-    fn quantum_proof_scale_roundtrip() {
-        let proof = QuantumProof {
-            topology_hash: H256::from([0xab; 32]),
-            nonce: U256::from(0x1234_5678u64),
-            salt: [0xcd; 32],
-            solutions: vec![vec![0b1010_0101], vec![0x00, 0xff]],
-            device_access_time_us: 987_654,
-        };
-        let encoded = proof.encode();
-        let decoded = QuantumProof::decode(&mut &encoded[..]).expect("decode");
-        assert_eq!(decoded, proof);
-    }
-
-    #[test]
-    fn mining_snapshot_scale_roundtrip() {
+    fn scale_types_roundtrip() {
+        assert_roundtrip(
+            "QuantumProof",
+            &QuantumProof {
+                topology_hash: H256::from([0xab; 32]),
+                nonce: U256::from(0x1234_5678u64),
+                salt: [0xcd; 32],
+                solutions: vec![vec![0b1010_0101], vec![0x00, 0xff]],
+                device_access_time_us: 987_654,
+            },
+        );
         let snap = MiningSnapshotScale {
             last_proof_block_hash: H256::from([1u8; 32]),
             difficulty: DifficultyConfig {
@@ -778,14 +785,7 @@ mod tests {
             allowed_j_values: AllowedValueSpec::Set(vec![-1000, 1000]),
             allowed_spin_values: AllowedValueSpec::Set(vec![-1000, 1000]),
         };
-        let encoded = Some(snap.clone()).encode();
-        let decoded: Option<MiningSnapshotScale> =
-            Decode::decode(&mut &encoded[..]).expect("decode");
-        assert_eq!(decoded, Some(snap));
-    }
-
-    #[test]
-    fn topology_meta_scale_roundtrip() {
+        assert_roundtrip("Option<MiningSnapshotScale>", &Some(snap));
         let meta = TopologyMetaScale {
             nodes: vec![0, 1, 2],
             edges: vec![(0, 1), (1, 2)],
@@ -794,9 +794,16 @@ mod tests {
             allowed_spin_values: AllowedValueSpec::Set(vec![-1000, 1000]),
             registered_at: 7,
         };
-        let encoded = Some(meta.clone()).encode();
-        let decoded: Option<TopologyMetaScale> = Decode::decode(&mut &encoded[..]).expect("decode");
-        assert_eq!(decoded, Some(meta));
+        assert_roundtrip("Option<TopologyMetaScale>", &Some(meta));
+        assert_roundtrip("JobOrderScale", &valid_job_order());
+        assert_roundtrip(
+            "CurveCScale",
+            &CurveCScale {
+                easy_milli: 700,
+                knee_milli: 725,
+                hard_milli: 750,
+            },
+        );
     }
 
     #[test]
@@ -822,15 +829,13 @@ mod tests {
         let mut expected = vec![MINER_REGISTRY_PALLET_INDEX, SET_DESCRIPTOR_CALL_INDEX, 1];
         expected.extend(v2.encode());
         assert_eq!(call, expected);
-        assert_eq!(call.first().copied(), Some(MINER_REGISTRY_PALLET_INDEX));
-        assert_eq!(call.get(1).copied(), Some(SET_DESCRIPTOR_CALL_INDEX));
-        assert_eq!(call.get(2).copied(), Some(1), "V2 variant index must be 1");
-        // Compact-len 1 + b'n', compact-len 1 + b'N', three Nones / empty,
-        // auto_mine=true, log_level=Info, one Cpu miner with three Nones,
-        // system_info=None, runtime=None.
+        // V2 variant index 1, then compact-len 1 + b'n', compact-len 1 + b'N',
+        // three Nones / empty, auto_mine=true, log_level=Info, one Cpu miner
+        // with three Nones, system_info=None, runtime=None.
         assert_eq!(
             call.get(2..),
-            Some([1, 4, b'n', 4, b'N', 0, 0, 0, 1, 1, 4, 0, 0, 0, 0, 0, 0].as_slice())
+            Some([1, 4, b'n', 4, b'N', 0, 0, 0, 1, 1, 4, 0, 0, 0, 0, 0, 0].as_slice()),
+            "V2 variant index must be 1"
         );
     }
 
@@ -864,9 +869,8 @@ mod tests {
     #[test]
     fn register_miner_call_is_the_two_dispatch_indices() {
         let call = encode_register_miner_call();
-        assert_eq!(call, [QUANTUM_POW_PALLET_INDEX, REGISTER_MINER_CALL_INDEX]);
         // The call takes no arguments, so anything longer is an encoding bug.
-        assert_eq!(call.len(), 2);
+        assert_eq!(call, [QUANTUM_POW_PALLET_INDEX, REGISTER_MINER_CALL_INDEX]);
         assert_ne!(REGISTER_MINER_CALL_INDEX, SUBMIT_PROOF_CALL_INDEX);
     }
 
@@ -936,40 +940,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn job_order_ising_params_roundtrip() {
-        let params = IsingParams {
-            nodes: vec![0, 1],
-            edges: vec![(0, 1)],
-            h_values: vec![0, 0],
-            j_values: vec![-1000],
-            min_energy_milli: Some(-500),
-            min_diversity_milli: Some(100),
-            min_solutions: Some(2),
-        };
-        let order = JobOrderScale {
-            spec_id: H256::repeat_byte(9),
-            proposer: [0x11; 32],
-            ising_params: params,
-            reward: 1_000_000_000_000,
-            mode: JobMode::Open,
-            resolution: RewardResolution::SingleBest,
-            timing: OrderTiming {
-                deadline_blocks: 100,
-                block_wait: 10,
-            },
-            delivery: ResultDelivery::OnChainOnly,
-            status: OrderStatus::Opened,
-            created_at: 42,
-            first_solution_at: None,
-            solution_count: 0,
-        };
-        let enc = order.encode();
-        let dec = JobOrderScale::decode(&mut &enc[..]).expect("decode");
-        assert_eq!(dec, order);
-    }
-
-    fn valid_job_order_bytes() -> Vec<u8> {
+    fn valid_job_order() -> JobOrderScale {
         JobOrderScale {
             spec_id: H256::repeat_byte(9),
             proposer: [0x11; 32],
@@ -995,58 +966,15 @@ mod tests {
             first_solution_at: None,
             solution_count: 0,
         }
-        .encode()
-    }
-
-    // The JobProposed decode (real.rs) parses untrusted on-chain bytes; it must
-    // reject malformed input with an error, never panic. Only a live #[ignore]
-    // devnet test exercised this before — these are the offline guards.
-
-    #[test]
-    fn job_order_decode_rejects_truncated_bytes() {
-        let enc = valid_job_order_bytes();
-        // Chop the tail: the later fields (timing/status/counts) can no longer
-        // be decoded.
-        #[expect(
-            clippy::indexing_slicing,
-            reason = "enc is a full JobOrderScale encode; len-4 is in bounds"
-        )]
-        let truncated = &enc[..enc.len() - 4];
-        assert!(JobOrderScale::decode(&mut &truncated[..]).is_err());
-    }
-
-    #[test]
-    fn job_order_decode_rejects_empty() {
-        assert!(JobOrderScale::decode(&mut &[][..]).is_err());
     }
 
     /// SCALE field order must match `pallet_quantum_pow::MinerInfo`. A reordered
     /// field decodes into the wrong number silently, so pin the byte layout.
-    #[test]
-    fn miner_info_decodes_the_pallet_field_order() {
-        let encoded = MinerInfoScale {
-            registered_at: 8_100,
-            deposit: 1_000_000_000_000,
-            proofs_submitted: 412,
-            proofs_won: 7,
-            rewards_earned: 70_000_000_000_000,
-        }
-        .encode();
-        assert_eq!(encoded.len(), 4 + 16 + 4 + 4 + 16);
-
-        let decoded = MinerInfoScale::decode(&mut &encoded[..]).unwrap();
-        assert_eq!(decoded.registered_at, 8_100);
-        assert_eq!(decoded.deposit, 1_000_000_000_000);
-        assert_eq!(decoded.proofs_submitted, 412);
-        assert_eq!(decoded.proofs_won, 7);
-        assert_eq!(decoded.rewards_earned, 70_000_000_000_000);
-    }
-
-    /// Fixture built from the pallet's declared layout directly, independent of
-    /// `MinerInfoScale`'s own field order. `miner_info_decodes_the_pallet_field_order`
-    /// above encodes and decodes with the same struct, so it round-trips even if
-    /// the struct's field order drifted from the pallet's — it cannot catch a
-    /// transposition. This test can, because the blob comes from
+    ///
+    /// The fixture is built from the pallet's declared layout directly,
+    /// independent of `MinerInfoScale`'s own field order. An encode-then-decode
+    /// round trip through the same struct cannot catch a transposition. This
+    /// test can, because the blob comes from
     /// `quip-validator/pallets/quantum-pow/src/types.rs`'s
     /// `MinerInfo<Balance, BlockNumber>` field order (`registered_at, deposit,
     /// proofs_submitted, proofs_won, rewards_earned`), not from the struct.
@@ -1067,11 +995,18 @@ mod tests {
         assert_eq!(decoded.proofs_submitted, 7);
         assert_eq!(decoded.proofs_won, 3);
         assert_eq!(decoded.rewards_earned, 70_000_000_000_000);
+        // The struct encodes back to the same pallet-layout bytes.
+        assert_eq!(decoded.encode(), blob);
     }
 
+    // The JobProposed decode (real.rs) parses untrusted on-chain bytes; it must
+    // reject malformed input with an error, never panic. Only a live #[ignore]
+    // devnet test exercised this before — these are the offline guards.
+
     #[test]
-    fn a_truncated_miner_info_blob_fails_to_decode() {
-        let encoded = MinerInfoScale {
+    fn truncated_blobs_fail_to_decode() {
+        let order = valid_job_order().encode();
+        let miner = MinerInfoScale {
             registered_at: 1,
             deposit: 2,
             proofs_submitted: 3,
@@ -1079,12 +1014,22 @@ mod tests {
             rewards_earned: 5,
         }
         .encode();
-        #[expect(
-            clippy::indexing_slicing,
-            reason = "encoded is a full MinerInfoScale encode; len-1 is in bounds"
-        )]
-        let short = &encoded[..encoded.len() - 1];
-        assert!(MinerInfoScale::decode(&mut &short[..]).is_err());
+        // Chopping the tail of a job order leaves the later fields
+        // (timing/status/counts) undecodable.
+        let order_short = order.get(..order.len() - 4).expect("in bounds");
+        let miner_short = miner.get(..miner.len() - 1).expect("in bounds");
+        assert!(
+            JobOrderScale::decode(&mut &order_short[..]).is_err(),
+            "job order missing four bytes"
+        );
+        assert!(
+            JobOrderScale::decode(&mut &[][..]).is_err(),
+            "empty job order"
+        );
+        assert!(
+            MinerInfoScale::decode(&mut &miner_short[..]).is_err(),
+            "miner info missing one byte"
+        );
     }
 
     #[test]
@@ -1094,7 +1039,7 @@ mod tests {
         // the variable ising_params). A tag past the variant count must error,
         // not panic. Scan for the first byte whose flip yields an out-of-range
         // enum tag by fuzzing each position and asserting no decode panics.
-        let enc = valid_job_order_bytes();
+        let enc = valid_job_order().encode();
         for i in 0..enc.len() {
             let mut bad = enc.clone();
             #[expect(

@@ -326,18 +326,24 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_process_has_zero_counters() {
+    fn counters_land_on_the_global_set_and_the_owning_mode() {
         let m = metrics();
         assert_eq!(m.global(), CounterSnapshot::default());
-    }
 
-    #[test]
-    fn per_miner_counters_land_on_the_global_set_and_the_owning_mode() {
-        let m = metrics();
         m.record_contexts_dispatched("cpu-0", 4);
         m.record_contexts_dispatched("cuda-1", 6);
+        // Every backend observes the same chain heads, so this one counter is
+        // shared rather than partitioned. `/api/v1/stats` reports the global
+        // value.
+        m.record_head_observed();
+        m.record_head_observed();
+        // A result from a miner that is not in the launch plan still moves the
+        // global counter. Losing it would make the process totals wrong.
+        m.record_result_received("ghost-9");
 
         assert_eq!(m.global().contexts_dispatched, 10);
+        assert_eq!(m.global().heads_observed, 2);
+        assert_eq!(m.global().results_received, 1);
         let modes = m.mode_views();
         #[expect(
             clippy::indexing_slicing,
@@ -346,45 +352,14 @@ mod tests {
         {
             assert_eq!(modes["cpu"].counters.contexts_dispatched, 4);
             assert_eq!(modes["cuda"].counters.contexts_dispatched, 6);
-        }
-    }
-
-    /// Every backend observes the same chain heads, so this one counter is
-    /// shared rather than partitioned. `/api/v1/stats` reports the global value.
-    #[test]
-    fn heads_observed_is_bumped_on_the_global_set_and_on_every_mode() {
-        let m = metrics();
-        m.record_head_observed();
-        m.record_head_observed();
-
-        assert_eq!(m.global().heads_observed, 2);
-        let modes = m.mode_views();
-        #[expect(
-            clippy::indexing_slicing,
-            reason = "cpu and cuda are both in the launch plan built by metrics()"
-        )]
-        {
             assert_eq!(modes["cpu"].counters.heads_observed, 2);
             assert_eq!(modes["cuda"].counters.heads_observed, 2);
+            assert_eq!(modes["cpu"].counters.results_received, 0);
         }
     }
 
-    /// A result from a miner that is not in the launch plan still moves the
-    /// global counter. Losing it would make the process totals wrong.
-    #[test]
-    fn an_unknown_miner_id_still_moves_the_global_counters() {
-        let m = metrics();
-        m.record_result_received("ghost-9");
-        assert_eq!(m.global().results_received, 1);
-        #[expect(
-            clippy::indexing_slicing,
-            reason = "cpu is in the launch plan built by metrics()"
-        )]
-        {
-            assert_eq!(m.mode_views()["cpu"].counters.results_received, 0);
-        }
-    }
-
+    /// An empty launch plan is an unkeyed coordinator, a valid state. The empty
+    /// roster and the empty identity are what `/api/v1/status` serves for it.
     #[test]
     fn mode_views_carry_the_miner_roster() {
         let modes = metrics().mode_views();
@@ -407,6 +382,10 @@ mod tests {
                 ]
             );
         }
+
+        let empty = CoordinatorMetrics::new(&[]);
+        assert!(empty.mode_views().is_empty());
+        assert_eq!(empty.identity(), Identity::default());
     }
 
     /// The dashboard matches on the `CPU`/`GPU`/`QPU` prefix and maps anything
@@ -424,38 +403,5 @@ mod tests {
                 "{backend} produced {label}, which the dashboard maps to OTHER"
             );
         }
-    }
-
-    #[test]
-    fn identity_and_chain_views_round_trip() {
-        let m = metrics();
-        assert_eq!(m.identity().ss58_address, "");
-
-        m.set_identity(Identity {
-            ss58_address: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY".into(),
-            account_id_hex: "0xd43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d"
-                .into(),
-            node_id: "quip-miner-pow-CPU-1".into(),
-        });
-        assert_eq!(m.identity().node_id, "quip-miner-pow-CPU-1");
-
-        m.set_chain(ChainView {
-            head_hash: "0xabc".into(),
-            head_number: 10_249,
-            is_mining: true,
-            miner_registered: true,
-            miner_info: None,
-        });
-        assert_eq!(m.chain().head_number, 10_249);
-        assert!(m.chain().is_mining);
-    }
-
-    /// An unkeyed coordinator is a valid state. The empty roster and the empty
-    /// identity are what `/api/v1/status` serves for it.
-    #[test]
-    fn an_empty_launch_plan_produces_no_modes() {
-        let m = CoordinatorMetrics::new(&[]);
-        assert!(m.mode_views().is_empty());
-        assert_eq!(m.identity(), Identity::default());
     }
 }

@@ -296,17 +296,15 @@ mod tests {
     }
 
     #[test]
-    fn a_proof_of_work_candidate_from_another_generation_is_refused() {
+    fn only_proof_of_work_candidates_are_matched_to_the_generation() {
         let mut stash = stash_with(Some(model()), 0, 3);
         let mut stale = cand(1, -60_000);
         stale.generation = 2;
         assert!(!stash.insert(stale));
         assert!(stash.is_empty());
         assert!(stash.insert(cand(2, -60_000)), "the current generation");
-    }
 
-    #[test]
-    fn a_mempool_candidate_has_no_generation_to_match() {
+        // A mempool candidate has no generation to match.
         let mut stash = stash_with(Some(model()), 0, 3);
         let mut mempool = cand(1, -60_000);
         mempool.generation = 0;
@@ -351,28 +349,26 @@ mod tests {
     }
 
     #[test]
-    fn due_at_returns_best_arrived_unsubmitted() {
+    fn due_candidates_need_arrival_and_improvement() {
         let mut s = stash_with(Some(model()), 100, 4);
         let _ = s.insert(cand(1, -49_000)); // viable at block 110
         let _ = s.insert(cand(2, -47_000)); // viable at block 130
-        assert!(s.due_at(109).is_none());
-        assert_eq!(s.due_at(110).map(job_byte), Some(1));
-        // At 135 both are due; cand 1 (-49000) is the stronger one.
-        assert_eq!(s.due_at(135).map(job_byte), Some(1));
-        s.mark_submitted(&[1]);
-        assert_eq!(s.due_at(135).map(job_byte), Some(2));
-    }
 
-    #[test]
-    fn due_improving_requires_arrival_and_improvement() {
-        let mut s = stash_with(Some(model()), 100, 4);
-        let _ = s.insert(cand(1, -49_000)); // viable at block 110
+        // `due_improving` requires arrival and improvement.
         assert!(s.due_improving(109, None).is_none());
         assert_eq!(s.due_improving(110, None).map(job_byte), Some(1));
         // Current best already stronger → nothing improves.
         assert!(s.due_improving(110, Some(-49_500)).is_none());
         // Current best weaker → submit.
         assert_eq!(s.due_improving(110, Some(-48_000)).map(job_byte), Some(1));
+
+        // `due_at` returns the best arrived, unsubmitted candidate.
+        assert!(s.due_at(109).is_none());
+        assert_eq!(s.due_at(110).map(job_byte), Some(1));
+        // At 135 both are due; cand 1 (-49000) is the stronger one.
+        assert_eq!(s.due_at(135).map(job_byte), Some(1));
+        s.mark_submitted(&[1]);
+        assert_eq!(s.due_at(135).map(job_byte), Some(2));
     }
 
     #[test]

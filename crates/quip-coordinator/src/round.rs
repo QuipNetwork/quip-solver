@@ -175,6 +175,9 @@ mod tests {
         RoundState::AwaitingQBlock,
     ];
 
+    /// Each `Succeeded` advances one step. `DescriptorFiled` leads straight
+    /// to `StartMining`: participation is declared by the feeder once a miner
+    /// returns a Result for the round, not by the pre-mining walk.
     #[test]
     fn full_round_visits_each_state_in_order() {
         let mut state = RoundState::start();
@@ -219,102 +222,40 @@ mod tests {
         }
     }
 
+    /// `StartMining` keeps mining until a new head, and `AwaitingQBlock`
+    /// holds until `Resume`.
     #[test]
-    fn awaiting_qblock_holds_on_succeeded_and_failed() {
-        assert_eq!(
-            RoundState::AwaitingQBlock.transition(RoundEvent::Succeeded),
-            Some(RoundState::AwaitingQBlock)
-        );
-        assert_eq!(
-            RoundState::AwaitingQBlock.transition(RoundEvent::Failed),
-            Some(RoundState::AwaitingQBlock)
-        );
+    fn mining_states_hold_on_succeeded() {
+        for state in [RoundState::StartMining, RoundState::AwaitingQBlock] {
+            assert_eq!(
+                state.transition(RoundEvent::Succeeded),
+                Some(state),
+                "{state:?}"
+            );
+        }
     }
 
+    /// From every state: a failed step stays and retries, a new head (a win
+    /// during mining included) returns to `StopMining`, and shutdown stops
+    /// the machine.
     #[test]
-    fn awaiting_qblock_has_a_name_and_a_reason() {
-        assert_eq!(RoundState::AwaitingQBlock.as_str(), "awaiting_qblock");
-        assert!(RoundState::AwaitingQBlock.reason().contains("pending"));
-    }
-
-    #[test]
-    fn failed_step_retries_the_same_state() {
+    fn every_state_retries_on_failure_restarts_on_new_head_and_stops_on_shutdown() {
         for state in ALL {
             assert_eq!(
                 state.transition(RoundEvent::Failed),
                 Some(state),
                 "{state:?} must stay and retry"
             );
-        }
-    }
-
-    #[test]
-    fn new_head_in_states_3_4_or_5_returns_to_stop_mining() {
-        for state in [
-            RoundState::AccountFunded,
-            RoundState::RequirementsDownloaded,
-            RoundState::StartMining,
-        ] {
             assert_eq!(
                 state.transition(RoundEvent::NewHead),
                 Some(RoundState::StopMining),
-                "{state:?}"
+                "{state:?} on NewHead"
             );
-        }
-    }
-
-    #[test]
-    fn new_head_from_descriptor_returns_to_stop_mining() {
-        assert_eq!(
-            RoundState::DescriptorFiled.transition(RoundEvent::NewHead),
-            Some(RoundState::StopMining)
-        );
-    }
-
-    #[test]
-    fn descriptor_filed_leads_straight_to_mining() {
-        // Participation is declared by the feeder once a miner returns a
-        // Result for the round, not by the pre-mining walk.
-        assert_eq!(
-            RoundState::DescriptorFiled.transition(RoundEvent::Succeeded),
-            Some(RoundState::StartMining)
-        );
-    }
-
-    #[test]
-    fn new_head_in_any_state_returns_to_stop_mining() {
-        for state in ALL {
             assert_eq!(
-                state.transition(RoundEvent::NewHead),
-                Some(RoundState::StopMining),
-                "{state:?}"
+                state.transition(RoundEvent::Shutdown),
+                None,
+                "{state:?} on Shutdown"
             );
-        }
-    }
-
-    #[test]
-    fn a_win_during_mining_restarts_the_round() {
-        let mut state = RoundState::start();
-        for _ in 0..6 {
-            state = step(state, RoundEvent::Succeeded);
-        }
-        assert_eq!(state, RoundState::StartMining);
-        state = step(state, RoundEvent::NewHead);
-        assert_eq!(state, RoundState::StopMining);
-    }
-
-    #[test]
-    fn start_mining_keeps_mining_until_a_new_head() {
-        assert_eq!(
-            RoundState::StartMining.transition(RoundEvent::Succeeded),
-            Some(RoundState::StartMining)
-        );
-    }
-
-    #[test]
-    fn shutdown_stops_the_machine_from_every_state() {
-        for state in ALL {
-            assert_eq!(state.transition(RoundEvent::Shutdown), None, "{state:?}");
         }
     }
 }

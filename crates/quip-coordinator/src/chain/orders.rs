@@ -63,16 +63,13 @@ mod tests {
     }
 
     #[test]
-    fn a_key_that_is_too_short_yields_none() {
-        assert_eq!(order_id_from_key(&[0u8; 8]), None);
-    }
-
-    #[test]
-    fn a_key_from_a_different_map_yields_none() {
+    fn a_key_that_is_not_an_order_key_yields_none() {
         // A key whose prefix does not match must not be misread as an order.
-        let mut key = vec![0xAAu8; 32];
-        key.extend_from_slice(&[0u8; 16]);
-        key.extend_from_slice(&7u64.to_le_bytes());
-        assert_eq!(order_id_from_key(&key), None);
+        let mut foreign = vec![0xAAu8; 32];
+        foreign.extend_from_slice(&[0u8; 16]);
+        foreign.extend_from_slice(&7u64.to_le_bytes());
+        for (label, key) in [("too short", vec![0u8; 8]), ("different map", foreign)] {
+            assert_eq!(order_id_from_key(&key), None, "{label}");
+        }
     }
 }

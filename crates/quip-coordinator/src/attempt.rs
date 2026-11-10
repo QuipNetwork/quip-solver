@@ -312,15 +312,15 @@ mod tests {
         );
         assert_eq!(v.get("n_valid"), Some(&serde_json::json!(6)));
         assert_eq!(v.get("submitted"), Some(&serde_json::json!(true)));
-    }
 
-    #[test]
-    fn mempool_record_hex_encodes_order_id() {
+        // A mempool record hex-encodes its order id.
         let r = rec(Some(1), &[0x09], false);
         assert_eq!(r.order_id, "abcd");
         assert!(!r.is_pow);
     }
 
+    /// Records append as JSONL under their qBlock directory, and a record
+    /// without a qBlock lands under `pending`.
     #[test]
     fn append_writes_jsonl_under_qblock_dir() {
         let tmp = tempfile::tempdir().unwrap();
@@ -336,11 +336,7 @@ mod tests {
         for line in lines {
             let _: serde_json::Value = serde_json::from_str(line).unwrap();
         }
-    }
 
-    #[test]
-    fn none_qblock_lands_under_pending() {
-        let tmp = tempfile::tempdir().unwrap();
         append_record(tmp.path(), &rec(None, &[0x01], true)).unwrap();
         assert!(tmp.path().join("pending").join("attempts.jsonl").exists());
     }

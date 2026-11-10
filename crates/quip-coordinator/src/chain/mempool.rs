@@ -81,13 +81,48 @@ mod tests {
         }
     }
 
+    /// A bid admits the solver when either filter names it. An empty or absent
+    /// filter names nobody, so it never admits on its own.
     #[test]
-    fn excluding_bid_is_ineligible() {
-        let bid = order(JobMode::Bid {
-            miners: Some(vec![[2; 32]]),
-            miner_types: Some(vec![1]),
-        });
-        assert!(!bid.is_eligible_for(&[1; 32], SolverType::Cpu));
+    fn a_bid_admits_the_solver_only_through_a_matching_filter() {
+        let me = [1; 32];
+        let other = [2; 32];
+        for (label, miners, miner_types, eligible) in [
+            (
+                "neither filter matches",
+                Some(vec![other]),
+                Some(vec![1]),
+                false,
+            ),
+            ("account matches", Some(vec![me]), Some(vec![1]), true),
+            ("type matches", Some(vec![other]), Some(vec![0]), true),
+            ("both absent", None, None, false),
+            ("empty miners, absent types", Some(Vec::new()), None, false),
+            ("absent miners, empty types", None, Some(Vec::new()), false),
+            ("both empty", Some(Vec::new()), Some(Vec::new()), false),
+            (
+                "account matches, empty types",
+                Some(vec![me]),
+                Some(Vec::new()),
+                true,
+            ),
+            (
+                "empty miners, type matches",
+                Some(Vec::new()),
+                Some(vec![0]),
+                true,
+            ),
+        ] {
+            let bid = order(JobMode::Bid {
+                miners,
+                miner_types,
+            });
+            assert_eq!(
+                bid.is_eligible_for(&me, SolverType::Cpu),
+                eligible,
+                "{label}"
+            );
+        }
     }
 
     #[test]
@@ -104,21 +139,6 @@ mod tests {
         ] {
             assert!(open.is_eligible_for(&[1; 32], solver_type));
         }
-    }
-
-    #[test]
-    fn either_bid_filter_can_admit_the_solver() {
-        let by_account = order(JobMode::Bid {
-            miners: Some(vec![[1; 32]]),
-            miner_types: Some(vec![1]),
-        });
-        assert!(by_account.is_eligible_for(&[1; 32], SolverType::Cpu));
-
-        let by_type = order(JobMode::Bid {
-            miners: Some(vec![[2; 32]]),
-            miner_types: Some(vec![0]),
-        });
-        assert!(by_type.is_eligible_for(&[1; 32], SolverType::Cpu));
     }
 
     #[test]
@@ -141,36 +161,9 @@ mod tests {
                 assert_eq!(
                     bid.is_eligible_for(&[1; 32], candidate_type),
                     candidate_type == allowed_type,
+                    "tag {allowed_tag} against {candidate_type:?}",
                 );
             }
         }
-    }
-
-    #[test]
-    fn empty_and_absent_bid_filters_admit_nobody() {
-        for (miners, miner_types) in [
-            (None, None),
-            (Some(Vec::new()), None),
-            (None, Some(Vec::new())),
-            (Some(Vec::new()), Some(Vec::new())),
-        ] {
-            let bid = order(JobMode::Bid {
-                miners,
-                miner_types,
-            });
-            assert!(!bid.is_eligible_for(&[1; 32], SolverType::Cpu));
-        }
-
-        let by_account = order(JobMode::Bid {
-            miners: Some(vec![[1; 32]]),
-            miner_types: Some(Vec::new()),
-        });
-        assert!(by_account.is_eligible_for(&[1; 32], SolverType::Cpu));
-
-        let by_type = order(JobMode::Bid {
-            miners: Some(Vec::new()),
-            miner_types: Some(vec![0]),
-        });
-        assert!(by_type.is_eligible_for(&[1; 32], SolverType::Cpu));
     }
 }

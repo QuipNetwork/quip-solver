@@ -871,20 +871,15 @@ mod tests {
     use super::*;
 
     /// The drive counterpart of the `[cuda.N]` bug: without `--device`, a
-    /// drive run on a multi-GPU host silently lands on GPU 0.
+    /// drive run on a multi-GPU host silently lands on GPU 0. Backends whose
+    /// CLI has no `--device` must not be sent one, so the absent flag has to
+    /// stay absent rather than defaulting to 0.
     #[test]
     fn drive_device_flag_reaches_the_launch_entry() {
         let mut args = drive_args(DriveSourceKind::Random);
+        assert_eq!(drive_entry(&args).device, None);
         args.device = Some(1);
         assert_eq!(drive_entry(&args).device, Some(1));
-    }
-
-    /// Backends whose CLI has no `--device` must not be sent one, so the
-    /// absent flag has to stay absent rather than defaulting to 0.
-    #[test]
-    fn drive_without_the_flag_forwards_no_device() {
-        let args = drive_args(DriveSourceKind::Random);
-        assert_eq!(drive_entry(&args).device, None);
     }
 
     fn drive_args(source: DriveSourceKind) -> DriveArgs {
@@ -914,7 +909,7 @@ mod tests {
     }
 
     #[test]
-    fn drive_topology_selectors_conflict_in_clap() {
+    fn drive_topology_selectors_conflict_and_chain_selector_parses() {
         for selectors in [
             ["--topology", "missing.json", "--topology-preset", "aglais"],
             [
@@ -945,10 +940,7 @@ mod tests {
             .expect_err("expected conflicting topology selectors");
             assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
         }
-    }
 
-    #[test]
-    fn drive_chain_selector_parses_for_each_source() {
         for source in ["random", "lease", "list"] {
             let cli = Cli::try_parse_from([
                 "quip-coordinator",
@@ -971,7 +963,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drive_random_and_lease_keep_the_default_preset() {
+    async fn drive_resolves_default_presets_named_presets_and_files() {
         for source in [DriveSourceKind::Random, DriveSourceKind::Lease] {
             let args = drive_args(source);
             let spec = resolve_topology(&args)
@@ -982,19 +974,13 @@ mod tests {
             assert_eq!(spec.topology.edge_pairs().len(), 41_515);
             assert_eq!(spec.allowed_h_milli, vec![-1000, 0, 1000]);
         }
-    }
 
-    #[tokio::test]
-    async fn drive_list_defaults_to_no_topology() {
         let args = drive_args(DriveSourceKind::List);
         assert!(resolve_topology(&args)
             .await
             .expect("resolve list topology")
             .is_none());
-    }
 
-    #[tokio::test]
-    async fn drive_named_presets_and_files_resolve() {
         let mut args = drive_args(DriveSourceKind::Random);
         args.topology_preset = Some("aglais".into());
         let spec = resolve_topology(&args)
@@ -1192,7 +1178,7 @@ mod tests {
     }
 
     #[test]
-    fn qui_1540_seed_chain_accepts_signed_milli_values() {
+    fn qui_1540_seed_chain_accepts_signed_milli_values_and_keeps_the_default() {
         for (value, expected_milli) in [
             ("-2500000", -2_500_000),
             ("-1", -1),
@@ -1211,6 +1197,16 @@ mod tests {
                 assert_eq!(args.max_energy_milli, expected_milli);
             }
         }
+
+        let cli = Cli::try_parse_from(["quip-coordinator", "seed-chain", "--sudo-key", "//Alice"])
+            .expect("default seed-chain arguments parse");
+        let Some(Command::SeedChain(args)) = cli.command else {
+            panic!("expected seed-chain subcommand");
+        };
+        assert_eq!(
+            args.max_energy_milli,
+            DEFAULT_SEED_DIFFICULTY.max_energy_milli
+        );
     }
 
     #[test]
@@ -1268,18 +1264,5 @@ mod tests {
             "--max-energy-milli=-0.5",
         ])
         .is_err());
-    }
-
-    #[test]
-    fn qui_1540_seed_chain_keeps_default_energy() {
-        let cli = Cli::try_parse_from(["quip-coordinator", "seed-chain", "--sudo-key", "//Alice"])
-            .expect("default seed-chain arguments parse");
-        let Some(Command::SeedChain(args)) = cli.command else {
-            panic!("expected seed-chain subcommand");
-        };
-        assert_eq!(
-            args.max_energy_milli,
-            DEFAULT_SEED_DIFFICULTY.max_energy_milli
-        );
     }
 }
