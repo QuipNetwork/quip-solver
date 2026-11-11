@@ -166,6 +166,7 @@ impl TopologySpec {
             min_diversity_milli: self.min_diversity_milli,
             block_number: 0,
             spec_version: 0,
+            target_proof_blocks: crate::decay::TARGET_PROOF_BLOCKS,
             family: None,
         }
     }

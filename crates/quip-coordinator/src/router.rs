@@ -939,6 +939,7 @@ mod tests {
             min_diversity_milli: 0,
             block_number: 1,
             spec_version: 117,
+            target_proof_blocks: crate::decay::TARGET_PROOF_BLOCKS,
             family: None,
         };
         crate::lease::build_lease_job(&snap, [0; 32], start, 4, 1)

@@ -79,14 +79,15 @@ impl WinStash {
         self.candidates.clear();
     }
 
-    /// Swap the decay rule in place, keeping every candidate. Returns whether
-    /// the rule changed. A runtime upgrade takes effect at one block, so the
-    /// feeder calls this on every poll with the rule the head's
-    /// `spec_version` implies.
-    pub fn set_algorithm(&mut self, algorithm: DecayAlgorithm) -> bool {
+    /// Swap the decay rule and round-length target in place, keeping every
+    /// candidate. Returns whether either changed. A runtime upgrade or a
+    /// council `set_target_proof_blocks` takes effect at one block, so the
+    /// feeder calls this on every poll with the head's rule and target.
+    pub fn set_rule(&mut self, algorithm: DecayAlgorithm, target_proof_blocks: u64) -> bool {
         match self.model.as_mut() {
-            Some(m) if m.algorithm != algorithm => {
+            Some(m) if m.algorithm != algorithm || m.target_proof_blocks != target_proof_blocks => {
                 m.algorithm = algorithm;
+                m.target_proof_blocks = target_proof_blocks;
                 true
             }
             _ => false,
@@ -183,6 +184,7 @@ impl WinStash {
             last_proof_block: self.last_proof_block,
             epoch_length: self.model.as_ref().map_or(0, |m| m.epoch_length),
             decay_algorithm: self.model.as_ref().map_or("none", |m| m.algorithm.name()),
+            target_proof_blocks: self.model.as_ref().map_or(0, |m| m.target_proof_blocks),
             candidates: self
                 .candidates
                 .iter()
@@ -211,6 +213,8 @@ pub struct StashSummary {
     /// Decay rule the projection ran under: `stepwise`, `continuous`,
     /// `gated`, or `none` without a model.
     pub decay_algorithm: &'static str,
+    /// Round-length target the gated rule waits out, or 0 without a model.
+    pub target_proof_blocks: u64,
     /// Top-K candidates currently held.
     pub candidates: Vec<CandidateSummary>,
 }
@@ -270,6 +274,7 @@ mod tests {
             }),
             epoch_length: 10,
             algorithm: DecayAlgorithm::Stepwise,
+            target_proof_blocks: crate::decay::TARGET_PROOF_BLOCKS,
         }
     }
 
@@ -372,13 +377,13 @@ mod tests {
     }
 
     #[test]
-    fn set_algorithm_keeps_candidates_and_moves_viability_earlier() {
+    fn set_rule_keeps_candidates_and_reprojects_them() {
         let mut s = stash_with(Some(model()), 100, 4);
         assert!(s.insert(cand(1, -49_500)));
         assert_eq!(s.viability_block(-49_500), Some(110));
         assert_eq!(s.algorithm(), Some(DecayAlgorithm::Stepwise));
 
-        assert!(s.set_algorithm(DecayAlgorithm::Continuous));
+        assert!(s.set_rule(DecayAlgorithm::Continuous, 100));
         assert_eq!(s.algorithm(), Some(DecayAlgorithm::Continuous));
         let block = s.viability_block(-49_500).unwrap_or(u64::MAX);
         assert!(
@@ -388,10 +393,19 @@ mod tests {
         assert_eq!(s.candidates.len(), 1);
         assert_eq!(s.summary().decay_algorithm, "continuous");
 
-        // Same algorithm again is not a change.
-        assert!(!s.set_algorithm(DecayAlgorithm::Continuous));
+        // Same rule and target again is not a change.
+        assert!(!s.set_rule(DecayAlgorithm::Continuous, 100));
         // No projection → nothing to switch.
-        assert!(!stash_with(None, 100, 4).set_algorithm(DecayAlgorithm::Continuous));
+        assert!(!stash_with(None, 100, 4).set_rule(DecayAlgorithm::Continuous, 100));
+
+        // Runtime 120: under the gated rule, a council target of 150 instead
+        // of 100 holds the candidate 50 blocks longer.
+        assert!(s.set_rule(DecayAlgorithm::Gated, 100));
+        let at_default = s.viability_block(-49_500).unwrap_or(u64::MAX);
+        assert!(s.set_rule(DecayAlgorithm::Gated, 150));
+        assert_eq!(s.viability_block(-49_500), Some(at_default + 50));
+        assert_eq!(s.summary().target_proof_blocks, 150);
+        assert_eq!(s.candidates.len(), 1);
     }
 
     #[test]
@@ -404,5 +418,6 @@ mod tests {
         let summary = s.summary();
         assert_eq!(summary.epoch_length, 0);
         assert_eq!(summary.decay_algorithm, "none");
+        assert_eq!(summary.target_proof_blocks, 0);
     }
 }

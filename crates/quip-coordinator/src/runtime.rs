@@ -833,6 +833,7 @@ pub async fn feeder_loop<C>(
                                 curve: Some(curve),
                                 epoch_length: dp.epoch_length,
                                 algorithm: DecayAlgorithm::for_spec_version(snap.spec_version),
+                                target_proof_blocks: snap.target_proof_blocks,
                             }),
                             dp.last_proof_block,
                         )
@@ -852,6 +853,7 @@ pub async fn feeder_loop<C>(
                     block = snap.block_number,
                     spec_version = snap.spec_version,
                     decay_algorithm = DecayAlgorithm::for_spec_version(snap.spec_version).name(),
+                    target_proof_blocks = snap.target_proof_blocks,
                     cancelled_jobs,
                     miners_told,
                     topology = %crate::chain::extrinsic::hex_encode(&snap.topology_hash),
@@ -987,16 +989,18 @@ pub async fn feeder_loop<C>(
             // without this, `st.target` would stay pinned at the last reseed's
             // (harder) gate and under-accept solutions viable at the eased one.
             st.target = Some(target);
-            // A runtime upgrade takes effect at one block. The decay rule
-            // follows the spec version of the head, so the projection switches
-            // on the poll that reports it, with every stashed candidate kept.
+            // A runtime upgrade or a council target change takes effect at
+            // one block. The decay rule follows the spec version of the head
+            // and the gate follows its target, so the projection switches on
+            // the poll that reports either, with every stashed candidate kept.
             let algorithm = DecayAlgorithm::for_spec_version(snap.spec_version);
-            if st.stash.set_algorithm(algorithm) {
+            if st.stash.set_rule(algorithm, snap.target_proof_blocks) {
                 tracing::info!(
                     spec_version = snap.spec_version,
                     block = snap.block_number,
                     decay_algorithm = algorithm.name(),
-                    "runtime upgraded; decay projection switched"
+                    target_proof_blocks = snap.target_proof_blocks,
+                    "decay rule or target changed; projection switched"
                 );
             }
             // Per-miner drain/staging stats for the heartbeat, collected here

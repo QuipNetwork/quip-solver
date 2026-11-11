@@ -36,6 +36,11 @@ pub struct MiningSnapshot {
     /// Runtime `specVersion` at the snapshot block. Selects the decay rule
     /// the coordinator mirrors (`DecayAlgorithm::for_spec_version`).
     pub spec_version: u32,
+    /// Round-length target that gates difficulty decay:
+    /// `QuantumPow::TargetProofBlocksOverride` at the snapshot block, or the
+    /// runtime default [`crate::decay::TARGET_PROOF_BLOCKS`] when unset.
+    /// Runtime 119 has no override, so the read always falls back there.
+    pub target_proof_blocks: u64,
     /// Problem family bound to this challenge. `None` keeps the legacy draw.
     /// Set once when the snapshot is built. A change is a new challenge.
     pub family: Option<crate::lease::ChallengeFamily>,
@@ -160,6 +165,7 @@ mod tests {
             min_diversity_milli: 200,
             block_number: 42,
             spec_version: 117,
+            target_proof_blocks: crate::decay::TARGET_PROOF_BLOCKS,
             family: None,
         }
     }

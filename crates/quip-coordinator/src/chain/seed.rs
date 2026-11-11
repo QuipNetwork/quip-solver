@@ -8,11 +8,14 @@
 //! those two calls are the whole sequence.
 //!
 //! This module encodes the calls and drives the two-call seed sequence.
+//!
+//! Runtime 120 removed `pallet-sudo`, so the sequence only runs on runtime 119
+//! and earlier. On 120 and later `seed_chain` stops before it signs anything.
 
 use super::real::{Confirmation, RealChainClient, SignedCallOutcome};
 use super::scale_types::{
     DifficultyConfig, MinerKind, QUANTUM_POW_PALLET_INDEX, REGISTER_TOPOLOGY_CALL_INDEX,
-    SET_DIFFICULTY_CALL_INDEX, SUDO_CALL_INDEX, SUDO_PALLET_INDEX,
+    SET_DIFFICULTY_CALL_INDEX, SUDO_CALL_INDEX, SUDO_PALLET_INDEX, SUDO_REMOVED_SPEC_VERSION,
 };
 use super::ChainError;
 use crate::drive::TopologySpec;
@@ -148,21 +151,26 @@ pub struct SeedReport {
 
 /// Register `params.topology` as the chain default and set its difficulty.
 ///
+/// Refuses to run on runtime 120 and later, which have no `Sudo` pallet.
 /// Refuses to run when `DefaultTopology` is already set. The pallet writes that
 /// value only when it is empty (`register_topology`), and a second registration
 /// would land a topology that no miner selects, so a chain that is already
 /// seeded has to be wiped rather than re-seeded.
 ///
 /// # Errors
-/// Returns an error when the validator is unreachable, when a topology is
-/// already registered, when either call fails to dispatch, or when the hash the
-/// chain stored does not match the hash computed locally.
+/// Returns an error when the validator is unreachable, when the runtime has
+/// no `Sudo` pallet, when a topology is already registered, when either call
+/// fails to dispatch, or when the hash the chain stored does not match the hash
+/// computed locally.
 pub async fn seed_chain(params: SeedParams) -> Result<SeedReport, ChainError> {
     let client = RealChainClient::new(
         vec![params.validator.clone()],
         params.sudo_key.clone(),
         MinerKind::Cpu,
     );
+
+    let spec_version = super::real::parse_spec_version(&client.runtime_version_raw().await?)?;
+    require_sudo(spec_version)?;
 
     if let Some(existing) = client.default_topology().await? {
         return Err(ChainError::Submit(format!(
@@ -219,6 +227,18 @@ pub async fn seed_chain(params: SeedParams) -> Result<SeedReport, ChainError> {
     })
 }
 
+/// Stop when the runtime at `spec_version` has no `Sudo` pallet.
+fn require_sudo(spec_version: u32) -> Result<(), ChainError> {
+    if spec_version >= SUDO_REMOVED_SPEC_VERSION {
+        return Err(ChainError::Submit(format!(
+            "runtime {spec_version} has no Sudo pallet (removed at \
+             {SUDO_REMOVED_SPEC_VERSION}); seed this chain through a council \
+             motion that calls ValidatorAdmission::dispatch_as_root"
+        )));
+    }
+    Ok(())
+}
+
 /// Submit one call and return the block that included it.
 async fn dispatch(
     client: &RealChainClient,
@@ -270,6 +290,14 @@ mod tests {
 
     /// The call is the sudo and inner prefixes, then the arguments as the
     /// pallet tuple, with each allowed-value list as the `Set` variant.
+    #[test]
+    fn seeding_stops_on_a_runtime_without_sudo() {
+        assert!(require_sudo(119).is_ok());
+        let err = require_sudo(120).unwrap_err().to_string();
+        assert!(err.contains("runtime 120 has no Sudo pallet"), "{err}");
+        assert!(err.contains("dispatch_as_root"), "{err}");
+    }
+
     #[test]
     fn register_topology_call_is_the_prefixes_then_the_pallet_tuple() {
         let t = tiny();
