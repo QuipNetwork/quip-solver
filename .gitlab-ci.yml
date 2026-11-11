@@ -7,6 +7,7 @@ include:
     file: templates/dependency-gate.yml
 
 stages:
+  - toolchain
   - test
   - build
   - release
@@ -26,6 +27,46 @@ variables:
 # ---------------------------------------------------------------------------
 # Tests (every branch, including main; tags skip straight to build)
 # ---------------------------------------------------------------------------
+
+# The toolchain image. .gitlab/ci-toolchain.Dockerfile says what it holds. This
+# job runs on a branch push that changes the Dockerfile, and by hand otherwise.
+# The jobs keep the old image until a commit puts the printed digest into
+# TOOLCHAIN_IMAGE. The /lib workaround is the one .kaniko-image explains below.
+build-toolchain-image:
+  stage: toolchain
+  needs: []
+  tags: [docker, amd64]
+  image:
+    name: ghcr.io/osscontainertools/kaniko:v1.29.1-debug@sha256:ebc38a988e5aa1aaea99240e931aeeeff9d8e6bb5a0bd0e00eaf79973bf0a773
+    entrypoint: [""]
+  rules:
+    - if: $CI_COMMIT_BRANCH
+      changes:
+        - .gitlab/ci-toolchain.Dockerfile
+    - if: $CI_COMMIT_BRANCH
+      when: manual
+      allow_failure: true
+  before_script:
+    - mkdir -p /lib && ln -sfn /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu
+    - mkdir -p /kaniko/.docker
+    - |
+      printf '{"auths":{"%s":{"auth":"%s"}}}\n' \
+        "$CI_REGISTRY" \
+        "$(printf '%s:%s' "$CI_REGISTRY_USER" "$CI_REGISTRY_PASSWORD" | base64 | tr -d '\n')" \
+        > /kaniko/.docker/config.json
+    # The image copies no project files, so the build context is empty.
+    - mkdir -p /tmp/toolchain-context
+  script:
+    - |
+      /kaniko/executor \
+        --context /tmp/toolchain-context \
+        --dockerfile "$CI_PROJECT_DIR/.gitlab/ci-toolchain.Dockerfile" \
+        --destination "$CI_REGISTRY_IMAGE/ci-toolchain:$CI_COMMIT_SHORT_SHA" \
+        --ignore-path=/lib \
+        --cache=true \
+        --cache-repo "$CI_REGISTRY_IMAGE/ci-toolchain-buildcache" \
+        --digest-file=/tmp/digest
+    - echo "TOOLCHAIN_IMAGE=$CI_REGISTRY_IMAGE/ci-toolchain@$(cat /tmp/digest)"
 
 # The solver contract (proto, wire codec, harness, PyO3 wheel, conformance
 # suite) lives in quip.network/quip-solver-core and is tested by that repo's
