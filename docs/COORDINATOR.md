@@ -554,7 +554,7 @@ lease at 2²⁰ salts. Before a miner's first lease completes, the feeder assume
 75 salts per second for each pipeline slot. `LEASE_STAGE_DEPTH` sets the
 two-lease staging limit per miner.
 
-A lease miner on quip-solver-core 0.0.5 sends a `Result` for each salt it
+A lease miner on quip-solver-core 0.0.9 sends a `Result` for each salt it
 reports, with every read and no target filter. The coordinator first checks
 that the `Result` is authentic: `verify_lease_result` with a permissive target
 redraws the problem and rescores every read. The coordinator drops a forged or
@@ -568,10 +568,11 @@ than zero, the miner counts as a round participant.
 
 ## Problem families
 
-Family work is inactive in production. `FAMILY_CONTRACTS` in
-`crates/quip-coordinator/src/lease.rs` is empty, and the chain snapshot sets no
-family. A snapshot with a family issues only family leases and has no legacy
-fallback.
+`FAMILY_CONTRACTS` in `crates/quip-coordinator/src/lease.rs` is
+`ising_generators::registry::CONTRACTS`, every family revision that the
+generator crate ships. The chain snapshot sets no family, so live mining stays
+on the legacy draw. Family leases come only from `drive`. A snapshot with a
+family issues only family leases and has no legacy fallback.
 
 `ChallengeFamily::admit` checks a descriptor against the contract table and the
 ordered topology. The descriptor is then fixed for that challenge.
@@ -590,13 +591,15 @@ does not affect legacy work and does not admit an incompatible miner.
 
 The coordinator regenerates each family `Result` from the descriptor of the
 in-flight lease. It rejects a wrong salt, nonce, descriptor, topology order,
-spin vector, or energy. The reported energy must include the instance offset. An
-authentic `Result` that misses the target follows the same stash path as a
+spin vector, or energy. The reported energy must include the instance offset.
+For a `hard` family, each spin vector must also pass the family's feasibility
+check, `ising_generators::family::feasible`. A `soft` family has no such
+check. An authentic `Result` that misses the target follows the same stash path as a
 legacy `Result`.
 
 `drive --source lease` accepts `--family-id`, `--family-revision`, and
-`--family-params <file>`. These options refuse every descriptor until
-`FAMILY_CONTRACTS` lists the family.
+`--family-params <file>`. These options refuse a descriptor whose family and
+revision are not in `FAMILY_CONTRACTS`.
 
 ## Supervision and shutdown
 

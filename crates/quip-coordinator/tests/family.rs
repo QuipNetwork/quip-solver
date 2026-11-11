@@ -441,8 +441,17 @@ mod drive {
         );
     }
 
+    /// The production table is every family the generator crate ships, and no
+    /// test vector family.
     #[test]
-    fn production_table_admits_nothing_until_families_activate() {
+    fn production_table_is_the_generator_registry() {
+        let ids = |table: &[Contract]| -> Vec<(&str, u32)> {
+            table.iter().map(|c| (c.family_id, c.revision)).collect()
+        };
+        assert_eq!(
+            ids(quip_coordinator::lease::FAMILY_CONTRACTS),
+            ids(ising_generators::registry::CONTRACTS)
+        );
         let spec = spec();
         assert_eq!(
             ChallengeFamily::admit(
@@ -507,9 +516,11 @@ mod verification {
     )]
 
     use ising_generators::descriptor::{admit, params_digest, AdvertisedLimits, Contract};
-    use ising_generators::family::{admit_topology, generate_instance, BaseTopology};
+    use ising_generators::family::{admit_topology, feasible, generate_instance, BaseTopology};
     use ising_generators::instance::Instance;
+    use ising_generators::polariton::POLARITON_V1;
     use ising_generators::random::derive_nonce;
+    use ising_generators::registry::CONTRACTS as REGISTRY;
     use quip_coordinator::drive::TopologySpec;
     use quip_coordinator::lease::{
         build_lease_job, verify_and_select, ChallengeFamily, LeaseTopology,
@@ -520,6 +531,8 @@ mod verification {
     use quip_protocol::scoring::energy_from_milli;
     use quip_protocol::wire::encode_spins_packed;
     use quip_solver_conformance::families::layered::{P_L2_F0, P_SPEC, RESTRICTED_V1, UNIFORM_V1};
+    use quip_solver_conformance::families::polariton::P_POLARITON_Z24_L2_P0;
+    use quip_solver_conformance::families::ROUTING_TOPOLOGY;
 
     static CONTRACTS: [Contract; 2] = [UNIFORM_V1, RESTRICTED_V1];
     const FAMILY: &str = "vectors/uniform-field";
@@ -573,6 +586,7 @@ mod verification {
 
     /// The instance a salt in `lease` regenerates, or `None` when the salt is skipped.
     fn instance_of(
+        contracts: &[Contract],
         lease: &IsingProblemGenerator,
         topo: &Topology,
         index: u64,
@@ -582,7 +596,7 @@ mod verification {
         let nonce = derive_nonce(LAST_PROOF, MINER, salt);
         let descriptor = lease.family.as_ref().unwrap();
         let admitted = admit(
-            &CONTRACTS,
+            contracts,
             descriptor.family_id.as_bytes(),
             descriptor.revision,
             &descriptor.params,
@@ -614,7 +628,7 @@ mod verification {
     fn honest(lease: &IsingProblemGenerator) -> (JobResult, Instance) {
         let topo = topology();
         let (instance, salt, nonce) = (0..32)
-            .find_map(|index| instance_of(lease, &topo, index))
+            .find_map(|index| instance_of(&CONTRACTS, lease, &topo, index))
             .expect("a salt yields an instance");
         let n = instance.node_ids().len();
         let mut spins = vec![1i8; n];
@@ -833,5 +847,84 @@ mod verification {
             ..JobResult::default()
         };
         assert!(verify_and_select(&lease, &verifier(), &open_target(), &result).is_ok());
+    }
+
+    /// A `quip/polariton-static@1` lease on the conformance topology, and a
+    /// verifier for it. Polariton is a `hard` family: a witness must also meet
+    /// every labeled vertex charge.
+    fn polariton() -> (Topology, IsingProblemGenerator, LeaseTopology) {
+        let blob = quip_solver_conformance::topology(ROUTING_TOPOLOGY).unwrap();
+        let topo =
+            Topology::from_nodes_edges(blob.nodes, blob.edges, &[0], &[1000], &[-1000, 1000]);
+        let mut snap = spec_of(&topo).to_snapshot();
+        snap.last_proof_block_hash = LAST_PROOF;
+        snap.family = Some(
+            ChallengeFamily::admit(
+                REGISTRY,
+                POLARITON_V1.family_id,
+                POLARITON_V1.revision,
+                P_POLARITON_Z24_L2_P0.to_vec(),
+                &topo,
+            )
+            .unwrap(),
+        );
+        let lease = build_lease_job(&snap, MINER, 0, 32, 1).generator.unwrap();
+        let verifier = LeaseTopology::from_topology(&topo, REGISTRY).unwrap();
+        (topo, lease, verifier)
+    }
+
+    /// A polariton lease, its verifier, and an honestly scored report whose one
+    /// witness is feasible or not as asked.
+    fn polariton_report(want_feasible: bool) -> (IsingProblemGenerator, LeaseTopology, JobResult) {
+        let (topo, lease, verifier) = polariton();
+        let (instance, salt, nonce) = (0..32)
+            .find_map(|index| instance_of(REGISTRY, &lease, &topo, index))
+            .expect("a salt yields an instance");
+        let descriptor = lease.family.as_ref().unwrap();
+        let admitted = admit(
+            REGISTRY,
+            descriptor.family_id.as_bytes(),
+            descriptor.revision,
+            &descriptor.params,
+            &descriptor.params_digest,
+        )
+        .unwrap();
+        let n = instance.node_ids().len();
+        assert!(n <= 20, "the witness search is exhaustive: {n} nodes");
+        let spins = (0u32..1 << n)
+            .map(|bits| {
+                (0..n)
+                    .map(|k| if bits >> k & 1 == 1 { -1 } else { 1 })
+                    .collect::<Vec<i8>>()
+            })
+            .find(|spins| feasible(&admitted, &instance, spins) == want_feasible)
+            .expect("the instance has a witness of each kind");
+        let result = JobResult {
+            job_id: b"lease".to_vec(),
+            solutions: vec![Solution {
+                spins: encode_spins_packed(&spins),
+                energy_milli: energy(&instance, &spins),
+            }],
+            salt: salt.to_vec(),
+            nonce: nonce.to_vec(),
+            ..JobResult::default()
+        };
+        (lease, verifier, result)
+    }
+
+    #[test]
+    fn a_feasible_hard_family_witness_verifies() {
+        let (lease, verifier, result) = polariton_report(true);
+        let (_, validated) = verify_and_select(&lease, &verifier, &open_target(), &result).unwrap();
+        assert!(validated.accepted);
+    }
+
+    /// The rescore alone accepts this report: its energy is honest. Only the
+    /// family's hard constraint refuses it.
+    #[test]
+    fn an_infeasible_hard_family_witness_is_forged() {
+        let (lease, verifier, result) = polariton_report(false);
+        let err = verify_and_select(&lease, &verifier, &open_target(), &result).unwrap_err();
+        assert!(err.contains("hard constraint"), "{err}");
     }
 }

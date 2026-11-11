@@ -4,8 +4,8 @@ version = "0.3.0"
 edition = "2021"
 
 [dependencies]
-quip-proto = "0.0.5"
-quip-protocol = "0.0.5"
+quip-proto = "0.0.9"
+quip-protocol = "0.0.9"
 tonic = { workspace = true }
 prost = { workspace = true }
 tokio = { workspace = true }
