@@ -5,6 +5,8 @@
 //! allowed_h.canonical_bytes(), allowed_j.canonical_bytes(),
 //! allowed_spin.canonical_bytes())))`.
 
+use std::collections::BTreeSet;
+
 use parity_scale_codec::Encode;
 use quantum_validation::{AllowedValueSpec, MilliValue};
 use sp_core::hashing::blake2_256;
@@ -76,26 +78,29 @@ impl Topology {
     }
 }
 
-/// D-Wave's graph-only fingerprint. This is not a chain topology hash.
+/// The graph-only fingerprint a miner with a native working graph advertises
+/// as `Capabilities.native_topology_hash`. This is not a chain topology hash.
+///
+/// It is the FAM-19 topology order digest of the graph with the nodes
+/// ascending and the edges `(min, max)` ascending. Node order, edge order, edge
+/// direction, and repeats do not change it, which matches
+/// `quip_solver_core::NativeTopology::hash`. `None` when a count is above
+/// `u32::MAX`.
 #[must_use]
 pub(crate) fn native_topology_hash(nodes: &[u32], edges: &[(u32, u32)]) -> Option<[u8; 32]> {
-    let n_nodes = u32::try_from(nodes.len()).ok()?;
-    let n_edges = u32::try_from(edges.len()).ok()?;
-    let mut nodes = nodes.to_vec();
-    nodes.sort_unstable();
-    let mut edges: Vec<(u32, u32)> = edges.iter().map(|&(u, v)| (u.min(v), u.max(v))).collect();
-    edges.sort_unstable();
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(&n_nodes.to_le_bytes());
-    for node in nodes {
-        bytes.extend_from_slice(&node.to_le_bytes());
-    }
-    bytes.extend_from_slice(&n_edges.to_le_bytes());
-    for (u, v) in edges {
-        bytes.extend_from_slice(&u.to_le_bytes());
-        bytes.extend_from_slice(&v.to_le_bytes());
-    }
-    Some(blake2_256(&bytes))
+    let nodes: Vec<u32> = nodes
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let edges: Vec<(u32, u32)> = edges
+        .iter()
+        .map(|&(u, v)| (u.min(v), u.max(v)))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    ising_generators::descriptor::topology_order_digest(&nodes, &edges)
 }
 
 /// Canonical chain topology hash for full `AllowedValueSpec` inputs.
@@ -193,15 +198,16 @@ mod tests {
     }
 
     #[test]
-    fn native_fingerprint_matches_dwave_bytes_and_differs_from_chain_hash() {
-        let expected =
-            hex_literal("02bf488906736b21dc5c3257ea04da8ff3592e0c81e0be5179135c72424cc8d4");
+    fn native_fingerprint_matches_the_solver_core_session_hash() {
+        let expected = quip_solver_core::NativeTopology::new([0, 1, 2], [(0, 1), (1, 2)])
+            .hash()
+            .expect("small graph");
         assert_eq!(
             native_topology_hash(&[0, 1, 2], &[(0, 1), (1, 2)]),
             Some(expected)
         );
         assert_eq!(
-            native_topology_hash(&[2, 0, 1], &[(2, 1), (1, 0)]),
+            native_topology_hash(&[2, 0, 1], &[(2, 1), (1, 0), (1, 2)]),
             Some(expected)
         );
         assert_ne!(
@@ -214,10 +220,7 @@ mod tests {
                 &[-1000, 1000],
             )
         );
-        assert_ne!(
-            native_topology_hash(&[0, 1, 2], &[(0, 1), (1, 2), (1, 2)]),
-            Some(expected)
-        );
+        assert_ne!(native_topology_hash(&[0, 1, 2], &[(0, 1)]), Some(expected));
     }
 
     fn hex_literal(s: &str) -> [u8; 32] {

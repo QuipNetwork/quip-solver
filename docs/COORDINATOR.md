@@ -515,7 +515,10 @@ The native fingerprint uses a separate namespace from the chain topology hash
 and is never a chain lookup key.
 
 Inline work reaches that miner only when the coordinator proves graph membership.
-It computes the D-Wave graph-only fingerprint of the active topology.
+It computes the graph-only fingerprint of the active topology. The fingerprint
+is the FAM-19 topology order digest of the nodes in ascending order and the
+`(min, max)` edges in ascending order, which quip-solver-core 0.0.11
+advertises as `native_topology_hash`.
 An equal fingerprint supplies the native nodes and edges for the subgraph check.
 Each inline node and undirected edge must belong to that graph.
 Inline ids are dense and start at zero without a mapping through the sparse
@@ -564,7 +567,7 @@ lease at 2²⁰ salts. Before a miner's first lease completes, the feeder assume
 75 salts per second for each pipeline slot. `LEASE_STAGE_DEPTH` sets the
 two-lease staging limit per miner.
 
-A lease miner on quip-solver-core 0.0.9 sends a `Result` for each salt it
+A lease miner on quip-solver-core 0.0.11 sends a `Result` for each salt it
 reports, with every read and no target filter. The coordinator first checks
 that the `Result` is authentic: `verify_lease_result` with a permissive target
 redraws the problem and rescores every read. The coordinator drops a forged or
