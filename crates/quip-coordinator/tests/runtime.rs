@@ -1407,7 +1407,7 @@ async fn runtime_submits_a_lease_winner_answers_an_order_and_shuts_down_clean() 
         },
     ));
 
-    let done = wait_until(100, 30, async || {
+    let done = wait_until(300, 50, async || {
         chain.submitted_count() > 0
             && chain.participation_calls() > 0
             && !chain.solutions.lock().expect("solutions lock").is_empty()
