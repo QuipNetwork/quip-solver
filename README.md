@@ -85,6 +85,23 @@ The workspace tests run offline by default:
 cargo test --workspace
 ```
 
+### Toolchain image for the test jobs
+
+The Linux test jobs `rust`, `coordinator`, and `verify-fetch-miners` run on a
+toolchain image that `.gitlab/ci-toolchain.Dockerfile` defines. The image
+holds Rust 1.97.1 with clippy and rustfmt, and shellcheck. The jobs pull the
+image by the digest in the `TOOLCHAIN_IMAGE` variable of `.gitlab-ci.yml`.
+
+The `build-toolchain-image` job builds the image with kaniko and pushes it to
+`$CI_REGISTRY_IMAGE/ci-toolchain:<short-sha>`. The job runs automatically on a
+branch push that changes the Dockerfile. To rebuild from an unchanged
+Dockerfile, run the job by hand from the pipeline page. The job log ends with a
+`TOOLCHAIN_IMAGE=...` line. Copy that line into `.gitlab-ci.yml` in a new
+commit. The jobs use the old image until that commit.
+
+When `rust-toolchain.toml` changes the Rust version, change the `FROM` line of
+the Dockerfile in the same merge request, and then update the digest.
+
 ### Live devnet integration tests
 
 `crates/quip-coordinator/tests/devnet_submit.rs` drives the real chain client
