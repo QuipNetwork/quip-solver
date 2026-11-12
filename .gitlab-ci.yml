@@ -7,6 +7,7 @@ include:
     file: templates/dependency-gate.yml
 
 stages:
+  - toolchain
   - test
   - build
   - release
@@ -15,6 +16,9 @@ variables:
   # Generic package registry name for the macOS bundle. Only the release jobs
   # below use it; the image jobs address the container registry directly.
   PKG: quip-solver
+  # The toolchain image the Linux test jobs run on, by digest. The
+  # build-toolchain-image job prints this line after a rebuild.
+  TOOLCHAIN_IMAGE: registry.gitlab.com/quip.network/quip-solver/ci-toolchain@sha256:d953b564d5eab1367040180c1db494b811f44035d321f1417251b691ba97f9a7
 
 # NOTE (v0.3 cutover): the v0.2 image/binary jobs were removed (they built the
 # deleted Python monolith). The v0.3 images below live under a SEPARATE
@@ -27,22 +31,81 @@ variables:
 # Tests (every branch, including main; tags skip straight to build)
 # ---------------------------------------------------------------------------
 
+# The toolchain image. .gitlab/ci-toolchain.Dockerfile says what it holds. This
+# job runs on a branch push that changes the Dockerfile, and by hand otherwise.
+# The jobs keep the old image until a commit puts the printed digest into
+# TOOLCHAIN_IMAGE. The /lib workaround is the one .kaniko-image explains below.
+build-toolchain-image:
+  stage: toolchain
+  needs: []
+  tags: [docker, amd64]
+  image:
+    name: ghcr.io/osscontainertools/kaniko:v1.29.1-debug@sha256:ebc38a988e5aa1aaea99240e931aeeeff9d8e6bb5a0bd0e00eaf79973bf0a773
+    entrypoint: [""]
+  rules:
+    - if: $CI_COMMIT_BRANCH
+      changes:
+        - .gitlab/ci-toolchain.Dockerfile
+    - if: $CI_COMMIT_BRANCH
+      when: manual
+      allow_failure: true
+  before_script:
+    - mkdir -p /lib && ln -sfn /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu
+    - mkdir -p /kaniko/.docker
+    - |
+      printf '{"auths":{"%s":{"auth":"%s"}}}\n' \
+        "$CI_REGISTRY" \
+        "$(printf '%s:%s' "$CI_REGISTRY_USER" "$CI_REGISTRY_PASSWORD" | base64 | tr -d '\n')" \
+        > /kaniko/.docker/config.json
+    # The image copies no project files, so the build context is empty.
+    - mkdir -p /tmp/toolchain-context
+  script:
+    - |
+      /kaniko/executor \
+        --context /tmp/toolchain-context \
+        --dockerfile "$CI_PROJECT_DIR/.gitlab/ci-toolchain.Dockerfile" \
+        --destination "$CI_REGISTRY_IMAGE/ci-toolchain:$CI_COMMIT_SHORT_SHA" \
+        --ignore-path=/lib \
+        --cache=true \
+        --cache-repo "$CI_REGISTRY_IMAGE/ci-toolchain-buildcache" \
+        --digest-file=/tmp/digest
+    - echo "TOOLCHAIN_IMAGE=$CI_REGISTRY_IMAGE/ci-toolchain@$(cat /tmp/digest)"
+
+# The Rust jobs run on the toolchain image, which already holds clippy and
+# rustfmt, so rustup downloads nothing.
+#
+# CARGO_HOME moves into the checkout so the cache can hold the registry and the
+# git checkouts of quip-validator and polkadot-sdk. The cache is keyed on the
+# job and Cargo.lock, not the branch, so a new branch starts warm. Only the
+# registry index, the crate archives and the git database are cached: cargo
+# unpacks registry/src again from the archives.
+.toolchain:
+  image: $TOOLCHAIN_IMAGE
+  variables:
+    CARGO_HOME: $CI_PROJECT_DIR/.cargo
+  cache:
+    key:
+      files: [Cargo.lock]
+      prefix: cargo-$CI_JOB_NAME
+    paths:
+      - .cargo/registry/index/
+      - .cargo/registry/cache/
+      - .cargo/git/db/
+      - target/
+
 # The solver contract (proto, wire codec, harness, PyO3 wheel, conformance
 # suite) lives in quip.network/quip-solver-core and is tested by that repo's
 # CI; this workspace consumes it from crates.io. Coverage here is `rust:` (the
 # workspace) and `coordinator:`.
 
 rust:
+  extends: .toolchain
   stage: test
-  image: rust:1.97.1
   tags: [linux, amd64]
   script:
     - cargo fmt --all --check
     - cargo clippy --workspace --exclude quip-coordinator --all-targets -- -D warnings
     - cargo test --workspace --exclude quip-coordinator
-  cache:
-    key: cargo-$CI_COMMIT_REF_SLUG
-    paths: [target/, .cargo/]
   rules:
     - if: $CI_COMMIT_TAG
       when: never
@@ -54,15 +117,12 @@ rust:
 # itself, not a fetched miner binary — and the nine dashboard REST conformance
 # tests.
 coordinator:
+  extends: .toolchain
   stage: test
-  image: rust:1.97.1
   tags: [linux, amd64]
   script:
     - cargo clippy -p quip-coordinator --all-targets -- -D warnings
     - cargo test -p quip-coordinator
-  cache:
-    key: cargo-coordinator-$CI_COMMIT_REF_SLUG
-    paths: [target/, .cargo/]
   rules:
     - if: $CI_COMMIT_TAG
       when: never
@@ -73,15 +133,15 @@ coordinator:
 # install both call it. This job lints it and dry-runs each MINER_SET, asserting
 # the right assets are selected. DRY_RUN skips downloads, so it needs no cut
 # releases and no GPU.
+#
+# The toolchain image supplies bash, shellcheck, curl and wget. The script
+# needs curl even on a DRY_RUN: it resolves each miner's newest release from
+# the API, because the asset URL it prints carries the tag. The job compiles
+# nothing, so it takes the image and not the cargo cache.
 verify-fetch-miners:
   stage: test
-  image: alpine:3.20
+  image: $TOOLCHAIN_IMAGE
   tags: [linux, amd64]
-  before_script:
-    # curl: the script resolves each miner's newest release from the API, and
-    # it does so on a DRY_RUN too, because the asset URL it prints carries the
-    # tag. Alpine ships busybox wget, not curl.
-    - apk add --no-cache bash shellcheck curl
   script:
     - shellcheck crates/quip-coordinator/tools/fetch-miners.sh
     - |
