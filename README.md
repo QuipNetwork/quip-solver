@@ -25,7 +25,7 @@ consumed from crates.io. The miner binaries ship from their own repositories.
 
 The miner binaries live in `quip.network/quip-solver-{cpu,cuda,metal,dwave}`.
 The `quip-proto`, `quip-protocol`, `quip-solver-core`, and `ising-generators`
-dependencies come from crates.io at v0.0.5. Their source of truth is
+dependencies come from crates.io at v0.0.9. Their source of truth is
 `quip.network/quip-solver-core`.
 
 ## CUDA card support

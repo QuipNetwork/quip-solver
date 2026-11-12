@@ -5,7 +5,7 @@ Cross-tool instructions for AI coding assistants (Claude Code, Codex, Cursor, Ge
 QuIP v0.3 is a Rust workspace. The coordinator owns chain access and work routing.
 It spawns and supervises the miner subprocesses that do the sampling.
 The miner binaries ship from their own repos. The solver contract lives in
-`quip.network/quip-solver-core` and is consumed from crates.io at v0.0.5.
+`quip.network/quip-solver-core` and is consumed from crates.io at v0.0.9.
 It supplies the wire protocol, consensus primitives, and solver session loop.
 
 For deeper detail, see the companion guides: `docs/COORDINATOR.md` covers how the coordinator works, and `docs/NEWMINER.md` covers adding a new miner. The solver contract itself is specified in the quip-solver-core repo (`SPEC.md`).
@@ -19,7 +19,7 @@ For deeper detail, see the companion guides: `docs/COORDINATOR.md` covers how th
 - `docker/` — image builds (`Dockerfile.quip-solver`, `Dockerfile.quip-solver-cuda`), `entrypoint.sh`, and `config.toml`.
 - `docs/` — the guides: `ARCHITECTURE.md`, `COORDINATOR.md`, `NEWMINER.md`, `CHAINSTORAGE.md`, and `VERSIONING.md` (the release-tag standard).
 
-The miner binaries live in their own repos: `quip.network/quip-solver-{cpu,cuda,metal,dwave}`. The `quip-proto` (wire types), `quip-protocol` (consensus math), `quip-solver-core` (`Sampler` trait + session loop), and `ising-generators` crates come from crates.io at v0.0.5. Their source repo is `quip.network/quip-solver-core`, which also publishes the `quip-solver-core` Python wheel the D-Wave miner uses.
+The miner binaries live in their own repos: `quip.network/quip-solver-{cpu,cuda,metal,dwave}`. The `quip-proto` (wire types), `quip-protocol` (consensus math), `quip-solver-core` (`Sampler` trait + session loop), and `ising-generators` crates come from crates.io at v0.0.9. Their source repo is `quip.network/quip-solver-core`, which also publishes the `quip-solver-core` Python wheel the D-Wave miner uses.
 
 ## CUDA card support requirement
 

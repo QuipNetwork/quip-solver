@@ -27,7 +27,7 @@ depends on the solver-contract crates from crates.io.
 | `quip-coordinator` | The `quip-coordinator` binary: chain access, feeder, router, supervisor | `quip-proto`, `quip-protocol`, `ising-generators` |
 | `quip-mock-miner` | Miner test double | `quip-proto`, `quip-protocol` |
 
-Four dependencies come from crates.io at v0.0.5, published from the
+Four dependencies come from crates.io at v0.0.9, published from the
 quip-solver-core repository: `quip-proto` (generated protocol types and gRPC
 service), `quip-protocol` (consensus primitives: `wire`, `session`, `scoring`,
 `chacha8`, `lease`, `diversity`, `target`, `family`), `quip-solver-core` (the

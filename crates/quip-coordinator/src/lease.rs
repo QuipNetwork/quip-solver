@@ -4,7 +4,7 @@
 use crate::chain::snapshot::MiningSnapshot;
 use crate::topology::Topology;
 use ising_generators::descriptor::{admit, params_digest, AdvertisedLimits, Contract};
-use ising_generators::family::{admit_topology, generate_instance, BaseTopology};
+use ising_generators::family::{admit_topology, feasible, generate_instance, BaseTopology};
 use ising_generators::random::derive_nonce;
 use ising_generators::Code;
 use quip_proto::v1::{
@@ -44,9 +44,10 @@ pub const LEASE_JOB_ID_PREFIX: &[u8] = b"lease:";
 /// and the estimate would take several rounds to climb.
 const INITIAL_SALTS_PER_SEC_PER_SLOT: f64 = 75.0;
 
-/// Family revisions this build regenerates. Empty until a solver-core release
-/// publishes the constructions, so live work stays on the legacy draw.
-pub const FAMILY_CONTRACTS: &[Contract] = &[];
+/// Family revisions this build regenerates: every contract the generator crate
+/// ships. A live challenge still takes the legacy draw until the chain binds a
+/// family to it.
+pub const FAMILY_CONTRACTS: &[Contract] = ising_generators::registry::CONTRACTS;
 
 /// One problem family admitted for a challenge. The fields are private, so a
 /// lease cannot change a descriptor that passed admission.
@@ -287,8 +288,9 @@ pub fn verify_and_select(
     Ok((verified, validated))
 }
 
-/// Regenerate the reported salt's instance from the lease descriptor and
-/// rescore every read. The instance node count is returned because a family
+/// Regenerate the reported salt's instance from the lease descriptor, rescore
+/// every read, and check each read against the family's hard constraints. A
+/// soft family has none. The instance node count is returned because a family
 /// instance need not have the base topology's width.
 fn verify_family_result(
     generator: &IsingProblemGenerator,
@@ -348,6 +350,11 @@ fn verify_family_result(
             .saturating_add(instance.offset_milli());
         if energy != solution.energy_milli {
             return Err(VerifyError::EnergyMismatch { index }.to_string());
+        }
+        if !feasible(&admitted, &instance, &spins) {
+            return Err(format!(
+                "solution {index} breaks a hard constraint of the family"
+            ));
         }
         rows.push((spins, energy));
     }
