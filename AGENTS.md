@@ -113,7 +113,7 @@ only when that value is unset. `seed-chain` refuses to run when a chain already
 has a default topology. Wipe the chain data and restart the validator instead.
 
 `seed-chain` signs `Sudo` calls, so it seeds runtime 119 and earlier only.
-Runtime 120 (quip-validator v0.4.1) removed `pallet-sudo`. On 120 and later
+Runtime 120 (quip-validator 0.5.0) removed `pallet-sudo`. On 120 and later
 `seed-chain` stops before it signs anything. Seed such a chain through a
 council motion that calls `ValidatorAdmission::dispatch_as_root`.
 

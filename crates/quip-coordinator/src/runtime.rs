@@ -792,13 +792,17 @@ pub async fn feeder_loop<C>(
                 snap = fresh;
                 round = Some(RoundState::StartMining);
 
-                let topo = Topology::from_nodes_edges(
+                let mut topo = Topology::from_nodes_edges(
                     snap.nodes.clone(),
                     snap.edges.clone(),
                     &snap.allowed_h_milli,
                     &snap.allowed_j_milli,
                     &snap.allowed_spin_milli,
                 );
+                // The miners look the topology up by the hash a lease names,
+                // which is the chain's. A family topology hash also covers the
+                // descriptor, so the value sets alone cannot rebuild it.
+                topo.hash.clone_from(&snap.topology_hash);
                 let qblock_id = match chain.fetch_latest_qblock_id().await {
                     Ok(id) => id,
                     Err(e) => {
@@ -818,19 +822,22 @@ pub async fn feeder_loop<C>(
                 };
                 let (model, last_proof_block) = match &decay {
                     Some(dp) => {
-                        let curve = EnergyCurve::from_topology(
-                            snap.nodes.len() as u64,
-                            snap.edges.len() as u64,
-                            dp.c_easy_milli,
-                            dp.c_knee_milli,
-                            dp.c_hard_milli,
-                            &snap.allowed_h_milli,
-                            &snap.allowed_j_milli,
-                        );
+                        let curve = match dp.energy_band_milli {
+                            Some((hard, easy)) => EnergyCurve::from_band(hard, easy),
+                            None => Some(EnergyCurve::from_topology(
+                                snap.nodes.len() as u64,
+                                snap.edges.len() as u64,
+                                dp.c_easy_milli,
+                                dp.c_knee_milli,
+                                dp.c_hard_milli,
+                                &snap.allowed_h_milli,
+                                &snap.allowed_j_milli,
+                            )),
+                        };
                         (
                             Some(DecayModel {
                                 base_max_energy_milli: dp.base_max_energy_milli,
-                                curve: Some(curve),
+                                curve,
                                 epoch_length: dp.epoch_length,
                                 algorithm: DecayAlgorithm::for_spec_version(snap.spec_version),
                                 target_proof_blocks: snap.target_proof_blocks,

@@ -122,6 +122,25 @@ fn find_api_version(apis: &Value, trait_name: &str) -> Option<u32> {
     })
 }
 
+/// The `QuantumPowApi` version in a `state_getRuntimeVersion` response, or
+/// `None` when the runtime does not expose that API.
+pub(crate) fn quantum_pow_api_version(rv: &Value) -> Option<u32> {
+    rv.get("apis")
+        .and_then(|apis| find_api_version(apis, QUANTUM_POW_API))
+}
+
+/// A `state_getRuntimeVersion` answer that reports `spec_version` and
+/// `QuantumPowApi` at `api_version`, for chain fixtures.
+#[cfg(test)]
+pub(crate) fn runtime_version_json(spec_version: u32, api_version: u32) -> Value {
+    serde_json::json!({
+        "specName": "quip-runtime",
+        "specVersion": spec_version,
+        "transactionVersion": 7,
+        "apis": [[format!("0x{}", hex_lower(&api_id(QUANTUM_POW_API))), api_version]],
+    })
+}
+
 fn hex_lower(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -148,9 +167,7 @@ fn parse_runtime_version(rv: &Value) -> Result<ValidatorInfo, PreflightError> {
         .and_then(Value::as_u64)
         .and_then(|v| u32::try_from(v).ok())
         .ok_or_else(|| PreflightError::Malformed("transactionVersion missing".into()))?;
-    let quantum_pow_api = rv
-        .get("apis")
-        .and_then(|apis| find_api_version(apis, QUANTUM_POW_API));
+    let quantum_pow_api = quantum_pow_api_version(rv);
     Ok(ValidatorInfo {
         spec_name,
         spec_version,

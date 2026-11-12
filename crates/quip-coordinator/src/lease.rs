@@ -54,6 +54,7 @@ pub const FAMILY_CONTRACTS: &[Contract] = ising_generators::registry::CONTRACTS;
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChallengeFamily {
     descriptor: FamilyDescriptor,
+    descriptor_digest: [u8; 32],
     topology_order_digest: [u8; 32],
 }
 
@@ -81,7 +82,9 @@ impl ChallengeFamily {
             &AdvertisedLimits::default(),
         )?;
         let topology_order_digest = *base.order_digest();
+        let descriptor_digest = admitted.descriptor().digest();
         Ok(Self {
+            descriptor_digest,
             descriptor: FamilyDescriptor {
                 family_id: family_id.to_owned(),
                 revision,
@@ -96,6 +99,13 @@ impl ChallengeFamily {
     #[must_use]
     pub fn descriptor(&self) -> &FamilyDescriptor {
         &self.descriptor
+    }
+
+    /// Digest of the admitted descriptor: family id, revision, and parameter
+    /// digest. The chain mixes it into a family topology hash.
+    #[must_use]
+    pub const fn descriptor_digest(&self) -> &[u8; 32] {
+        &self.descriptor_digest
     }
 
     /// Digest of the node and edge order the descriptor was admitted on.

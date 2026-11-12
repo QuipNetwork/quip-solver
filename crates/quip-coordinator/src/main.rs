@@ -359,11 +359,14 @@ fn run_config_path(config: Option<PathBuf>, log_level: LogLevel) -> StdExitCode 
         }
     };
 
-    let chain = Arc::new(RealChainClient::new(
-        cfg.validators.clone(),
-        cfg.signer_key.clone(),
-        quip_coordinator::config::participate_kind(&cfg.launch),
-    ));
+    let chain = Arc::new(
+        RealChainClient::new(
+            cfg.validators.clone(),
+            cfg.signer_key.clone(),
+            quip_coordinator::config::participate_kind(&cfg.launch),
+        )
+        .with_family_mining(cfg.family_mining),
+    );
 
     if let Some(code) = run_preflight_gate(&rt, chain.as_ref()) {
         return code;
@@ -1028,6 +1031,7 @@ mod tests {
                 allowed_h_values: AllowedValueSpec::Set(spec.allowed_h_milli),
                 allowed_j_values: AllowedValueSpec::Set(spec.allowed_j_milli),
                 allowed_spin_values: AllowedValueSpec::Set(spec.allowed_spin_milli),
+                family: None,
                 registered_at: 99,
             },
         )

@@ -66,6 +66,10 @@ pub struct DecayParams {
     pub c_knee_milli: u32,
     /// Hard c of the difficulty curve (per-mille).
     pub c_hard_milli: u32,
+    /// `TopologyEnergyBand[topology_hash]` as `(hard_milli, easy_milli)`. A
+    /// family topology has one, and the chain runs its curve on the band in
+    /// place of the c-triple.
+    pub energy_band_milli: Option<(i64, i64)>,
 }
 
 impl DecayParams {
@@ -79,6 +83,7 @@ impl DecayParams {
             c_easy_milli: crate::decay::DEFAULT_C_EASY_MILLI,
             c_knee_milli: crate::decay::DEFAULT_C_KNEE_MILLI,
             c_hard_milli: crate::decay::DEFAULT_C_HARD_MILLI,
+            energy_band_milli: None,
         }
     }
 }
