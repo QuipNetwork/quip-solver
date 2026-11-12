@@ -124,8 +124,18 @@ impl TopologySpec {
     ///
     /// # Errors
     /// Returns an error for unsupported value specs, invalid graph data,
-    /// or a computed topology hash that differs from `hash`.
+    /// a computed topology hash that differs from `hash`, or a topology bound
+    /// to a problem family.
     pub fn from_chain_meta(hash: [u8; 32], meta: TopologyMetaScale) -> Result<Self, String> {
+        if let Some(family) = &meta.family {
+            return Err(format!(
+                "chain topology {} is bound to family {} revision {}; pass the \
+                 descriptor with --family-id, --family-revision, and --family-params",
+                hex_encode(&hash),
+                String::from_utf8_lossy(&family.family_id),
+                family.revision
+            ));
+        }
         let raw = TopologySpecJson {
             nodes: meta.nodes,
             edges: meta.edges,
@@ -341,6 +351,7 @@ mod tests {
                 allowed_h_values: AllowedValueSpec::Set(spec.allowed_h_milli),
                 allowed_j_values: AllowedValueSpec::Set(spec.allowed_j_milli),
                 allowed_spin_values: AllowedValueSpec::Set(spec.allowed_spin_milli),
+                family: None,
                 registered_at: 7,
             },
         ))
@@ -394,7 +405,19 @@ mod tests {
         bad_edge.edges.push((938, u32::MAX));
         let mut incorrect_hash = hash;
         *incorrect_hash.first_mut().expect("nonempty hash") ^= 1;
+        let mut bound = meta.clone();
+        bound.family = Some(crate::chain::scale_types::FamilyDescriptorScale {
+            family_id: b"quip/ice-glass".to_vec(),
+            revision: 1,
+            params: Vec::new(),
+        });
         let cases = [
+            (
+                "family topology",
+                hash,
+                bound,
+                "bound to family quip/ice-glass revision 1",
+            ),
             (
                 "integer range h",
                 hash,

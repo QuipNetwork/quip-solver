@@ -63,40 +63,17 @@ pub fn judge_pending_proof(pending: &PendingProof, snap: &MiningSnapshot) -> Ver
     }
 }
 
-/// Draw the model, score every row, and apply the gates. `Err` is the
-/// pallet's pre-scoring rejection.
+/// Score every row, and apply the gates. `Err` is the pallet's pre-scoring
+/// rejection.
 fn score(proof: &QuantumProof, snap: &MiningSnapshot) -> Result<Verdict, String> {
-    let index =
-        TopologyIndex::new(&snap.nodes, &snap.edges).map_err(|e| format!("topology: {e:?}"))?;
-    let (h, j) = generate_ising_model_indexed(
-        proof.nonce,
-        &snap.nodes,
-        &snap.edges,
-        &AllowedValueSpec::Set(snap.allowed_h_milli.as_slice()),
-        &AllowedValueSpec::Set(snap.allowed_j_milli.as_slice()),
-        &index,
-    )
-    .map_err(|e| format!("model: {e:?}"))?;
-    let spin_spec = AllowedValueSpec::Set(snap.allowed_spin_milli.as_slice());
-
-    let mut valid: Vec<(i64, Vec<i8>)> = Vec::with_capacity(proof.solutions.len());
-    for packed in &proof.solutions {
-        let milli = unpack_solution(packed, snap.nodes.len(), &spin_spec)
-            .map_err(|e| format!("unpack: {e:?}"))?;
-        let mut spins = Vec::with_capacity(milli.len());
-        for value in milli {
-            spins.push(match value.signum() {
-                1 => 1i8,
-                -1 => -1i8,
-                _ => return Err("zero spin".into()),
-            });
-        }
-        let energy = energy_of_solution_indexed(&spins, &h, &snap.edges, &j, &index)
-            .map_err(|e| format!("energy: {e:?}"))?;
-        if energy < snap.max_energy_milli {
-            valid.push((energy, spins));
-        }
-    }
+    let scored = match &snap.family {
+        None => legacy_rows(proof, snap)?,
+        Some(family) => family_rows(proof, snap, family)?,
+    };
+    let valid: Vec<(i64, Vec<i8>)> = scored
+        .into_iter()
+        .filter(|(energy, _)| *energy < snap.max_energy_milli)
+        .collect();
 
     let Some(best_energy_milli) = valid.iter().map(|(e, _)| *e).min() else {
         return Ok(Verdict::BelowGates);
@@ -118,6 +95,94 @@ fn score(proof: &QuantumProof, snap: &MiningSnapshot) -> Result<Verdict, String>
     } else {
         Ok(Verdict::BelowGates)
     }
+}
+
+/// Each row's spins and energy on the legacy model the nonce draws, as the
+/// pallet's `validate_proof` computes them.
+fn legacy_rows(proof: &QuantumProof, snap: &MiningSnapshot) -> Result<Vec<(i64, Vec<i8>)>, String> {
+    let index =
+        TopologyIndex::new(&snap.nodes, &snap.edges).map_err(|e| format!("topology: {e:?}"))?;
+    let (h, j) = generate_ising_model_indexed(
+        proof.nonce,
+        &snap.nodes,
+        &snap.edges,
+        &AllowedValueSpec::Set(snap.allowed_h_milli.as_slice()),
+        &AllowedValueSpec::Set(snap.allowed_j_milli.as_slice()),
+        &index,
+    )
+    .map_err(|e| format!("model: {e:?}"))?;
+    let mut rows = Vec::with_capacity(proof.solutions.len());
+    for spins in unpack_rows(proof, snap, snap.nodes.len())? {
+        let energy = energy_of_solution_indexed(&spins, &h, &snap.edges, &j, &index)
+            .map_err(|e| format!("energy: {e:?}"))?;
+        rows.push((energy, spins));
+    }
+    Ok(rows)
+}
+
+/// Each row's spins and energy on the family instance the nonce regenerates,
+/// as the pallet's `validate_family_proof` computes them. It uses the
+/// validator's own `FamilyChallenge`. A skipped nonce or one infeasible
+/// witness rejects the whole proof, as it does on chain.
+fn family_rows(
+    proof: &QuantumProof,
+    snap: &MiningSnapshot,
+    family: &crate::lease::ChallengeFamily,
+) -> Result<Vec<(i64, Vec<i8>)>, String> {
+    use quantum_validation::families::{AdvertisedLimits, FamilyChallenge, CONTRACTS};
+    let descriptor = family.descriptor();
+    // Registration already bounded every instance by the chain's limits, so
+    // admission here only needs to accept what the chain accepted.
+    let limits = AdvertisedLimits {
+        max_nodes: u64::MAX,
+        max_edges: u64::MAX,
+        max_degree: 0,
+    };
+    let challenge = FamilyChallenge::admit(
+        CONTRACTS,
+        descriptor.family_id.as_bytes(),
+        descriptor.revision,
+        &descriptor.params,
+        &snap.nodes,
+        &snap.edges,
+        &limits,
+    )
+    .map_err(|e| format!("family admission: {e:?}"))?;
+    let instance = challenge
+        .regenerate(proof.nonce.to_big_endian())
+        .map_err(|e| format!("family instance: {e:?}"))?;
+    let mut rows = Vec::with_capacity(proof.solutions.len());
+    for spins in unpack_rows(proof, snap, instance.node_ids().len())? {
+        let energy = challenge
+            .verify_witness(&instance, &spins)
+            .map_err(|e| format!("family witness: {e:?}"))?;
+        rows.push((energy, spins));
+    }
+    Ok(rows)
+}
+
+/// Unpack every row to `num_spins` signs under the snapshot's spin set.
+fn unpack_rows(
+    proof: &QuantumProof,
+    snap: &MiningSnapshot,
+    num_spins: usize,
+) -> Result<Vec<Vec<i8>>, String> {
+    let spin_spec = AllowedValueSpec::Set(snap.allowed_spin_milli.as_slice());
+    let mut rows = Vec::with_capacity(proof.solutions.len());
+    for packed in &proof.solutions {
+        let milli =
+            unpack_solution(packed, num_spins, &spin_spec).map_err(|e| format!("unpack: {e:?}"))?;
+        let mut spins = Vec::with_capacity(milli.len());
+        for value in milli {
+            spins.push(match value.signum() {
+                1 => 1i8,
+                -1 => -1i8,
+                _ => return Err("zero spin".into()),
+            });
+        }
+        rows.push(spins);
+    }
+    Ok(rows)
 }
 
 /// Consecutive polls with no clearing proof before the round resumes. One
@@ -360,6 +425,87 @@ mod tests {
                 solutions,
                 device_access_time_us: 0,
             },
+        }
+    }
+
+    /// A polariton snapshot, the first salt whose nonce gives an instance, and
+    /// one witness of that instance that is feasible or not as asked.
+    fn family_case(want_feasible: bool) -> (MiningSnapshot, [u8; 32], Vec<i8>) {
+        use quantum_validation::families::{AdvertisedLimits, FamilyChallenge, CONTRACTS};
+        let blob =
+            quip_solver_conformance::topology(quip_solver_conformance::families::ROUTING_TOPOLOGY)
+                .expect("routing topology fixture");
+        let topology = crate::topology::Topology::from_nodes_edges(
+            blob.nodes.clone(),
+            blob.edges.clone(),
+            &[0],
+            &[1000],
+            &[-1000, 1000],
+        );
+        let family = crate::lease::ChallengeFamily::admit(
+            crate::lease::FAMILY_CONTRACTS,
+            ising_generators::polariton::POLARITON_V1.family_id,
+            ising_generators::polariton::POLARITON_V1.revision,
+            quip_solver_conformance::families::polariton::P_POLARITON_Z24_L2_P0.to_vec(),
+            &topology,
+        )
+        .expect("admitted");
+        let mut snap = ring();
+        snap.nodes = blob.nodes;
+        snap.edges = blob.edges;
+        snap.max_energy_milli = i64::MAX;
+        snap.family = Some(family.clone());
+        let descriptor = family.descriptor();
+        let limits = AdvertisedLimits {
+            max_nodes: u64::MAX,
+            max_edges: u64::MAX,
+            max_degree: 0,
+        };
+        let challenge = FamilyChallenge::admit(
+            CONTRACTS,
+            descriptor.family_id.as_bytes(),
+            descriptor.revision,
+            &descriptor.params,
+            &snap.nodes,
+            &snap.edges,
+            &limits,
+        )
+        .expect("the validator admits the fixture");
+        let (salt, instance) = (0u8..64)
+            .find_map(|i| {
+                let salt = [i; 32];
+                challenge
+                    .regenerate(nonce_for(&snap, salt).to_big_endian())
+                    .ok()
+                    .map(|instance| (salt, instance))
+            })
+            .expect("a salt yields an instance");
+        let n = instance.node_ids().len();
+        assert!(n <= 20, "the witness search is exhaustive: {n} nodes");
+        let spins = (0u32..1 << n)
+            .map(|bits| {
+                (0..n)
+                    .map(|k| if bits >> k & 1 == 1 { -1 } else { 1 })
+                    .collect::<Vec<i8>>()
+            })
+            .find(|spins| challenge.verify_witness(&instance, spins).is_ok() == want_feasible)
+            .expect("the instance has a witness of each kind");
+        (snap, salt, spins)
+    }
+
+    /// A pending family proof is judged on the instance its nonce regenerates,
+    /// not on the legacy draw, and one infeasible witness rejects it whole.
+    #[test]
+    fn a_family_proof_is_judged_on_its_regenerated_instance() {
+        let (snap, salt, spins) = family_case(true);
+        let pending = pending_with(&snap, std::slice::from_ref(&spins), salt);
+        assert!(judge_pending_proof(&pending, &snap).clears());
+
+        let (snap, salt, spins) = family_case(false);
+        let pending = pending_with(&snap, &[spins], salt);
+        match judge_pending_proof(&pending, &snap) {
+            Verdict::Malformed(reason) => assert!(reason.contains("family witness"), "{reason}"),
+            other => panic!("an infeasible witness is rejected: {other:?}"),
         }
     }
 

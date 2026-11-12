@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 
 use parity_scale_codec::Encode;
 use quantum_validation::{AllowedValueSpec, MilliValue};
-use sp_core::hashing::blake2_256;
+use sp_crypto_hashing::blake2_256;
 
 /// Default binary spin set (`±MILLI_SCALE`) used when a caller has no spin spec.
 pub const DEFAULT_SPIN_SET: [MilliValue; 2] = [-1000, 1000];
@@ -76,6 +76,30 @@ impl Topology {
             allowed_j_milli: self.allowed_j.clone(),
         }
     }
+}
+
+/// Chain hash of a family topology: `blake2_256` over the SCALE encoding of
+/// `(b"quip-family-topology-v1", legacy_hash, descriptor_digest,
+/// topology_order_digest)`. A byte array encodes without a length prefix, so
+/// the input is the four parts back to back.
+///
+/// Byte-identical to `pallet_quantum_pow::topology::hash_family_topology`.
+/// `legacy_hash` is [`topology_hash`] of the same registration.
+#[must_use]
+pub fn family_topology_hash(
+    legacy_hash: [u8; 32],
+    descriptor_digest: [u8; 32],
+    topology_order_digest: [u8; 32],
+) -> [u8; 32] {
+    blake2_256(
+        &(
+            b"quip-family-topology-v1",
+            legacy_hash,
+            descriptor_digest,
+            topology_order_digest,
+        )
+            .encode(),
+    )
 }
 
 /// The graph-only fingerprint a miner with a native working graph advertises
@@ -195,6 +219,23 @@ mod tests {
         // Different specs hash differently.
         let other = topology_hash_sets(&nodes, &edges, &[-1000, 1000], &[-1000, 1000], spin);
         assert_ne!(sorted, other, "different h sets");
+    }
+
+    #[test]
+    fn family_hash_is_the_four_parts_back_to_back_under_blake2() {
+        let (legacy, descriptor, order) = ([1u8; 32], [2u8; 32], [3u8; 32]);
+        let mut bytes = b"quip-family-topology-v1".to_vec();
+        bytes.extend(legacy);
+        bytes.extend(descriptor);
+        bytes.extend(order);
+        assert_eq!(
+            family_topology_hash(legacy, descriptor, order),
+            blake2_256(&bytes)
+        );
+        assert_ne!(
+            family_topology_hash(legacy, descriptor, order),
+            family_topology_hash(legacy, order, descriptor)
+        );
     }
 
     #[test]

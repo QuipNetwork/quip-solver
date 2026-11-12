@@ -919,6 +919,82 @@ mod verification {
         assert!(validated.accepted);
     }
 
+    /// CO-4: a family witness this coordinator accepts reaches the chain as a
+    /// witness the validator accepts. The proof is packed the way
+    /// `submit_proof` packs it, and the pallet's own steps check it: the nonce
+    /// as a `U256`, the instance regenerated from its big-endian bytes, each
+    /// row unpacked at the instance size, then `FamilyChallenge::verify_witness`.
+    #[test]
+    fn an_accepted_family_witness_passes_the_validator_check() {
+        use quantum_validation::families::{AdvertisedLimits, FamilyChallenge, CONTRACTS};
+        use quantum_validation::packed::unpack_solution;
+        use quantum_validation::AllowedValueSpec;
+        use quip_coordinator::chain::proof_encode::{build_quantum_proof, ProofBuildContext};
+        use quip_coordinator::chain::submit::Proof;
+
+        let (lease, verifier, result) = polariton_report(true);
+        let (_, validated) = verify_and_select(&lease, &verifier, &open_target(), &result).unwrap();
+        let salt: [u8; 32] = result.salt.as_slice().try_into().unwrap();
+        let rows = validated.selected_solutions;
+        let spin_set = vec![-1000, 1000];
+        let quantum = build_quantum_proof(
+            &Proof {
+                job_id: result.job_id.clone(),
+                best_energy_milli: validated.best_energy_milli,
+                diversity_milli: validated.diversity_milli,
+                n_valid: validated.n_valid,
+                solutions: rows.clone(),
+                is_pow: true,
+                order_id: Vec::new(),
+                generation: 1,
+                salt: salt.to_vec(),
+                device_access_time_us: 0,
+            },
+            &ProofBuildContext {
+                topology_hash: [0; 32],
+                last_proof_block_hash: LAST_PROOF,
+                miner_identity: MINER,
+                salt,
+                num_nodes: rows[0].spins.len(),
+                allowed_spin: AllowedValueSpec::Set(spin_set.clone()),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            quantum.nonce.to_big_endian().to_vec(),
+            result.nonce,
+            "the lease nonce is the chain nonce in big-endian bytes"
+        );
+
+        let blob = quip_solver_conformance::topology(ROUTING_TOPOLOGY).unwrap();
+        let descriptor = lease.family.as_ref().unwrap();
+        let challenge = FamilyChallenge::admit(
+            CONTRACTS,
+            descriptor.family_id.as_bytes(),
+            descriptor.revision,
+            &descriptor.params,
+            &blob.nodes,
+            &blob.edges,
+            &AdvertisedLimits {
+                max_nodes: 5_000,
+                max_edges: 50_000,
+                max_degree: 0,
+            },
+        )
+        .unwrap();
+        let instance = challenge.regenerate(quantum.nonce.to_big_endian()).unwrap();
+        let spec = AllowedValueSpec::Set(spin_set.as_slice());
+        for (packed, row) in quantum.solutions.iter().zip(&rows) {
+            let milli = unpack_solution(packed, instance.node_ids().len(), &spec).unwrap();
+            let spins: Vec<i8> = milli.iter().map(|&v| if v > 0 { 1 } else { -1 }).collect();
+            assert_eq!(spins, row.spins);
+            assert_eq!(
+                challenge.verify_witness(&instance, &spins),
+                Ok(row.energy_milli)
+            );
+        }
+    }
+
     /// The rescore alone accepts this report: its energy is honest. Only the
     /// family's hard constraint refuses it.
     #[test]

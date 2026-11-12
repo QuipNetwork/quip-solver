@@ -39,7 +39,35 @@ pub struct CurveCScale {
     pub hard_milli: u32,
 }
 
-/// Runtime-API mining snapshot (matches pallet `MiningSnapshot`).
+/// Root-set energy band of a family topology (matches pallet `EnergyBand`),
+/// stored under `TopologyEnergyBand[topology_hash]`. Field order is the
+/// pallet's.
+#[derive(Clone, Copy, Debug, Encode, Decode, PartialEq, Eq)]
+pub struct EnergyBandScale {
+    /// Hardest (most negative) end of the band, in milli.
+    pub hard_milli: i64,
+    /// Easiest (least negative) end of the band, in milli.
+    pub easy_milli: i64,
+}
+
+/// A family revision and its canonical parameter bytes (matches pallet
+/// `FamilyDescriptor`). The pallet's bounded vectors encode as plain vectors.
+#[derive(Clone, Debug, Encode, Decode, PartialEq, Eq)]
+pub struct FamilyDescriptorScale {
+    /// The family id, as ASCII bytes.
+    pub family_id: Vec<u8>,
+    /// The exact revision of the family.
+    pub revision: u32,
+    /// The canonical parameter encoding.
+    pub params: Vec<u8>,
+}
+
+/// `QuantumPowApi` version whose `MiningSnapshot` and `TopologyMeta` carry the
+/// `family` field. Version 2 encodes both without it.
+pub const FAMILY_API_VERSION: u32 = 3;
+
+/// Runtime-API mining snapshot (matches pallet `MiningSnapshot` at
+/// `QuantumPowApi` version 3).
 ///
 /// Note: no `block_number` field — callers fetch the header separately.
 #[derive(Clone, Debug, Encode, Decode, PartialEq, Eq)]
@@ -60,13 +88,18 @@ pub struct MiningSnapshotScale {
     pub allowed_j_values: AllowedValueSpec<Vec<i32>>,
     /// Allowed spin values.
     pub allowed_spin_values: AllowedValueSpec<Vec<i32>>,
+    /// The family descriptor, when the chain draws `h` and `j` through the
+    /// canonical generator. `None` keeps the legacy draw.
+    pub family: Option<FamilyDescriptorScale>,
 }
 
-/// Runtime-API registered topology (matches pallet `TopologyMeta`).
+/// Runtime-API registered topology (matches pallet `TopologyMeta` at
+/// `QuantumPowApi` version 3).
 ///
 /// Returned by `QuantumPowApi_topology_meta(hash)`. The hash is the content
 /// hash of every field but `registered_at`, so one hash names one topology
-/// for the life of the chain and the client caches it by hash.
+/// for the life of the chain and the client caches it by hash. Decode it with
+/// [`TopologyMetaScale::decode_for_api`], because version 2 has no `family`.
 #[derive(Clone, Debug, Encode, Decode, PartialEq, Eq)]
 pub struct TopologyMetaScale {
     /// Topology node ids.
@@ -79,8 +112,49 @@ pub struct TopologyMetaScale {
     pub allowed_j_values: AllowedValueSpec<Vec<i32>>,
     /// Allowed spin values.
     pub allowed_spin_values: AllowedValueSpec<Vec<i32>>,
+    /// The family descriptor, when the chain draws `h` and `j` through the
+    /// canonical generator. `None` keeps the legacy draw.
+    pub family: Option<FamilyDescriptorScale>,
     /// Block number the topology was registered at.
     pub registered_at: u32,
+}
+
+/// `TopologyMeta` as `QuantumPowApi` version 2 encodes it: no `family`.
+#[derive(Decode)]
+struct TopologyMetaV2Scale {
+    nodes: Vec<u32>,
+    edges: Vec<(u32, u32)>,
+    allowed_h_values: AllowedValueSpec<Vec<i32>>,
+    allowed_j_values: AllowedValueSpec<Vec<i32>>,
+    allowed_spin_values: AllowedValueSpec<Vec<i32>>,
+    registered_at: u32,
+}
+
+impl TopologyMetaScale {
+    /// Decode one `TopologyMeta` in the layout of `QuantumPowApi` version
+    /// `api_version`. Version 3 inserts `family` before `registered_at`, so a
+    /// version-2 decoder would read a wrong `registered_at` from it.
+    ///
+    /// # Errors
+    /// Returns the SCALE error when `input` does not hold that layout.
+    pub fn decode_for_api(
+        input: &mut &[u8],
+        api_version: u32,
+    ) -> Result<Self, parity_scale_codec::Error> {
+        if api_version >= FAMILY_API_VERSION {
+            return Self::decode(input);
+        }
+        let v2 = TopologyMetaV2Scale::decode(input)?;
+        Ok(Self {
+            nodes: v2.nodes,
+            edges: v2.edges,
+            allowed_h_values: v2.allowed_h_values,
+            allowed_j_values: v2.allowed_j_values,
+            allowed_spin_values: v2.allowed_spin_values,
+            family: None,
+            registered_at: v2.registered_at,
+        })
+    }
 }
 
 /// Proof payload for `QuantumPow.submit_proof` (pallet index 10, call index 4).
@@ -788,6 +862,11 @@ mod tests {
             allowed_h_values: AllowedValueSpec::Set(vec![-1000, 0, 1000]),
             allowed_j_values: AllowedValueSpec::Set(vec![-1000, 1000]),
             allowed_spin_values: AllowedValueSpec::Set(vec![-1000, 1000]),
+            family: Some(FamilyDescriptorScale {
+                family_id: b"quip/ice-glass".to_vec(),
+                revision: 1,
+                params: vec![1, 2, 3],
+            }),
         };
         assert_roundtrip("Option<MiningSnapshotScale>", &Some(snap));
         let meta = TopologyMetaScale {
@@ -796,9 +875,17 @@ mod tests {
             allowed_h_values: AllowedValueSpec::Set(vec![-1000, 0, 1000]),
             allowed_j_values: AllowedValueSpec::Set(vec![-1000, 1000]),
             allowed_spin_values: AllowedValueSpec::Set(vec![-1000, 1000]),
+            family: None,
             registered_at: 7,
         };
         assert_roundtrip("Option<TopologyMetaScale>", &Some(meta));
+        assert_roundtrip(
+            "EnergyBandScale",
+            &EnergyBandScale {
+                hard_milli: -9_000_000,
+                easy_milli: -7_000_000,
+            },
+        );
         assert_roundtrip("JobOrderScale", &valid_job_order());
         assert_roundtrip(
             "CurveCScale",
@@ -808,6 +895,43 @@ mod tests {
                 hard_milli: 750,
             },
         );
+    }
+
+    /// The pallet's `TopologyMeta` byte layout under each API version, built
+    /// field by field. Version 3 puts `family` before `registered_at`.
+    #[test]
+    fn topology_meta_decodes_in_the_layout_of_each_api_version() {
+        let spec = AllowedValueSpec::Set(vec![-1000, 1000]);
+        let mut common = Vec::new();
+        common.extend(vec![0u32, 1].encode());
+        common.extend(vec![(0u32, 1u32)].encode());
+        common.extend(spec.encode());
+        common.extend(spec.encode());
+        common.extend(spec.encode());
+        let registered_at = 0x0102_0304u32.encode();
+
+        let mut v2 = common.clone();
+        v2.extend(&registered_at);
+        let legacy = TopologyMetaScale::decode_for_api(&mut v2.as_slice(), 2).unwrap();
+        assert_eq!((legacy.family, legacy.registered_at), (None, 0x0102_0304));
+
+        let descriptor = FamilyDescriptorScale {
+            family_id: b"quip/ice-glass".to_vec(),
+            revision: 1,
+            params: vec![9; 5],
+        };
+        let mut v3 = common.clone();
+        v3.extend(Some(descriptor.clone()).encode());
+        v3.extend(&registered_at);
+        let family = TopologyMetaScale::decode_for_api(&mut v3.as_slice(), 3).unwrap();
+        assert_eq!(family.family, Some(descriptor));
+        assert_eq!(family.registered_at, 0x0102_0304);
+
+        let mut v3_legacy = common;
+        v3_legacy.push(0);
+        v3_legacy.extend(&registered_at);
+        let unbound = TopologyMetaScale::decode_for_api(&mut v3_legacy.as_slice(), 3).unwrap();
+        assert_eq!((unbound.family, unbound.registered_at), (None, 0x0102_0304));
     }
 
     #[test]

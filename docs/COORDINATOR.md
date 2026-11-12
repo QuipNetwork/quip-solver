@@ -70,7 +70,9 @@ seconds warns once.
   configs are not interchangeable.
 - **An incompatible validator.** `chain::preflight` reads the runtime version
   and checks `QuantumPowApi`. The coordinator drives version 2 or newer, the
-  version that added `difficulty_for`, which every poll calls.
+  version that added `difficulty_for`, which every poll calls. Version 3,
+  in runtime 120, adds a `family` field to the topology record. Each poll reads
+  the version and decodes the record in the layout of that version.
 - **An unfunded miner account.** `funding.rs` reads the account balance and,
   when the balance is below `min_balance_plancks` (2 UNIT), requests a top up
   from `faucet_url`. It retries with backoff for `funding_timeout_s` (10
@@ -453,11 +455,16 @@ nothing. Runtime 119 (quip-validator v0.4.0) holds the threshold at the
 stored base through 100 blocks. From block 101 it eases every block at the
 combined rate, `1 - 0.975 * 0.975` (4.9375%) of the room per epoch, for the
 blocks past 100 only. The 1,000 milli floor per epoch still applies near the
-easy cap. Runtime 120 (quip-validator v0.4.1) keeps the gated rule and
+easy cap. Runtime 120 (quip-validator 0.5.0) keeps the gated rule and
 lets the council move the target with `set_target_proof_blocks`, from 80 to
 400 blocks. The target is `TargetProofBlocksOverride`, with a default of
 100. Each read of the difficulty recomputes the whole round from the stored
 base with the current target.
+A family topology has no expected ground-state curve. The chain runs its
+difficulty on the band that Root sets with `set_topology_energy_band`, with
+the knee at the midpoint of the band. `fetch_decay_params` reads
+`TopologyEnergyBand`, and the feeder builds the curve from the band when one
+exists.
 `DecayAlgorithm` names the three rules. `DecayModel` holds the stored base
 difficulty, the curve, the epoch length, the rule, and the target, and
 answers the threshold at any elapsed block.
@@ -583,9 +590,35 @@ than zero, the miner counts as a round participant.
 
 `FAMILY_CONTRACTS` in `crates/quip-coordinator/src/lease.rs` is
 `ising_generators::registry::CONTRACTS`, every family revision that the
-generator crate ships. The chain snapshot sets no family, so live mining stays
-on the legacy draw. Family leases come only from `drive`. A snapshot with a
-family issues only family leases and has no legacy fallback.
+generator crate ships. A snapshot with a family issues only family leases and
+has no legacy fallback.
+
+On runtime API version 3 a registered topology has an optional family
+descriptor: one family revision with its parameter bytes. The descriptor is
+part of the topology hash. The
+coordinator mines a family topology only when all three checks pass:
+
+1. `[miner] family_mining = true`. The key defaults to `false`.
+2. `ChallengeFamily::admit` accepts the descriptor on the registered node and
+   edge order.
+3. The family topology hash rebuilt from the descriptor equals the hash the
+   chain names. The rebuild follows `hash_family_topology` in the pallet:
+   `blake2_256` over `quip-family-topology-v1`, the legacy topology hash, the
+   descriptor digest, and the topology order digest.
+
+When a check fails, the snapshot names no work, and the coordinator
+logs the reason once for each topology. The chain would reject every proof
+from that round, because a miner that drew the legacy model cannot produce a
+family witness. A topology without a descriptor keeps the legacy draw.
+
+A family witness covers the instance that its nonce regenerates, not the base
+topology. `submit_proof` packs each row at the instance size. The pallet
+regenerates the instance from the big-endian bytes of the proof nonce, unpacks
+each row at that size, and checks each witness with
+`FamilyChallenge::verify_witness`. One infeasible witness rejects the proof.
+The pool watch replays the same steps with the validator's
+`quantum_validation::families` code before it stops a round for a pending
+family proof.
 
 `ChallengeFamily::admit` checks a descriptor against the contract table and the
 ordered topology. The descriptor is then fixed for that challenge.
@@ -599,7 +632,9 @@ sampler, and the router applies the sampler's encoding, local-field, and
 exact-resolution limits. A rejection applies to one family, revision, and
 parameter set.
 
-`[miner].solver_pin` limits family work to one miner id or `solver_id`. The pin
+`[miner].family_mining` turns on mining for a chain topology that carries a
+family descriptor. `[miner].solver_pin` limits family work to one miner id or
+`solver_id`. The pin
 does not affect legacy work and does not admit an incompatible miner.
 
 The coordinator regenerates each family `Result` from the descriptor of the

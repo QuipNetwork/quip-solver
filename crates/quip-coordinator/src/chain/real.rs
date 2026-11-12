@@ -11,16 +11,18 @@ use super::extrinsic::{
     miner_identity_bytes, miners_storage_key, node_descriptors_storage_key,
     order_solutions_storage_key, participants_by_qblock_storage_key, qblocks_storage_key,
     signer_account_bytes, solvers_storage_key, target_proof_blocks_override_storage_key,
-    topology_curve_c_storage_key, RuntimeTxContext, SignedExtensionContext,
+    topology_curve_c_storage_key, topology_energy_band_storage_key, RuntimeTxContext,
+    SignedExtensionContext,
 };
 use super::pool::{decode_pending_proof, PendingProof};
 use super::proof_encode::{build_quantum_proof, ProofBuildContext};
 use super::scale_types::{
     encode_deregister_solver_call, encode_participate_call, encode_register_miner_call,
     encode_register_solver_call, encode_set_descriptor_call, encode_submit_proof_call,
-    encode_submit_solution_call, require_set_values, CurveCScale, DifficultyConfig, JobOrderScale,
-    JobSolutionScale, MinerInfoScale, MinerKind, NodeDescriptorV2Input, OrderStatus, OrderTiming,
-    SolverInfoScale, SolverType, TopologyMetaScale,
+    encode_submit_solution_call, require_set_values, CurveCScale, DifficultyConfig,
+    EnergyBandScale, FamilyDescriptorScale, JobOrderScale, JobSolutionScale, MinerInfoScale,
+    MinerKind, NodeDescriptorV2Input, OrderStatus, OrderTiming, SolverInfoScale, SolverType,
+    TopologyMetaScale,
 };
 use super::submit::{
     classify_descriptor, classify_participation, classify_receipt, classify_registration,
@@ -88,6 +90,12 @@ pub struct RealChainClient {
     reachable: Mutex<Option<bool>>,
     /// Kind declared on `participate`. Derived from the miners this process starts.
     participate_kind: MinerKind,
+    /// Whether a family topology may be mined. Off by default: the snapshot
+    /// then reports nothing to mine on a family topology.
+    family_mining: bool,
+    /// The last family topology this client refused, so the refusal is logged
+    /// once per topology rather than on every poll.
+    refused_family: Mutex<Option<[u8; 32]>>,
     /// Registered mempool type, scoped to the account that was read.
     registered_solver: Mutex<Option<([u8; 32], SolverType)>>,
 }
@@ -108,7 +116,16 @@ impl RealChainClient {
             reachable: Mutex::new(None),
             participate_kind,
             registered_solver: Mutex::new(None),
+            family_mining: false,
+            refused_family: Mutex::new(None),
         }
+    }
+
+    /// Allow or refuse mining a family topology (`[miner] family_mining`).
+    #[must_use]
+    pub const fn with_family_mining(mut self, enabled: bool) -> Self {
+        self.family_mining = enabled;
+        self
     }
 
     /// Construct a client over a caller-supplied transport.
@@ -299,6 +316,20 @@ impl RealChainClient {
         hash: &[u8; 32],
         at_hex: &str,
     ) -> Result<Option<T>, ChainError> {
+        let Some(bytes) = self.quantum_pow_bytes_by_hash(method, hash, at_hex).await? else {
+            return Ok(None);
+        };
+        Option::<T>::decode(&mut &bytes[..]).map_err(|e| ChainError::Decode(e.to_string()))
+    }
+
+    /// The raw SCALE answer of a `QuantumPowApi` method that takes one `H256`.
+    /// `Ok(None)` when the node answers null.
+    async fn quantum_pow_bytes_by_hash(
+        &self,
+        method: &str,
+        hash: &[u8; 32],
+        at_hex: &str,
+    ) -> Result<Option<Vec<u8>>, ChainError> {
         let result = self
             .rpc_call(
                 "state_call",
@@ -312,8 +343,7 @@ impl RealChainClient {
         let Some(hex) = result.as_str() else {
             return Ok(None);
         };
-        let bytes = hex_decode(hex).map_err(ChainError::Decode)?;
-        Option::<T>::decode(&mut &bytes[..]).map_err(|e| ChainError::Decode(e.to_string()))
+        hex_decode(hex).map(Some).map_err(ChainError::Decode)
     }
 
     /// The topology the snapshot mines on: the caller's choice, else the
@@ -335,10 +365,13 @@ impl RealChainClient {
     /// The registered topology under `hash`: the cached one when the last
     /// snapshot used the same hash, else `QuantumPowApi_topology_meta`, whose
     /// answer replaces the cache. `Ok(None)` when the hash is not registered.
+    /// `api_version` is the runtime's `QuantumPowApi` version, which fixes the
+    /// record layout.
     async fn topology_meta(
         &self,
         hash: [u8; 32],
         at_hex: &str,
+        api_version: u32,
     ) -> Result<Option<TopologyMetaScale>, ChainError> {
         let cached = self.topology.lock().ok().and_then(|g| {
             g.as_ref()
@@ -348,13 +381,13 @@ impl RealChainClient {
         if cached.is_some() {
             return Ok(cached);
         }
-        let meta = self
-            .quantum_pow_call_by_hash::<TopologyMetaScale>(
-                "QuantumPowApi_topology_meta",
-                &hash,
-                at_hex,
-            )
-            .await?;
+        let meta = match self
+            .quantum_pow_bytes_by_hash("QuantumPowApi_topology_meta", &hash, at_hex)
+            .await?
+        {
+            None => None,
+            Some(bytes) => decode_topology_meta(&bytes, api_version)?,
+        };
         if let Some(meta) = &meta {
             tracing::info!(
                 topology = %hex_encode(&hash),
@@ -370,6 +403,123 @@ impl RealChainClient {
             }
         }
         Ok(meta)
+    }
+
+    /// Bind the chain's family descriptor for `topology_hash`.
+    ///
+    /// The descriptor must pass admission on this build's contract table, and
+    /// the family topology hash rebuilt from it must equal `topology_hash`. The
+    /// second check ties the instance this coordinator regenerates to the one
+    /// the pallet regenerates: a descriptor read from another topology, or
+    /// parsed differently, cannot match.
+    ///
+    /// # Errors
+    /// Returns why this coordinator cannot mine the topology.
+    fn bind_family(
+        &self,
+        topology_hash: [u8; 32],
+        meta: &TopologyMetaScale,
+        descriptor: &FamilyDescriptorScale,
+    ) -> Result<crate::lease::ChallengeFamily, String> {
+        let id = String::from_utf8_lossy(&descriptor.family_id);
+        let label = format!("{id} revision {}", descriptor.revision);
+        if !self.family_mining {
+            return Err(format!(
+                "the chain mines family {label}; set [miner] family_mining = true to mine it"
+            ));
+        }
+        let family_id = std::str::from_utf8(&descriptor.family_id)
+            .map_err(|_| format!("family id of {label} is not UTF-8"))?;
+        let topology = crate::topology::Topology::from_nodes_edges(
+            meta.nodes.clone(),
+            meta.edges.clone(),
+            &[],
+            &[],
+            &[],
+        );
+        let family = crate::lease::ChallengeFamily::admit(
+            crate::lease::FAMILY_CONTRACTS,
+            family_id,
+            descriptor.revision,
+            descriptor.params.clone(),
+            &topology,
+        )
+        .map_err(|code| format!("this build does not admit family {label}: {code:?}"))?;
+        let legacy_hash = crate::topology::topology_hash(
+            &meta.nodes,
+            &meta.edges,
+            &meta.allowed_h_values.as_slice(),
+            &meta.allowed_j_values.as_slice(),
+            &meta.allowed_spin_values.as_slice(),
+        );
+        let rebuilt = crate::topology::family_topology_hash(
+            legacy_hash,
+            *family.descriptor_digest(),
+            *family.topology_order_digest(),
+        );
+        if rebuilt != topology_hash {
+            return Err(format!(
+                "family {label} hashes to {} here, not to the chain's {}",
+                hex_encode(&rebuilt),
+                hex_encode(&topology_hash)
+            ));
+        }
+        Ok(family)
+    }
+
+    /// The registered topology under `topology_hash` with its bound family.
+    /// `Ok(None)` when the hash is not registered, or when this client does not
+    /// mine its family.
+    async fn mineable_topology(
+        &self,
+        topology_hash: [u8; 32],
+        at_hex: &str,
+        api_version: u32,
+    ) -> Result<Option<(TopologyMetaScale, Option<crate::lease::ChallengeFamily>)>, ChainError>
+    {
+        let Some(meta) = self
+            .topology_meta(topology_hash, at_hex, api_version)
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(self
+            .chain_family(topology_hash, &meta)
+            .ok()
+            .map(|family| (meta, family)))
+    }
+
+    /// The family bound to `topology_hash`: `Ok(None)` for a legacy topology,
+    /// and `Err` after logging why a family topology is not mined.
+    fn chain_family(
+        &self,
+        topology_hash: [u8; 32],
+        meta: &TopologyMetaScale,
+    ) -> Result<Option<crate::lease::ChallengeFamily>, FamilyRefused> {
+        let Some(descriptor) = &meta.family else {
+            return Ok(None);
+        };
+        self.bind_family(topology_hash, meta, descriptor)
+            .map(Some)
+            .map_err(|reason| {
+                self.refuse_family(topology_hash, &reason);
+                FamilyRefused
+            })
+    }
+
+    /// Log once per topology that a family topology is not mined.
+    fn refuse_family(&self, topology_hash: [u8; 32], reason: &str) {
+        let Ok(mut last) = self.refused_family.lock() else {
+            return;
+        };
+        if *last != Some(topology_hash) {
+            tracing::warn!(
+                topology = %hex_encode(&topology_hash),
+                reason,
+                "not mining the family topology"
+            );
+            *last = Some(topology_hash);
+        }
     }
 
     /// Fetch the chain's default topology at one best-block hash.
@@ -392,12 +542,22 @@ impl RealChainClient {
         let Some(hash) = self.snapshot_topology_hash(None, at).await? else {
             return Ok(None);
         };
-        let metadata = self.topology_meta(hash, at).await?.ok_or_else(|| {
-            ChainError::Decode(format!(
-                "default topology {} is not registered",
-                hex_encode(&hash)
-            ))
-        })?;
+        let runtime_version = self
+            .rpc_call(
+                "state_getRuntimeVersion",
+                Value::Array(vec![Value::String(at.to_owned())]),
+            )
+            .await?;
+        let api_version = quantum_pow_api_version(&runtime_version)?;
+        let metadata = self
+            .topology_meta(hash, at, api_version)
+            .await?
+            .ok_or_else(|| {
+                ChainError::Decode(format!(
+                    "default topology {} is not registered",
+                    hex_encode(&hash)
+                ))
+            })?;
         Ok(Some((hash, metadata)))
     }
 
@@ -1037,6 +1197,7 @@ impl ChainClient for RealChainClient {
         };
         let block_number = parse_block_number(&header)?;
         let spec_version = parse_spec_version(&runtime_version)?;
+        let api_version = quantum_pow_api_version(&runtime_version)?;
 
         // Decayed difficulty for this block. `None` means the hash is not
         // registered, which is the same "nothing to mine" as no topology.
@@ -1050,9 +1211,13 @@ impl ChainClient for RealChainClient {
         let Some(difficulty) = difficulty else {
             return Ok(None);
         };
-        let Some(meta) = self.topology_meta(topology_hash, &at_hex).await? else {
+        let Some((meta, family)) = self
+            .mineable_topology(topology_hash, &at_hex, api_version)
+            .await?
+        else {
             return Ok(None);
         };
+        let bound = family.is_some();
 
         let snap = MiningSnapshot {
             head_hash: block_hash,
@@ -1065,10 +1230,8 @@ impl ChainClient for RealChainClient {
             topology_hash: topology_hash.to_vec(),
             nodes: meta.nodes,
             edges: meta.edges,
-            allowed_h_milli: require_set_values(&meta.allowed_h_values)
-                .map_err(ChainError::Decode)?,
-            allowed_j_milli: require_set_values(&meta.allowed_j_values)
-                .map_err(ChainError::Decode)?,
+            allowed_h_milli: model_values(bound, &meta.allowed_h_values)?,
+            allowed_j_milli: model_values(bound, &meta.allowed_j_values)?,
             allowed_spin_milli: require_set_values(&meta.allowed_spin_values)
                 .map_err(ChainError::Decode)?,
             min_solutions: difficulty.min_solutions,
@@ -1078,7 +1241,7 @@ impl ChainClient for RealChainClient {
             spec_version,
             target_proof_blocks: target_override
                 .map_or(crate::decay::TARGET_PROOF_BLOCKS, u64::from),
-            family: None,
+            family,
         };
 
         if let Ok(mut g) = self.last_snapshot.lock() {
@@ -1169,6 +1332,10 @@ impl ChainClient for RealChainClient {
             ),
             |c| (c.easy_milli, c.knee_milli, c.hard_milli),
         );
+        // Only a family topology has a band.
+        let band: Option<EnergyBandScale> = self
+            .read_storage(&topology_energy_band_storage_key(&topology_hash), &at)
+            .await?;
 
         Ok(Some(DecayParams {
             base_max_energy_milli: base
@@ -1178,6 +1345,7 @@ impl ChainClient for RealChainClient {
             c_easy_milli,
             c_knee_milli,
             c_hard_milli,
+            energy_band_milli: band.map(|b| (b.hard_milli, b.easy_milli)),
         }))
     }
 
@@ -1376,7 +1544,7 @@ impl ChainClient for RealChainClient {
             last_proof_block_hash: snap.last_proof_block_hash,
             miner_identity: miner_identity_bytes(&pair),
             salt,
-            num_nodes: snap.nodes.len(),
+            num_nodes: witness_len(&snap, proof),
             allowed_spin: spin_spec,
         };
         let quantum = build_quantum_proof(proof, &ctx)
@@ -1684,6 +1852,56 @@ fn parse_block_number(header: &Value) -> Result<u64, ChainError> {
     Err(ChainError::Decode("header.number unparseable".into()))
 }
 
+/// A family topology this client does not mine. The reason is already logged.
+struct FamilyRefused;
+
+/// The `h` or `J` values of a snapshot. A family draws `h` and `J` through its
+/// generator, so a family topology's value spec need not be a set: only the
+/// spin set encodes the witnesses.
+fn model_values(
+    family_bound: bool,
+    spec: &AllowedValueSpec<Vec<i32>>,
+) -> Result<Vec<i32>, ChainError> {
+    match require_set_values(spec) {
+        Ok(values) => Ok(values),
+        Err(_) if family_bound => Ok(Vec::new()),
+        Err(e) => Err(ChainError::Decode(e)),
+    }
+}
+
+/// One `Option<TopologyMeta>` answer in the layout of `api_version`.
+fn decode_topology_meta(
+    bytes: &[u8],
+    api_version: u32,
+) -> Result<Option<TopologyMetaScale>, ChainError> {
+    let decode_error = |e: parity_scale_codec::Error| ChainError::Decode(e.to_string());
+    match bytes.split_first() {
+        Some((0, _)) => Ok(None),
+        Some((1, mut rest)) => TopologyMetaScale::decode_for_api(&mut rest, api_version)
+            .map(Some)
+            .map_err(decode_error),
+        _ => Err(ChainError::Decode("topology_meta: not an Option".into())),
+    }
+}
+
+/// The `QuantumPowApi` version from a `state_getRuntimeVersion` response.
+fn quantum_pow_api_version(rv: &Value) -> Result<u32, ChainError> {
+    super::preflight::quantum_pow_api_version(rv)
+        .ok_or_else(|| ChainError::Decode("runtime reports no QuantumPowApi".into()))
+}
+
+/// The spin count of each witness in `proof`.
+///
+/// A legacy witness covers every topology node. A family witness covers the
+/// instance its nonce regenerates, which the session checked before the proof
+/// was built, so its rows carry the length and must agree with each other.
+fn witness_len(snap: &MiningSnapshot, proof: &Proof) -> usize {
+    match (&snap.family, proof.solutions.first()) {
+        (Some(_), Some(row)) => row.spins.len(),
+        _ => snap.nodes.len(),
+    }
+}
+
 /// `specVersion` from a `state_getRuntimeVersion` response.
 pub(crate) fn parse_spec_version(rv: &Value) -> Result<u32, ChainError> {
     u32::try_from(
@@ -1947,11 +2165,54 @@ mod tests {
     /// one registered topology per hash, a `DefaultTopology` the test can
     /// move, and a `LastProofBlock` the test can set. `None` answers null for
     /// both `LastProofBlock` and `LastProofBlockHash`, which is genesis.
+    ///
+    /// `api_version` fixes the `TopologyMeta` layout it answers in. `meta`
+    /// replaces the generated topology for every hash, and `band` answers
+    /// `TopologyEnergyBand`.
     struct SnapshotValidator {
         default_topology: std::sync::Mutex<[u8; 32]>,
         last_proof_block: std::sync::Mutex<Option<u32>>,
         target_override: std::sync::Mutex<Option<u32>>,
         topology_meta_calls: std::sync::Mutex<Vec<[u8; 32]>>,
+        api_version: u32,
+        meta: Option<crate::chain::scale_types::TopologyMetaScale>,
+        band: Option<crate::chain::scale_types::EnergyBandScale>,
+    }
+
+    impl SnapshotValidator {
+        fn new(default_topology: [u8; 32], api_version: u32) -> Self {
+            Self {
+                default_topology: std::sync::Mutex::new(default_topology),
+                last_proof_block: std::sync::Mutex::new(Some(10)),
+                target_override: std::sync::Mutex::new(None),
+                topology_meta_calls: std::sync::Mutex::new(Vec::new()),
+                api_version,
+                meta: None,
+                band: None,
+            }
+        }
+
+        /// `meta` as `Some(meta)` in the layout of `self.api_version`.
+        fn encode_meta(&self, meta: &crate::chain::scale_types::TopologyMetaScale) -> Vec<u8> {
+            use parity_scale_codec::Encode as _;
+            let mut out = vec![1];
+            if self.api_version >= crate::chain::scale_types::FAMILY_API_VERSION {
+                out.extend(meta.encode());
+            } else {
+                out.extend(
+                    (
+                        &meta.nodes,
+                        &meta.edges,
+                        &meta.allowed_h_values,
+                        &meta.allowed_j_values,
+                        &meta.allowed_spin_values,
+                        meta.registered_at,
+                    )
+                        .encode(),
+                );
+            }
+            out
+        }
     }
 
     const HEAD: [u8; 32] = [0xAA; 32];
@@ -1966,6 +2227,7 @@ mod tests {
             allowed_h_values: AllowedValueSpec::Set(vec![-1000, 1000]),
             allowed_j_values: AllowedValueSpec::Set(vec![-1000, 1000]),
             allowed_spin_values: AllowedValueSpec::Set(vec![-1000, 1000]),
+            family: None,
             registered_at: 3,
         }
     }
@@ -1979,8 +2241,10 @@ mod tests {
             params: JsonValue,
         ) -> Result<JsonValue, ChainError> {
             use crate::chain::extrinsic::{
-                default_topology_storage_key, hex_decode, last_proof_block_hash_storage_key,
-                last_proof_block_storage_key, target_proof_blocks_override_storage_key,
+                default_topology_storage_key, difficulties_storage_key, hex_decode,
+                last_proof_block_hash_storage_key, last_proof_block_storage_key,
+                target_proof_blocks_override_storage_key, topology_curve_c_storage_key,
+                topology_energy_band_storage_key,
             };
             use parity_scale_codec::Encode as _;
             let arg = |i: usize| {
@@ -2003,7 +2267,8 @@ mod tests {
                         hex_encode(&HEAD),
                         "runtime version read pinned at the head"
                     );
-                    serde_json::json!({ "specName": "quip-runtime", "specVersion": 118 })
+                    let spec = if self.api_version >= 3 { 120 } else { 118 };
+                    super::super::preflight::runtime_version_json(spec, self.api_version)
                 }
                 "state_getStorage" => {
                     assert_eq!(arg(1), hex_encode(&HEAD), "storage read pinned at the head");
@@ -2025,6 +2290,17 @@ mod tests {
                             Some(n) => hex(&n.encode()),
                             None => JsonValue::Null,
                         }
+                    } else if key
+                        == topology_energy_band_storage_key(&self.default_topology.lock().unwrap())
+                    {
+                        self.band
+                            .map_or(JsonValue::Null, |band| hex(&band.encode()))
+                    } else if key
+                        == difficulties_storage_key(&self.default_topology.lock().unwrap())
+                        || key
+                            == topology_curve_c_storage_key(&self.default_topology.lock().unwrap())
+                    {
+                        JsonValue::Null
                     } else {
                         panic!("unexpected storage key {}", arg(0))
                     }
@@ -2044,7 +2320,8 @@ mod tests {
                         }
                         "QuantumPowApi_topology_meta" => {
                             self.topology_meta_calls.lock().unwrap().push(hash);
-                            hex(&Some(topology_for(hash)).encode())
+                            let meta = self.meta.clone().unwrap_or_else(|| topology_for(hash));
+                            hex(&self.encode_meta(&meta))
                         }
                         other => panic!("unexpected runtime call {other}"),
                     }
@@ -2069,6 +2346,217 @@ mod tests {
         }
     }
 
+    /// A polariton topology as runtime API version 3 records it, bound to
+    /// `revision` of the family.
+    fn family_meta(revision: u32) -> crate::chain::scale_types::TopologyMetaScale {
+        use quantum_validation::AllowedValueSpec;
+        let blob =
+            quip_solver_conformance::topology(quip_solver_conformance::families::ROUTING_TOPOLOGY)
+                .expect("routing topology fixture");
+        crate::chain::scale_types::TopologyMetaScale {
+            nodes: blob.nodes,
+            edges: blob.edges,
+            allowed_h_values: AllowedValueSpec::Set(vec![0]),
+            allowed_j_values: AllowedValueSpec::Set(vec![1000]),
+            allowed_spin_values: AllowedValueSpec::Set(vec![-1000, 1000]),
+            family: Some(crate::chain::scale_types::FamilyDescriptorScale {
+                family_id: ising_generators::polariton::POLARITON_V1
+                    .family_id
+                    .as_bytes()
+                    .to_vec(),
+                revision,
+                params: quip_solver_conformance::families::polariton::P_POLARITON_Z24_L2_P0
+                    .to_vec(),
+            }),
+            registered_at: 4,
+        }
+    }
+
+    /// The hash the pallet registers `meta` under, from the validator's own
+    /// admission code: `register_topology` hashes the legacy fields, then mixes
+    /// in the descriptor digest and topology order digest of the challenge.
+    fn chain_family_hash(meta: &crate::chain::scale_types::TopologyMetaScale) -> [u8; 32] {
+        use quantum_validation::families::{AdvertisedLimits, FamilyChallenge, CONTRACTS};
+        let descriptor = meta.family.as_ref().expect("a family topology");
+        let challenge = FamilyChallenge::admit(
+            CONTRACTS,
+            &descriptor.family_id,
+            descriptor.revision,
+            &descriptor.params,
+            &meta.nodes,
+            &meta.edges,
+            &AdvertisedLimits {
+                max_nodes: 5_000,
+                max_edges: 50_000,
+                max_degree: 0,
+            },
+        )
+        .expect("the validator admits the fixture");
+        let legacy = crate::topology::topology_hash(
+            &meta.nodes,
+            &meta.edges,
+            &meta.allowed_h_values.as_slice(),
+            &meta.allowed_j_values.as_slice(),
+            &meta.allowed_spin_values.as_slice(),
+        );
+        crate::topology::family_topology_hash(
+            legacy,
+            challenge.descriptor_digest(),
+            challenge.topology_order_digest(),
+        )
+    }
+
+    fn family_client(validator: SnapshotValidator, family_mining: bool) -> RealChainClient {
+        RealChainClient::with_transport(
+            vec!["ws://scripted".to_string()],
+            "//Alice".to_string(),
+            MinerKind::Cpu,
+            std::sync::Arc::new(validator),
+        )
+        .with_family_mining(family_mining)
+    }
+
+    /// A family topology on runtime API version 3 binds the chain's own
+    /// descriptor, and its decay curve comes from the root-set band.
+    #[tokio::test]
+    async fn a_family_topology_binds_the_chain_descriptor_and_band() {
+        use crate::chain::ChainClient as _;
+        let meta = family_meta(1);
+        let hash = chain_family_hash(&meta);
+        let mut validator = SnapshotValidator::new(hash, 3);
+        validator.meta = Some(meta.clone());
+        validator.band = Some(crate::chain::scale_types::EnergyBandScale {
+            hard_milli: -900_000,
+            easy_milli: -700_000,
+        });
+        let client = family_client(validator, true);
+
+        let snap = client
+            .fetch_mining_snapshot(None, [0u8; 32], None)
+            .await
+            .expect("snapshot")
+            .expect("the family topology is mineable here");
+        assert_eq!(snap.topology_hash, hash.to_vec());
+        let family = snap.family.expect("the chain binds a family");
+        let chain = meta.family.expect("a family topology");
+        assert_eq!(family.descriptor().family_id.as_bytes(), chain.family_id);
+        assert_eq!(family.descriptor().revision, chain.revision);
+        assert_eq!(family.descriptor().params, chain.params);
+
+        let decay = client
+            .fetch_decay_params(hash)
+            .await
+            .expect("decay read")
+            .expect("decay params");
+        assert_eq!(decay.energy_band_milli, Some((-900_000, -700_000)));
+    }
+
+    /// Nothing is mined on a family topology that the switch keeps off, that
+    /// this build cannot admit, or whose descriptor does not hash to the
+    /// topology the chain names. Each is a round the chain would reject.
+    #[tokio::test]
+    async fn a_family_topology_is_not_mined_when_it_cannot_be_proven() {
+        use crate::chain::ChainClient as _;
+        let meta = family_meta(1);
+        let hash = chain_family_hash(&meta);
+        let legacy = crate::topology::topology_hash(
+            &meta.nodes,
+            &meta.edges,
+            &meta.allowed_h_values.as_slice(),
+            &meta.allowed_j_values.as_slice(),
+            &meta.allowed_spin_values.as_slice(),
+        );
+        for (label, revision, default, switch) in [
+            ("switch off", 1, hash, false),
+            ("unknown revision", 99, hash, true),
+            ("descriptor under the legacy hash", 1, legacy, true),
+        ] {
+            let mut validator = SnapshotValidator::new(default, 3);
+            validator.meta = Some(family_meta(revision));
+            let snap = family_client(validator, switch)
+                .fetch_mining_snapshot(None, [0u8; 32], None)
+                .await
+                .expect("snapshot read");
+            assert!(snap.is_none(), "{label}");
+        }
+    }
+
+    /// A family witness is packed at its instance size, which its rows carry.
+    /// A legacy witness is packed at the topology size.
+    #[test]
+    fn a_family_witness_is_packed_at_the_instance_size() {
+        let meta = family_meta(1);
+        let topology = crate::topology::Topology::from_nodes_edges(
+            meta.nodes.clone(),
+            meta.edges.clone(),
+            &[],
+            &[],
+            &[],
+        );
+        let mut snap = MiningSnapshot {
+            head_hash: [0; 32],
+            last_proof_block_hash: [0; 32],
+            topology_hash: vec![0; 32],
+            nodes: meta.nodes.clone(),
+            edges: meta.edges.clone(),
+            allowed_h_milli: vec![0],
+            allowed_j_milli: vec![1000],
+            allowed_spin_milli: vec![-1000, 1000],
+            min_solutions: 1,
+            max_energy_milli: 0,
+            min_diversity_milli: 0,
+            block_number: 1,
+            spec_version: 120,
+            target_proof_blocks: crate::decay::TARGET_PROOF_BLOCKS,
+            family: None,
+        };
+        let proof = super::Proof {
+            job_id: Vec::new(),
+            best_energy_milli: 0,
+            diversity_milli: 0,
+            n_valid: 1,
+            solutions: vec![crate::validate::SpinRow {
+                spins: vec![1; 7],
+                energy_milli: 0,
+            }],
+            is_pow: true,
+            order_id: Vec::new(),
+            generation: 1,
+            salt: vec![0; 32],
+            device_access_time_us: 0,
+        };
+        assert_eq!(super::witness_len(&snap, &proof), meta.nodes.len());
+        let descriptor = meta.family.expect("a family topology");
+        snap.family = Some(
+            crate::lease::ChallengeFamily::admit(
+                crate::lease::FAMILY_CONTRACTS,
+                std::str::from_utf8(&descriptor.family_id).expect("ascii id"),
+                descriptor.revision,
+                descriptor.params,
+                &topology,
+            )
+            .expect("admitted"),
+        );
+        assert_eq!(super::witness_len(&snap, &proof), 7);
+    }
+
+    /// A legacy topology on runtime API version 3 records `family: None` and
+    /// mines as before, with or without the switch.
+    #[tokio::test]
+    async fn a_legacy_topology_on_api_3_stays_legacy() {
+        use crate::chain::ChainClient as _;
+        for switch in [false, true] {
+            let snap = family_client(SnapshotValidator::new([0x11; 32], 3), switch)
+                .fetch_mining_snapshot(None, [0u8; 32], None)
+                .await
+                .expect("snapshot")
+                .expect("a legacy topology");
+            assert_eq!(snap.spec_version, 120);
+            assert!(snap.family.is_none());
+            assert_eq!(snap.nodes, vec![0, 1, 0x11]);
+        }
+    }
+
     /// The topology is the one payload that never changes under its hash, so
     /// polling the same hash must not download it again. A new default
     /// topology is a new hash and is downloaded when it first appears. The
@@ -2078,12 +2566,7 @@ mod tests {
         use crate::chain::ChainClient as _;
         let first = [0x11; 32];
         let second = [0x22; 32];
-        let validator = std::sync::Arc::new(SnapshotValidator {
-            default_topology: std::sync::Mutex::new(first),
-            last_proof_block: std::sync::Mutex::new(Some(10)),
-            target_override: std::sync::Mutex::new(None),
-            topology_meta_calls: std::sync::Mutex::new(Vec::new()),
-        });
+        let validator = std::sync::Arc::new(SnapshotValidator::new(first, 2));
         let client = RealChainClient::with_transport(
             vec!["ws://scripted".to_string()],
             "//Alice".to_string(),
@@ -2803,6 +3286,7 @@ mod default_topology_tests {
             allowed_h_values: AllowedValueSpec::Set(vec![0]),
             allowed_j_values: AllowedValueSpec::Set(vec![-1000, 1000]),
             allowed_spin_values: AllowedValueSpec::Set(vec![-1000, 1000]),
+            family: None,
             registered_at: 7,
         }
     }
@@ -2827,6 +3311,11 @@ mod default_topology_tests {
             },
         ];
         if let Some(hash) = hash {
+            steps.push(ExpectedCall {
+                method: "state_getRuntimeVersion",
+                params: serde_json::json!([hex_encode(&HEAD)]),
+                response: Ok(super::super::preflight::runtime_version_json(120, 3)),
+            });
             steps.push(ExpectedCall {
                 method: "state_call",
                 params: serde_json::json!([

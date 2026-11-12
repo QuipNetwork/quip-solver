@@ -3,8 +3,8 @@
 use parity_scale_codec::{Compact, Encode};
 use quip_transaction_crypto::{account_id_from_public, HybridPair, HybridTxSignature};
 use sp_core::crypto::SecretStringError;
-use sp_core::hashing::blake2_256;
 use sp_core::Pair as _;
+use sp_crypto_hashing::blake2_256;
 
 /// Chain state required to build signed-extension extras / additional.
 #[derive(Clone, Debug)]
@@ -318,6 +318,13 @@ pub fn miners_storage_key(account: &[u8; 32]) -> Vec<u8> {
 #[must_use]
 pub fn difficulties_storage_key(topology_hash: &[u8; 32]) -> Vec<u8> {
     quantum_pow_map_key(b"Difficulties", topology_hash)
+}
+
+/// `QuantumPow::TopologyEnergyBand[topology_hash]` — the root-set band a
+/// family topology's difficulty runs on.
+#[must_use]
+pub fn topology_energy_band_storage_key(topology_hash: &[u8; 32]) -> Vec<u8> {
+    quantum_pow_map_key(b"TopologyEnergyBand", topology_hash)
 }
 
 /// `QuantumPow::TopologyCurveC[topology_hash]` — per-topology c-triple override.

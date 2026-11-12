@@ -413,6 +413,22 @@ pub fn expected_gse_milli(
 }
 
 impl EnergyCurve {
+    /// The curve the chain runs on a family topology's energy band, as
+    /// `EnergyBand::curve` in `pallet_quantum_pow::difficulty`: the band's
+    /// ends, with the knee at their midpoint. `None` when the band is not
+    /// ordered, which the pallet also treats as no curve.
+    #[must_use]
+    pub const fn from_band(hard_milli: i64, easy_milli: i64) -> Option<Self> {
+        if hard_milli >= easy_milli {
+            return None;
+        }
+        Some(Self {
+            min_milli: hard_milli,
+            knee_milli: hard_milli.saturating_add(easy_milli) / 2,
+            max_milli: easy_milli,
+        })
+    }
+
     /// Build the decay curve from a topology and the chain's calibration
     /// c-triple (stored scaled milli: `700` == `0.70`). `min`/`knee`/`max` are
     /// the GSE estimates at `c_hard`/`c_knee`/`c_easy`; since a larger `c` is
