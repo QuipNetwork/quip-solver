@@ -10,8 +10,8 @@ use super::extrinsic::{
     last_proof_block_hash_storage_key, last_proof_block_storage_key, load_hybrid_pair,
     miner_identity_bytes, miners_storage_key, node_descriptors_storage_key,
     order_solutions_storage_key, participants_by_qblock_storage_key, qblocks_storage_key,
-    signer_account_bytes, solvers_storage_key, topology_curve_c_storage_key, RuntimeTxContext,
-    SignedExtensionContext,
+    signer_account_bytes, solvers_storage_key, target_proof_blocks_override_storage_key,
+    topology_curve_c_storage_key, RuntimeTxContext, SignedExtensionContext,
 };
 use super::pool::{decode_pending_proof, PendingProof};
 use super::proof_encode::{build_quantum_proof, ProofBuildContext};
@@ -999,7 +999,7 @@ impl ChainClient for RealChainClient {
         };
         let at_hex = hex_encode(&block_hash);
 
-        // Every read is pinned at `block_hash`, so the five round trips that
+        // Every read is pinned at `block_hash`, so the six round trips that
         // only depend on it run together. The topology itself is not among
         // them: it is fetched once per hash and cached (see `topology_meta`).
         // `LastProofBlock` at the head names the winning block one block
@@ -1007,7 +1007,18 @@ impl ChainClient for RealChainClient {
         // the zero hash when unset.
         let last_proof_block_key = last_proof_block_storage_key();
         let stored_root_key = last_proof_block_hash_storage_key();
-        let (header, topology_hash, last_proof_block, stored_root, runtime_version) = futures::try_join!(
+        // Runtime 120 lets the council move the decay gate. The override is
+        // OptionQuery, and runtime 119 has no such item, so unset means the
+        // runtime default on both.
+        let target_key = target_proof_blocks_override_storage_key();
+        let (
+            header,
+            topology_hash,
+            last_proof_block,
+            stored_root,
+            target_override,
+            runtime_version,
+        ) = futures::try_join!(
             self.rpc_call(
                 "chain_getHeader",
                 Value::Array(vec![Value::String(at_hex.clone())]),
@@ -1015,6 +1026,7 @@ impl ChainClient for RealChainClient {
             self.snapshot_topology_hash(topology_hash, &at_hex),
             self.read_storage::<u32>(&last_proof_block_key, &at_hex),
             self.read_storage::<[u8; 32]>(&stored_root_key, &at_hex),
+            self.read_storage::<u32>(&target_key, &at_hex),
             self.rpc_call(
                 "state_getRuntimeVersion",
                 Value::Array(vec![Value::String(at_hex.clone())]),
@@ -1064,6 +1076,8 @@ impl ChainClient for RealChainClient {
             min_diversity_milli: difficulty.min_diversity_milli,
             block_number,
             spec_version,
+            target_proof_blocks: target_override
+                .map_or(crate::decay::TARGET_PROOF_BLOCKS, u64::from),
             family: None,
         };
 
@@ -1936,6 +1950,7 @@ mod tests {
     struct SnapshotValidator {
         default_topology: std::sync::Mutex<[u8; 32]>,
         last_proof_block: std::sync::Mutex<Option<u32>>,
+        target_override: std::sync::Mutex<Option<u32>>,
         topology_meta_calls: std::sync::Mutex<Vec<[u8; 32]>>,
     }
 
@@ -1965,7 +1980,7 @@ mod tests {
         ) -> Result<JsonValue, ChainError> {
             use crate::chain::extrinsic::{
                 default_topology_storage_key, hex_decode, last_proof_block_hash_storage_key,
-                last_proof_block_storage_key,
+                last_proof_block_storage_key, target_proof_blocks_override_storage_key,
             };
             use parity_scale_codec::Encode as _;
             let arg = |i: usize| {
@@ -2003,6 +2018,11 @@ mod tests {
                     } else if key == last_proof_block_hash_storage_key() {
                         match *self.last_proof_block.lock().unwrap() {
                             Some(_) => hex(&STORED_ROOT),
+                            None => JsonValue::Null,
+                        }
+                    } else if key == target_proof_blocks_override_storage_key() {
+                        match *self.target_override.lock().unwrap() {
+                            Some(n) => hex(&n.encode()),
                             None => JsonValue::Null,
                         }
                     } else {
@@ -2061,6 +2081,7 @@ mod tests {
         let validator = std::sync::Arc::new(SnapshotValidator {
             default_topology: std::sync::Mutex::new(first),
             last_proof_block: std::sync::Mutex::new(Some(10)),
+            target_override: std::sync::Mutex::new(None),
             topology_meta_calls: std::sync::Mutex::new(Vec::new()),
         });
         let client = RealChainClient::with_transport(
@@ -2088,6 +2109,19 @@ mod tests {
         assert_eq!(snap.allowed_spin_milli, vec![-1000, 1000]);
         assert_eq!(snap.min_solutions, 1);
         assert_eq!(snap.max_energy_milli, -5_000);
+        assert_eq!(
+            snap.target_proof_blocks, 100,
+            "an unset override, as on runtime 119, reads as the default"
+        );
+
+        *validator.target_override.lock().unwrap() = Some(200);
+        let council = client
+            .fetch_mining_snapshot(None, [0u8; 32], None)
+            .await
+            .expect("snapshot after a council target change")
+            .expect("still registered");
+        assert_eq!(council.target_proof_blocks, 200, "runtime 120 override");
+        *validator.target_override.lock().unwrap() = None;
 
         *validator.last_proof_block.lock().unwrap() = Some(16);
         let won = client
@@ -2218,6 +2252,7 @@ mod tests {
             min_diversity_milli: 0,
             block_number: 1,
             spec_version,
+            target_proof_blocks: crate::decay::TARGET_PROOF_BLOCKS,
             family: None,
         }
     }

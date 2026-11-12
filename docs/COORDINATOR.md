@@ -22,7 +22,9 @@ how they fit together. For build and run commands, see `AGENTS.md`.
   Use this mode for benchmarking and comparisons under matched conditions.
 - `quip-coordinator seed-chain …` — registers a default topology and sets its
   difficulty on a fresh chain. You can seed a chain only once. Wipe the chain
-  data and restart the validator if `DefaultTopology` is already set.
+  data and restart the validator if `DefaultTopology` is already set. The calls
+  go through `Sudo`, so this works on runtime 119 and earlier. Runtime 120
+  has no `Sudo` pallet, and `seed-chain` refuses to run there.
 
 ## Logging
 
@@ -451,23 +453,31 @@ nothing. Runtime 119 (quip-validator v0.4.0) holds the threshold at the
 stored base through 100 blocks. From block 101 it eases every block at the
 combined rate, `1 - 0.975 * 0.975` (4.9375%) of the room per epoch, for the
 blocks past 100 only. The 1,000 milli floor per epoch still applies near the
-easy cap. `DecayAlgorithm` names the three. `DecayModel` holds the stored
-base difficulty, the curve, the epoch length, and the rule, and answers the
-threshold at any elapsed block.
+easy cap. Runtime 120 (quip-validator v0.4.1) keeps the gated rule and
+lets the council move the target with `set_target_proof_blocks`, from 80 to
+400 blocks. The target is `TargetProofBlocksOverride`, with a default of
+100. Each read of the difficulty recomputes the whole round from the stored
+base with the current target.
+`DecayAlgorithm` names the three rules. `DecayModel` holds the stored base
+difficulty, the curve, the epoch length, the rule, and the target, and
+answers the threshold at any elapsed block.
 
-`fetch_mining_snapshot` reads `state_getRuntimeVersion` at the snapshot
-block. `DecayAlgorithm::for_spec_version` picks the rule from the
-`spec_version`. Version 119 and later use the gated rule. Version 118 uses
-the continuous rule, and earlier versions use the stepwise rule. The feeder
-builds the model at each reseed. On every poll it swaps the rule into the
-stash when the `spec_version` changes. The stash keeps its candidates across the swap. The upgrade needs
-no restart.
+`fetch_mining_snapshot` reads `state_getRuntimeVersion` and
+`TargetProofBlocksOverride` at the snapshot block. Runtime 119 has no
+override item, so its target is always 100.
+`DecayAlgorithm::for_spec_version` picks the rule from the `spec_version`.
+Version 119 and later use the gated rule. Version 118 uses the continuous
+rule, and earlier versions use the stepwise rule. The feeder builds the
+model at each reseed. On every poll it swaps the rule and the target into
+the stash when either changes. The stash keeps its candidates across the
+swap. A runtime upgrade or a council target change needs no restart, and
+neither starts a new generation.
 
 `WinStash::viability_block` finds the first block whose threshold exceeds a
 candidate's energy by binary search over 25,600 blocks. A candidate that
 does not clear inside that window is not held. The stash summary in
-`attempts.json` reports `decay_algorithm` so an operator can confirm which
-rule a round ran under.
+`attempts.json` reports `decay_algorithm` and `target_proof_blocks` so an
+operator can confirm which rule and target a round ran under.
 
 ## Routing and credits
 
@@ -505,7 +515,10 @@ The native fingerprint uses a separate namespace from the chain topology hash
 and is never a chain lookup key.
 
 Inline work reaches that miner only when the coordinator proves graph membership.
-It computes the D-Wave graph-only fingerprint of the active topology.
+It computes the graph-only fingerprint of the active topology. The fingerprint
+is the FAM-19 topology order digest of the nodes in ascending order and the
+`(min, max)` edges in ascending order, which quip-solver-core 0.0.11
+advertises as `native_topology_hash`.
 An equal fingerprint supplies the native nodes and edges for the subgraph check.
 Each inline node and undirected edge must belong to that graph.
 Inline ids are dense and start at zero without a mapping through the sparse
@@ -554,7 +567,7 @@ lease at 2²⁰ salts. Before a miner's first lease completes, the feeder assume
 75 salts per second for each pipeline slot. `LEASE_STAGE_DEPTH` sets the
 two-lease staging limit per miner.
 
-A lease miner on quip-solver-core 0.0.9 sends a `Result` for each salt it
+A lease miner on quip-solver-core 0.0.11 sends a `Result` for each salt it
 reports, with every read and no target filter. The coordinator first checks
 that the `Result` is authentic: `verify_lease_result` with a permissive target
 redraws the problem and rescores every read. The coordinator drops a forged or

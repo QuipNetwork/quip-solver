@@ -417,6 +417,7 @@ mod tests {
             min_diversity_milli: 200,
             block_number: 42,
             spec_version: 117,
+            target_proof_blocks: crate::decay::TARGET_PROOF_BLOCKS,
             family: None,
         }
     }

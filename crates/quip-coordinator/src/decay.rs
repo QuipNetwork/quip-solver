@@ -8,8 +8,10 @@
 //! `ease_continuous` is the runtime-118 closed form (quip-validator !87) that
 //! eases every block and faster past the target round length; and
 //! `ease_gated` is the runtime-119 rule (quip-validator v0.4.0) that holds the
-//! threshold through the target and then eases at the combined rate. No chain
-//! dependency — the caller supplies the curve + base.
+//! threshold through the target and then eases at the combined rate. Runtime
+//! 120 (quip-validator v0.4.1) keeps that rule and makes the target a council
+//! setting, so the caller passes it. No chain dependency — the caller supplies
+//! the curve, base, and target.
 //!
 //! Golden-faithful: `round` is half-away-from-zero (Rust `f64::round`, matching
 //! `libm::round`), and every add/sub saturates at i64 bounds.
@@ -20,8 +22,10 @@ pub const DECAY_RATE_MILLI: i64 = 25;
 /// unit in milli).
 pub const MIN_ENERGY_DELTA_MILLI: i64 = 1000;
 
-/// Round length the chain targets (`TARGET_PROOF_BLOCKS` in the pallet). Past
-/// this many blocks in one round the continuous rule eases faster.
+/// Round length the chain targets: fixed in runtimes 118 and 119, and the
+/// default of runtime 120 (`QuantumPowTargetProofBlocks`) when
+/// `TargetProofBlocksOverride` is unset. Past this many blocks in one round
+/// the continuous rule eases faster and the gated rule starts to ease.
 pub const TARGET_PROOF_BLOCKS: u64 = 100;
 /// Extra easing rate per epoch for overdue blocks
 /// (`OVERDUE_EASE_RATE_MILLI` in the pallet). Equal to `DECAY_RATE_MILLI`, so
@@ -32,8 +36,8 @@ pub const OVERDUE_EASE_RATE_MILLI: i64 = 25;
 /// First runtime `spec_version` that decays per block (quip-validator !87).
 /// Earlier runtimes step once per whole epoch.
 pub const CONTINUOUS_DECAY_SPEC_VERSION: u32 = 118;
-/// First runtime `spec_version` that holds the threshold through
-/// [`TARGET_PROOF_BLOCKS`] before easing (quip-validator v0.4.0).
+/// First runtime `spec_version` that holds the threshold through the
+/// round-length target before easing (quip-validator v0.4.0).
 pub const GATED_DECAY_SPEC_VERSION: u32 = 119;
 
 // The pallet exposes these as constants/defaults, not via any runtime API, so
@@ -198,10 +202,11 @@ pub fn ease_continuous(
 
 /// EASIER decay of `current` after `elapsed_blocks` blocks under the
 /// runtime-119 rule (quip-validator v0.4.0): no easing through
-/// [`TARGET_PROOF_BLOCKS`], then per-block easing at the combined
+/// `target_proof_blocks`, then per-block easing at the combined
 /// baseline-plus-overdue rate for the blocks past it only, from the full room
-/// to `curve.max_milli`. Block 101 eases by exactly one block. A degenerate
-/// curve or zero epoch is a no-op.
+/// to `curve.max_milli`. The first block past the target eases by exactly one
+/// block. Runtime 119 fixes the target at [`TARGET_PROOF_BLOCKS`]; runtime 120
+/// reads it from the pallet. A degenerate curve or zero epoch is a no-op.
 ///
 /// Transcribed from the pallet's `apply_decay`. Keep the expression order:
 /// `1.0 - retained` is not exactly `0.049375` in f64, and the golden table
@@ -212,8 +217,9 @@ pub fn ease_gated(
     elapsed_blocks: u64,
     epoch_length: u64,
     curve: &EnergyCurve,
+    target_proof_blocks: u64,
 ) -> i64 {
-    let overdue = elapsed_blocks.saturating_sub(TARGET_PROOF_BLOCKS);
+    let overdue = elapsed_blocks.saturating_sub(target_proof_blocks);
     if curve.max_milli <= curve.min_milli || overdue == 0 || epoch_length == 0 {
         return current;
     }
@@ -235,7 +241,8 @@ pub enum DecayAlgorithm {
     /// Runtime 118: per-block closed form with overdue easing.
     Continuous,
     /// Runtime 119 and later: no easing through the target, then per-block
-    /// easing at the combined rate.
+    /// easing at the combined rate. Runtime 120 makes the target a council
+    /// setting ([`DecayModel::target_proof_blocks`]).
     Gated,
 }
 
@@ -264,7 +271,8 @@ impl DecayAlgorithm {
 }
 
 /// The inputs that fix the live threshold at every block of one round: the
-/// stored base difficulty, the curve, the epoch length, and the rule.
+/// stored base difficulty, the curve, the epoch length, the rule, and the
+/// round-length target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecayModel {
     /// Base (un-decayed) `max_energy_milli` from `Difficulties[topology_hash]`.
@@ -275,6 +283,10 @@ pub struct DecayModel {
     pub epoch_length: u64,
     /// The rule the runtime applies, from its `spec_version`.
     pub algorithm: DecayAlgorithm,
+    /// Round-length target that gates [`DecayAlgorithm::Gated`]: the pallet's
+    /// `target_proof_blocks()`. The other rules use the fixed
+    /// [`TARGET_PROOF_BLOCKS`] of their runtimes.
+    pub target_proof_blocks: u64,
 }
 
 impl DecayModel {
@@ -304,6 +316,7 @@ impl DecayModel {
                 elapsed_blocks,
                 self.epoch_length,
                 curve,
+                self.target_proof_blocks,
             ),
         }
     }
@@ -508,6 +521,13 @@ mod tests {
         let gated = m.first_clearing_elapsed(-49_500, 1_000);
         let earlier = continuous.first_clearing_elapsed(-49_500, 1_000);
         assert!(earlier < gated, "continuous {earlier:?} vs gated {gated:?}");
+        // Runtime 120: a council-set target moves the gate with it.
+        let slow = DecayModel {
+            target_proof_blocks: 200,
+            ..m
+        };
+        assert_eq!(slow.threshold_at(200), -50_000);
+        assert_eq!(slow.first_clearing_elapsed(-50_000, 1_000), Some(201));
     }
 
     fn stepwise_model() -> DecayModel {
@@ -516,6 +536,7 @@ mod tests {
             curve: Some(curve()),
             epoch_length: 10,
             algorithm: DecayAlgorithm::Stepwise,
+            target_proof_blocks: TARGET_PROOF_BLOCKS,
         }
     }
 
@@ -872,8 +893,25 @@ mod tests {
         let c = walkup_curve();
         assert_eq!(GOLDEN.len(), 104, "table covers the whole grid");
         for &(offset, elapsed, want) in GOLDEN {
-            let got = ease_gated(c.min_milli + offset, elapsed, 100, &c);
+            let start = c.min_milli + offset;
+            let got = ease_gated(start, elapsed, 100, &c, TARGET_PROOF_BLOCKS);
             assert_eq!(got, want, "offset {offset}, elapsed {elapsed}");
+            // Runtime 120 subtracts the council target instead of 100, so a
+            // target T eases at block e exactly as runtime 119 did at
+            // e - T + 100, and holds the base through T. 80 and 400 are the
+            // pallet's bounds.
+            for target in [80, 150, 200, 400] {
+                if elapsed >= TARGET_PROOF_BLOCKS {
+                    let shifted = elapsed - TARGET_PROOF_BLOCKS + target;
+                    let got = ease_gated(start, shifted, 100, &c, target);
+                    assert_eq!(
+                        got, want,
+                        "target {target}, offset {offset}, elapsed {elapsed}"
+                    );
+                } else {
+                    assert_eq!(ease_gated(start, target, 100, &c, target), start);
+                }
+            }
         }
     }
 
@@ -886,7 +924,10 @@ mod tests {
             knee_milli: -1_000,
             max_milli: -1_000,
         };
-        let easers: [(&str, Ease); 2] = [("continuous", ease_continuous), ("gated", ease_gated)];
+        let gated: Ease = |current, elapsed, epoch, curve| {
+            ease_gated(current, elapsed, epoch, curve, TARGET_PROOF_BLOCKS)
+        };
+        let easers: [(&str, Ease); 2] = [("continuous", ease_continuous), ("gated", gated)];
         for (name, ease) in easers {
             for start in [c.min_milli, c.knee_milli, c.max_milli - 3_500] {
                 let mut previous = start;

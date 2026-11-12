@@ -1274,7 +1274,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2057,9 +2057,9 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
 name = "ising-generators"
-version = "0.0.9"
+version = "0.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "84f06c6bbefcfd4c49f143b5b15a20ce5d4ab2671125ee43f036a7152a672688"
+checksum = "8c9df21f9ad15dd545e541817886556a62ec30644001e17f5c7499fd046b1960"
 dependencies = [
  "blake3",
  "miniz_oxide 0.9.1",
@@ -2088,15 +2088,6 @@ name = "itertools"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
-dependencies = [
- "either",
-]
-
-[[package]]
-name = "itertools"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
 dependencies = [
  "either",
 ]
@@ -2947,7 +2938,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.10.5",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -3021,12 +3012,12 @@ dependencies = [
  "once_cell",
  "socket2 0.6.5",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
 name = "quip-coordinator"
-version = "0.3.8-rc1"
+version = "0.3.8-rc3"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -3045,6 +3036,7 @@ dependencies = [
  "quip-proto",
  "quip-protocol",
  "quip-solver-conformance",
+ "quip-solver-core",
  "quip-transaction-crypto",
  "quip-transaction-crypto-core",
  "rand 0.8.7",
@@ -3114,9 +3106,9 @@ dependencies = [
 
 [[package]]
 name = "quip-proto"
-version = "0.0.9"
+version = "0.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d4354a4f5862a5f80528974b65d79c2d497676063f5cdbafa18731ad4b9d073"
+checksum = "cacfa4346d6c552cb73864782d5161a5d7704f11584fb93674e760725929c5e9"
 dependencies = [
  "prost",
  "tonic",
@@ -3124,9 +3116,9 @@ dependencies = [
 
 [[package]]
 name = "quip-protocol"
-version = "0.0.9"
+version = "0.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "123db3fa6862221d7f128babdde35290666325061ca46026a06a3ed2b3ca63a7"
+checksum = "7dd2a3358592d6b28c75ef0290d848b9ce99b8193b087145a8b9412c727b2c1c"
 dependencies = [
  "ising-generators",
  "quip-proto",
@@ -3134,9 +3126,9 @@ dependencies = [
 
 [[package]]
 name = "quip-solver-conformance"
-version = "0.0.9"
+version = "0.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e567c72380f7ccc942e48f2f2ca86844c9a714322ea66aa72020da9f4920d37"
+checksum = "5ad831f3212c4e87a7600ce49e4bdb28217275690d0391c380e8515072cb1015"
 dependencies = [
  "hyper-util",
  "ising-generators",
@@ -3153,9 +3145,9 @@ dependencies = [
 
 [[package]]
 name = "quip-solver-core"
-version = "0.0.9"
+version = "0.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc12a42c735be1c51af6a9d96d5ee6ef060ac9432d2ff60ca63a057669652ce6"
+checksum = "8e83759223c5bace30a29d2d85468b0bb5dea72e70d9e22ef2416a19a047053c"
 dependencies = [
  "base64",
  "clap",
@@ -3509,7 +3501,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4486,7 +4478,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5293,7 +5285,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

@@ -1293,6 +1293,7 @@ pub async fn serve_one_session_expecting(
             min_diversity_milli: 0,
             block_number: 0,
             spec_version: 117,
+            target_proof_blocks: crate::decay::TARGET_PROOF_BLOCKS,
             family: None,
         },
         None,
@@ -1391,6 +1392,7 @@ mod tests {
             min_diversity_milli: 0,
             block_number: 42,
             spec_version: 117,
+            target_proof_blocks: crate::decay::TARGET_PROOF_BLOCKS,
             family: None,
         }
     }
@@ -1490,6 +1492,7 @@ mod tests {
                 }),
                 epoch_length: 10,
                 algorithm: crate::decay::DecayAlgorithm::Stepwise,
+                target_proof_blocks: crate::decay::TARGET_PROOF_BLOCKS,
             }),
             0,
         );

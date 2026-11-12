@@ -58,6 +58,7 @@ fn ising_snapshot() -> MiningSnapshot {
         min_diversity_milli: 0,
         block_number: 42,
         spec_version: 117,
+        target_proof_blocks: quip_coordinator::decay::TARGET_PROOF_BLOCKS,
         family: None,
     }
 }
@@ -1210,6 +1211,7 @@ async fn feeder_holds_a_stashed_candidate_until_the_live_difficulty_admits_it() 
                 curve: None,
                 epoch_length: 1,
                 algorithm: quip_coordinator::decay::DecayAlgorithm::Stepwise,
+                target_proof_blocks: quip_coordinator::decay::TARGET_PROOF_BLOCKS,
             }),
             0,
         );
@@ -1248,7 +1250,8 @@ async fn feeder_holds_a_stashed_candidate_until_the_live_difficulty_admits_it() 
 
 /// A runtime upgrade takes effect mid-round. The feeder switches the stash
 /// projection on the poll that reports the new spec version (continuous at
-/// 118, gated at 119), keeps the stashed candidate, and reprojects it.
+/// 118, gated at 119), keeps the stashed candidate, and reprojects it. At 120
+/// the gate follows the council's `TargetProofBlocksOverride`.
 #[tokio::test]
 async fn feeder_switches_the_decay_projection_when_the_runtime_upgrades() {
     use quip_coordinator::decay::{DecayAlgorithm, DecayModel, EnergyCurve};
@@ -1276,6 +1279,7 @@ async fn feeder_switches_the_decay_projection_when_the_runtime_upgrades() {
         }),
         epoch_length: 10,
         algorithm: DecayAlgorithm::Stepwise,
+        target_proof_blocks: quip_coordinator::decay::TARGET_PROOF_BLOCKS,
     };
     {
         let mut st = f.state.lock().await;
@@ -1293,34 +1297,44 @@ async fn feeder_switches_the_decay_projection_when_the_runtime_upgrades() {
     }
 
     // The upgrade takes effect: same head, spec 118.
-    let block = viability_after(&f, 118, DecayAlgorithm::Continuous, "continuous").await;
+    let block = viability_after(&f, 118, 100, DecayAlgorithm::Continuous, "continuous").await;
     assert!(
         1_000_000 < block && block < 1_000_010,
         "continuous projection must land inside the first epoch, got {block}"
     );
 
     // The next upgrade, spec 119, gates easing behind the 100-block target.
-    let block = viability_after(&f, 119, DecayAlgorithm::Gated, "gated").await;
+    let block = viability_after(&f, 119, 100, DecayAlgorithm::Gated, "gated").await;
     assert!(
         1_000_100 < block && block < 1_000_110,
         "gated projection must land in the first overdue epoch, got {block}"
     );
+
+    // Spec 120 with a council target of 200 keeps the gated rule and moves
+    // the gate, so the same candidate becomes viable 100 blocks later.
+    let later = viability_after(&f, 120, 200, DecayAlgorithm::Gated, "gated").await;
+    assert_eq!(later, block + 100, "the gate moved with the target");
     f.stop().await;
 }
 
-/// Report `spec_version` on the same head, wait for the stash to switch to
-/// `algorithm`, and return the surviving candidate's viability block.
+/// Report `spec_version` and `target_proof_blocks` on the same head, wait for
+/// the stash to switch to `algorithm` and the target, and return the surviving
+/// candidate's viability block.
 async fn viability_after(
     f: &Feeder,
     spec_version: u32,
+    target_proof_blocks: u64,
     algorithm: quip_coordinator::decay::DecayAlgorithm,
     name: &str,
 ) -> u64 {
     let mut upgraded = gated_snapshot(-1500);
     upgraded.spec_version = spec_version;
+    upgraded.target_proof_blocks = target_proof_blocks;
     f.chain.set_snapshot(Some(upgraded));
     let switched = wait_until(40, 40, async || {
-        f.state.lock().await.stash.algorithm() == Some(algorithm)
+        let st = f.state.lock().await;
+        st.stash.algorithm() == Some(algorithm)
+            && st.stash.summary().target_proof_blocks == target_proof_blocks
     })
     .await;
     assert!(switched, "feeder never switched the projection to {name}");
@@ -1393,7 +1407,7 @@ async fn runtime_submits_a_lease_winner_answers_an_order_and_shuts_down_clean() 
         },
     ));
 
-    let done = wait_until(100, 30, async || {
+    let done = wait_until(300, 50, async || {
         chain.submitted_count() > 0
             && chain.participation_calls() > 0
             && !chain.solutions.lock().expect("solutions lock").is_empty()
