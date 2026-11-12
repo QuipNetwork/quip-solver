@@ -140,7 +140,7 @@ mod tests {
     };
     use crate::chain::scale_types::{encode_register_miner_call, encode_submit_proof_call};
     use parity_scale_codec::Encode;
-    use sp_core::hashing::blake2_256;
+    use sp_crypto_hashing::blake2_256;
     use sp_core::{H256, U256};
 
     fn proof() -> QuantumProof {

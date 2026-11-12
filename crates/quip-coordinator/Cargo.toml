@@ -15,10 +15,11 @@ path = "src/lib.rs"
 rayon = "1.10"
 quip-proto = "0.0.11"
 quip-protocol = "0.0.11"
-quantum-validation = { git = "https://gitlab.com/quip.network/quip-validator.git", tag = "v0.4.1", version = ">=0.3.0" }
-quip-transaction-crypto = { git = "https://gitlab.com/quip.network/quip-validator.git", tag = "v0.4.1", version = ">=0.3.0" }
+quantum-validation = { git = "https://gitlab.com/quip.network/quip-validator.git", rev = "647759eaa818afc33e0e9a7dafc226c2738c4707", version = "0.5.0-rc.1" }
+quip-transaction-crypto = { git = "https://gitlab.com/quip.network/quip-validator.git", rev = "647759eaa818afc33e0e9a7dafc226c2738c4707", version = "0.5.0-rc.1" }
 parity-scale-codec = { version = "3.7.5", default-features = false, features = ["derive", "std"] }
-sp-core = { git = "https://github.com/QuipNetwork/polkadot-sdk.git", tag = "v0.3.1", default-features = false, features = ["std"] }
+sp-core = { git = "https://github.com/QuipNetwork/polkadot-sdk.git", rev = "0340e306204e8275c93a442336e534cde23a653a", default-features = false, features = ["std"] }
+sp-crypto-hashing = { git = "https://github.com/QuipNetwork/polkadot-sdk.git", rev = "0340e306204e8275c93a442336e534cde23a653a", default-features = false, features = ["std"] }
 blake2 = "0.10"
 twox-hash = "1.6"
 jsonrpsee = { version = "0.24", features = [
@@ -73,12 +74,12 @@ ising-generators = "0.0.11"
 [dev-dependencies]
 prost = { workspace = true }
 tempfile = "3"
-quantum-validation = { git = "https://gitlab.com/quip.network/quip-validator.git", tag = "v0.4.1", version = ">=0.3.0" }
-quip-transaction-crypto = { git = "https://gitlab.com/quip.network/quip-validator.git", tag = "v0.4.1", version = ">=0.3.0" }
-quip-transaction-crypto-core = { git = "https://gitlab.com/quip.network/quip-validator.git", tag = "v0.4.1", version = ">=0.1.0" }
+quantum-validation = { git = "https://gitlab.com/quip.network/quip-validator.git", rev = "647759eaa818afc33e0e9a7dafc226c2738c4707", version = "0.5.0-rc.1" }
+quip-transaction-crypto = { git = "https://gitlab.com/quip.network/quip-validator.git", rev = "647759eaa818afc33e0e9a7dafc226c2738c4707", version = "0.5.0-rc.1" }
+quip-transaction-crypto-core = { git = "https://gitlab.com/quip.network/quip-validator.git", rev = "647759eaa818afc33e0e9a7dafc226c2738c4707", version = ">=0.1.0" }
 quip-protocol = "0.0.11"
 quip-proto = "0.0.11"
-sp-core = { git = "https://github.com/QuipNetwork/polkadot-sdk.git", tag = "v0.3.1", default-features = false, features = ["std"] }
+sp-core = { git = "https://github.com/QuipNetwork/polkadot-sdk.git", rev = "0340e306204e8275c93a442336e534cde23a653a", default-features = false, features = ["std"] }
 parity-scale-codec = { version = "3.7.5", default-features = false, features = ["derive", "std"] }
 jsonrpsee = { version = "0.24", features = ["ws-client", "client-ws-transport-tls", "macros"] }
 blake2 = "0.10"

@@ -3,7 +3,7 @@
 use parity_scale_codec::{Compact, Encode};
 use quip_transaction_crypto::{account_id_from_public, HybridPair, HybridTxSignature};
 use sp_core::crypto::SecretStringError;
-use sp_core::hashing::blake2_256;
+use sp_crypto_hashing::blake2_256;
 use sp_core::Pair as _;
 
 /// Chain state required to build signed-extension extras / additional.

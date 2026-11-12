@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 
 use parity_scale_codec::Encode;
 use quantum_validation::{AllowedValueSpec, MilliValue};
-use sp_core::hashing::blake2_256;
+use sp_crypto_hashing::blake2_256;
 
 /// Default binary spin set (`±MILLI_SCALE`) used when a caller has no spin spec.
 pub const DEFAULT_SPIN_SET: [MilliValue; 2] = [-1000, 1000];

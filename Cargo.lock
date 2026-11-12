@@ -66,6 +66,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "android_system_properties"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae221649c9976a6f6c56ae1facf410f3ddb33cc661c4b7b61020a912d4237fbc"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -146,14 +155,14 @@ dependencies = [
 
 [[package]]
 name = "ark-bls12-381"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3df4dcc01ff89867cd86b0da835f23c3f02738353aaee7dde7495af71363b8d5"
+checksum = "be2ede2c0c96fa37d5d3484e8a59fec566c4a52b8c84bf993eaa6c67d7225a4c"
 dependencies = [
- "ark-ec 0.5.0",
- "ark-ff 0.5.0",
- "ark-serialize 0.5.0",
- "ark-std 0.5.0",
+ "ark-ec 0.6.0",
+ "ark-ff 0.6.0",
+ "ark-serialize 0.6.0",
+ "ark-std 0.6.0",
 ]
 
 [[package]]
@@ -175,19 +184,19 @@ dependencies = [
 
 [[package]]
 name = "ark-ec"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43d68f2d516162846c1238e755a7c4d131b892b70cc70c471a8e3ca3ed818fce"
+checksum = "8352a2b2aedf6ba2cc38f7520fc51191d518dde96175c729af19f2d059f191c4"
 dependencies = [
  "ahash",
- "ark-ff 0.5.0",
- "ark-poly 0.5.0",
- "ark-serialize 0.5.0",
- "ark-std 0.5.0",
+ "ark-ff 0.6.0",
+ "ark-poly 0.6.0",
+ "ark-serialize 0.6.0",
+ "ark-std 0.6.0",
  "educe",
  "fnv",
- "hashbrown 0.15.5",
- "itertools 0.13.0",
+ "hashbrown 0.17.1",
+ "itertools 0.14.0",
  "num-bigint",
  "num-integer",
  "num-traits",
@@ -196,14 +205,14 @@ dependencies = [
 
 [[package]]
 name = "ark-ed-on-bls12-381-bandersnatch"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1786b2e3832f6f0f7c8d62d5d5a282f6952a1ab99981c54cd52b6ac1d8f02df5"
+checksum = "997428e73129c7b7a7431b4f67855db94947421f008b97b4c256101cea1686cc"
 dependencies = [
- "ark-bls12-381 0.5.0",
- "ark-ec 0.5.0",
- "ark-ff 0.5.0",
- "ark-std 0.5.0",
+ "ark-bls12-381 0.6.0",
+ "ark-ec 0.6.0",
+ "ark-ff 0.6.0",
+ "ark-std 0.6.0",
 ]
 
 [[package]]
@@ -228,21 +237,18 @@ dependencies = [
 
 [[package]]
 name = "ark-ff"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a177aba0ed1e0fbb62aa9f6d0502e9b46dad8c2eab04c14258a1212d2557ea70"
+checksum = "f7a806ac6c8307b929df4645776290a50ee2aac754ad09d8bdf73391309e43af"
 dependencies = [
- "ark-ff-asm 0.5.0",
- "ark-ff-macros 0.5.0",
- "ark-serialize 0.5.0",
- "ark-std 0.5.0",
- "arrayvec",
+ "ark-ff-asm 0.6.0",
+ "ark-ff-macros 0.6.0",
+ "ark-serialize 0.6.0",
+ "ark-std 0.6.0",
  "digest 0.10.7",
  "educe",
- "itertools 0.13.0",
  "num-bigint",
  "num-traits",
- "paste",
  "zeroize",
 ]
 
@@ -258,9 +264,9 @@ dependencies = [
 
 [[package]]
 name = "ark-ff-asm"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62945a2f7e6de02a31fe400aa489f0e0f5b2502e69f95f853adb82a96c7a6b60"
+checksum = "1479009684adc073dff49a1025d3a7065b317a9ead25aaaca38cdc70058ba8a2"
 dependencies = [
  "quote",
  "syn 2.0.119",
@@ -281,9 +287,9 @@ dependencies = [
 
 [[package]]
 name = "ark-ff-macros"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09be120733ee33f7693ceaa202ca41accd5653b779563608f1234f78ae07c4b3"
+checksum = "4a0691ed21ef00ef89c1e9bda832eba493dda3ec2f8d892fb25b705f73f06bb8"
 dependencies = [
  "num-bigint",
  "num-traits",
@@ -307,17 +313,17 @@ dependencies = [
 
 [[package]]
 name = "ark-poly"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "579305839da207f02b89cd1679e50e67b4331e2f9294a57693e5051b7703fe27"
+checksum = "75f55af10b672002b8d953e230282c51206842e20e5791a94432219b4201de5c"
 dependencies = [
  "ahash",
- "ark-ff 0.5.0",
- "ark-serialize 0.5.0",
- "ark-std 0.5.0",
+ "ark-ff 0.6.0",
+ "ark-serialize 0.6.0",
+ "ark-std 0.6.0",
  "educe",
  "fnv",
- "hashbrown 0.15.5",
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -334,15 +340,15 @@ dependencies = [
 
 [[package]]
 name = "ark-serialize"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f4d068aaf107ebcd7dfb52bc748f8030e0fc930ac8e360146ca54c1203088f7"
+checksum = "a74dd304fd536fb95d0a328e72be759209cc496a9da094c5bc56e5fea4f9e86b"
 dependencies = [
- "ark-serialize-derive 0.5.0",
- "ark-std 0.5.0",
- "arrayvec",
+ "ark-serialize-derive 0.6.0",
+ "ark-std 0.6.0",
  "digest 0.10.7",
  "num-bigint",
+ "serde_with",
 ]
 
 [[package]]
@@ -358,9 +364,9 @@ dependencies = [
 
 [[package]]
 name = "ark-serialize-derive"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "213888f660fddcca0d257e88e54ac05bca01885f258ccdf695bafd77031bb69d"
+checksum = "4f153690697a2b91e5e1251ff98411ee5371500a111a0fd317a70e588eb300f9"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -379,9 +385,9 @@ dependencies = [
 
 [[package]]
 name = "ark-std"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "246a225cc6131e9ee4f24619af0f19d67761fff15d7ccc22e42b80846e69449a"
+checksum = "367c9c827ed431bff6868b7aa926e05b16eb46603cc8b6e768e4a5553fa1d155"
 dependencies = [
  "num-traits",
  "rand 0.8.7",
@@ -389,32 +395,31 @@ dependencies = [
 
 [[package]]
 name = "ark-transcript"
-version = "0.0.3"
+version = "0.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47c1c928edb9d8ff24cb5dcb7651d3a98494fff3099eee95c2404cd813a9139f"
+checksum = "5a9a23188a6bb8d8d2394a2a904e6944999e2cfceb446b086ff3a581ee05cebd"
 dependencies = [
- "ark-ff 0.5.0",
- "ark-serialize 0.5.0",
- "ark-std 0.5.0",
+ "ark-ff 0.6.0",
+ "ark-serialize 0.6.0",
+ "ark-std 0.6.0",
  "digest 0.10.7",
- "rand_core 0.6.4",
  "sha3",
 ]
 
 [[package]]
 name = "ark-vrf"
-version = "0.1.1"
+version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d63e9780640021b74d02b32895d8cec1b4abe8e5547b560a6bda6b14b78c6da"
+checksum = "9b94e43bbb597f342ffc529cc34ea7d45f315793d1fab0d8382878ec134204dc"
 dependencies = [
- "ark-bls12-381 0.5.0",
- "ark-ec 0.5.0",
+ "ark-bls12-381 0.6.0",
+ "ark-ec 0.6.0",
  "ark-ed-on-bls12-381-bandersnatch",
- "ark-ff 0.5.0",
- "ark-serialize 0.5.0",
- "ark-std 0.5.0",
+ "ark-ff 0.6.0",
+ "ark-serialize 0.6.0",
+ "ark-std 0.6.0",
  "digest 0.10.7",
- "rand_chacha 0.3.1",
+ "generic-array",
  "sha2 0.10.9",
  "w3f-ring-proof",
  "zeroize",
@@ -610,6 +615,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
+
+[[package]]
 name = "base64ct"
 version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -617,8 +628,8 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "binary-merkle-tree"
-version = "16.1.1"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
+version = "16.1.2"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=0340e306204e8275c93a442336e534cde23a653a#0340e306204e8275c93a442336e534cde23a653a"
 dependencies = [
  "hash-db",
  "log",
@@ -806,6 +817,18 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.3.0",
  "rand_core 0.10.1",
+]
+
+[[package]]
+name = "chrono"
+version = "0.4.45"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
+dependencies = [
+ "iana-time-zone",
+ "num-traits",
+ "serde",
+ "windows-link",
 ]
 
 [[package]]
@@ -1034,6 +1057,9 @@ name = "deranged"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
+dependencies = [
+ "serde_core",
+]
 
 [[package]]
 name = "derivative"
@@ -1705,6 +1731,9 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "allocator-api2",
+]
 
 [[package]]
 name = "heck"
@@ -1854,7 +1883,7 @@ version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "96547c2556ec9d12fb1578c4eaf448b04993e7fb79cbaad930a656880a6bdfa0"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "futures-channel",
  "futures-util",
@@ -1869,6 +1898,30 @@ dependencies = [
  "tokio",
  "tower-service",
  "tracing",
+]
+
+[[package]]
+name = "iana-time-zone"
+version = "0.1.65"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e31bc9ad994ba00e440a8aa5c9ef0ec67d5cb5e5cb0cc7f8b744a35b389cc470"
+dependencies = [
+ "android_system_properties",
+ "core-foundation-sys",
+ "iana-time-zone-haiku",
+ "js-sys",
+ "log",
+ "wasm-bindgen",
+ "windows-core",
+]
+
+[[package]]
+name = "iana-time-zone-haiku"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f31827a206f56af32e590ba56d5d2d085f558508192593743f16b2306495269f"
+dependencies = [
+ "cc",
 ]
 
 [[package]]
@@ -2022,6 +2075,7 @@ checksum = "bd070e393353796e801d209ad339e89596eb4c8d430d18ede6a1cced8fafbd99"
 dependencies = [
  "autocfg",
  "hashbrown 0.12.3",
+ "serde",
 ]
 
 [[package]]
@@ -2032,6 +2086,8 @@ checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
 dependencies = [
  "equivalent",
  "hashbrown 0.17.1",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -2066,6 +2122,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ising-generators"
+version = "0.0.11"
+source = "git+https://gitlab.com/quip.network/quip-solver-core.git?tag=v0.0.11#81e32c552b65771a99f71028662692511662d006"
+dependencies = [
+ "blake3",
+]
+
+[[package]]
 name = "itertools"
 version = "0.10.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2085,9 +2149,9 @@ dependencies = [
 
 [[package]]
 name = "itertools"
-version = "0.13.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
+checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
 dependencies = [
  "either",
 ]
@@ -2124,6 +2188,58 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "jiff"
+version = "0.2.43"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26699905cc795a23e3949585cc7ba3ee8ade090872a27e4316304a777297894a"
+dependencies = [
+ "jiff-core",
+ "jiff-static",
+ "jiff-tzdb-platform",
+ "log",
+ "portable-atomic",
+ "portable-atomic-util",
+ "serde_core",
+ "windows-link",
+]
+
+[[package]]
+name = "jiff-core"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ffe6854081f5ac0a3046a9b223729ccd7a20b1e0e8277e44dc0660eedf67dfe2"
+dependencies = [
+ "log",
+]
+
+[[package]]
+name = "jiff-static"
+version = "0.2.43"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b4ff49b2887190c760b86207b55cdcaabbdecaf7a0660d68aa2ed6f652abf0a"
+dependencies = [
+ "jiff-core",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "jiff-tzdb"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fa8377070c6bae868759445e5a77f66d84f0b72f3a054bfb00e6d038b8282da7"
+
+[[package]]
+name = "jiff-tzdb-platform"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "875a5a69ac2bab1a891711cf5eccbec1ce0341ea805560dcd90b7a2e925132e8"
+dependencies = [
+ "jiff-tzdb",
 ]
 
 [[package]]
@@ -2202,7 +2318,7 @@ version = "0.24.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b3e1420b1792cff778e2a1ebaa44115f156ee62a94dd106eaa51163f037d2023"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "futures-util",
  "http",
  "jsonrpsee-core",
@@ -2250,7 +2366,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c215647e43482d478a6c21f021a013b50d64cf63431c1176eda9ef925dc54ec8"
 dependencies = [
  "async-trait",
- "base64",
+ "base64 0.22.1",
  "http-body",
  "hyper",
  "hyper-rustls",
@@ -2369,7 +2485,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e79019718125edc905a079a70cfa5f3820bc76139fc91d6f9abc27ea2a887139"
 dependencies = [
  "arrayref",
- "base64",
+ "base64 0.22.1",
  "digest 0.9.0",
  "libsecp256k1-core",
  "libsecp256k1-gen-ecmult",
@@ -2773,27 +2889,27 @@ dependencies = [
 
 [[package]]
 name = "polkavm-common"
-version = "0.31.0"
+version = "0.35.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0a3e43fa1a54b955a2f9422b1690c3cc29252ac8828c02a99d2370b9f2a188e"
+checksum = "b20e5a47dd9ad7bb43013676a18074fca2573dd8270774a7d2ad286b57bc710f"
 dependencies = [
  "picosimd",
 ]
 
 [[package]]
 name = "polkavm-derive"
-version = "0.31.0"
+version = "0.35.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3d944b6b4e792c2a120232b52bd6f2c9dd3071d3f48462afb2b5d00cb9f7ac9"
+checksum = "80796823e852d4ff90857dd184162ce3b5de739b34495aadef69d381005dcc5d"
 dependencies = [
  "polkavm-derive-impl-macro",
 ]
 
 [[package]]
 name = "polkavm-derive-impl"
-version = "0.31.0"
+version = "0.35.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57c14b030150f81dfde110997b6fafc19741998130908fdab85f1a66bb735025"
+checksum = "b8eede5680fbaac211c5e5f78cd2fa55456eba819a0c02dc5ca08b3327268ff5"
 dependencies = [
  "polkavm-common",
  "proc-macro2",
@@ -2803,12 +2919,27 @@ dependencies = [
 
 [[package]]
 name = "polkavm-derive-impl-macro"
-version = "0.31.0"
+version = "0.35.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3fcadb13edfcc3b4046fcd2d292597782f5b7a2af140e6363fbf71fe196b425"
+checksum = "d345f00a91917abae726812c5a8683da571412f22ce6a523cfcdfea66f8459a9"
 dependencies = [
  "polkavm-derive-impl",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "portable-atomic"
+version = "1.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05c8b63e8d9609db387f0324918f81d68fe27748f084ef092fb35954d0539a85"
+
+[[package]]
+name = "portable-atomic-util"
+version = "0.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10ab3eb7f3becc3a1cbc4f2c6f20267996cfc1a6467a873763411b136a122715"
+dependencies = [
+ "portable-atomic",
 ]
 
 [[package]]
@@ -2946,10 +3077,11 @@ dependencies = [
 
 [[package]]
 name = "quantum-validation"
-version = "0.4.1"
-source = "git+https://gitlab.com/quip.network/quip-validator.git?tag=v0.4.1#cb09fe643630adbc503e3f5255353c098aae52e6"
+version = "0.5.0-rc.1"
+source = "git+https://gitlab.com/quip.network/quip-validator.git?rev=647759eaa818afc33e0e9a7dafc226c2738c4707#647759eaa818afc33e0e9a7dafc226c2738c4707"
 dependencies = [
  "blake3",
+ "ising-generators 0.0.11 (git+https://gitlab.com/quip.network/quip-solver-core.git?tag=v0.0.11)",
  "libm",
  "parity-scale-codec",
  "rand_chacha 0.9.0",
@@ -3027,7 +3159,7 @@ dependencies = [
  "futures",
  "getrandom 0.2.17",
  "hyper-util",
- "ising-generators",
+ "ising-generators 0.0.11 (registry+https://github.com/rust-lang/crates.io-index)",
  "jsonrpsee",
  "libm",
  "parity-scale-codec",
@@ -3045,6 +3177,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sp-core",
+ "sp-crypto-hashing",
  "tempfile",
  "tokio",
  "tokio-stream",
@@ -3060,7 +3193,7 @@ dependencies = [
 [[package]]
 name = "quip-crypto-primitives"
 version = "0.1.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=0340e306204e8275c93a442336e534cde23a653a#0340e306204e8275c93a442336e534cde23a653a"
 dependencies = [
  "hkdf",
  "parity-scale-codec",
@@ -3077,7 +3210,7 @@ dependencies = [
 [[package]]
 name = "quip-crypto-primitives-core"
 version = "0.1.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=0340e306204e8275c93a442336e534cde23a653a#0340e306204e8275c93a442336e534cde23a653a"
 dependencies = [
  "ed25519-zebra",
  "fips204",
@@ -3120,7 +3253,7 @@ version = "0.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7dd2a3358592d6b28c75ef0290d848b9ce99b8193b087145a8b9412c727b2c1c"
 dependencies = [
- "ising-generators",
+ "ising-generators 0.0.11 (registry+https://github.com/rust-lang/crates.io-index)",
  "quip-proto",
 ]
 
@@ -3131,7 +3264,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5ad831f3212c4e87a7600ce49e4bdb28217275690d0391c380e8515072cb1015"
 dependencies = [
  "hyper-util",
- "ising-generators",
+ "ising-generators 0.0.11 (registry+https://github.com/rust-lang/crates.io-index)",
  "prost",
  "quip-proto",
  "quip-protocol",
@@ -3149,12 +3282,12 @@ version = "0.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8e83759223c5bace30a29d2d85468b0bb5dea72e70d9e22ef2416a19a047053c"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "clap",
  "getrandom 0.2.17",
  "half",
  "hyper-util",
- "ising-generators",
+ "ising-generators 0.0.11 (registry+https://github.com/rust-lang/crates.io-index)",
  "prost",
  "quip-proto",
  "quip-protocol",
@@ -3182,8 +3315,8 @@ dependencies = [
 
 [[package]]
 name = "quip-transaction-crypto"
-version = "0.4.1"
-source = "git+https://gitlab.com/quip.network/quip-validator.git?tag=v0.4.1#cb09fe643630adbc503e3f5255353c098aae52e6"
+version = "0.5.0-rc.1"
+source = "git+https://gitlab.com/quip.network/quip-validator.git?rev=647759eaa818afc33e0e9a7dafc226c2738c4707#647759eaa818afc33e0e9a7dafc226c2738c4707"
 dependencies = [
  "log",
  "parity-scale-codec",
@@ -3197,13 +3330,13 @@ dependencies = [
 [[package]]
 name = "quip-transaction-crypto-core"
 version = "0.1.0"
-source = "git+https://gitlab.com/quip.network/quip-validator.git?tag=v0.4.1#cb09fe643630adbc503e3f5255353c098aae52e6"
+source = "git+https://gitlab.com/quip.network/quip-validator.git?rev=647759eaa818afc33e0e9a7dafc226c2738c4707#647759eaa818afc33e0e9a7dafc226c2738c4707"
 dependencies = [
  "bip39",
  "blake2",
  "parity-scale-codec",
  "pqhybridsign",
- "substrate-bip39 0.6.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "substrate-bip39 0.6.1",
  "zeroize",
 ]
 
@@ -3408,7 +3541,7 @@ version = "0.12.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "futures-core",
  "http",
@@ -3636,6 +3769,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "schemars"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4cd191f9397d57d581cddd31014772520aa448f65ef991055d7f61582c65165f"
+dependencies = [
+ "dyn-clone",
+ "ref-cast",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "schemars"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab508826f74a77ca9d5aba6ff19b522583ee3eaf28a19384ff3d0e5835fadf6e"
+dependencies = [
+ "dyn-clone",
+ "ref-cast",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "schnellru"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3837,6 +3994,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_with"
+version = "3.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df9adc193c780ef8f159aee8b61e2d5801aaa555e6eb0947fe45530ec506296f"
+dependencies = [
+ "base64 0.23.1",
+ "bs58",
+ "chrono",
+ "hex",
+ "indexmap 1.9.3",
+ "indexmap 2.14.0",
+ "jiff",
+ "schemars 0.9.0",
+ "schemars 1.2.3",
+ "serde_core",
+ "serde_json",
+ "time",
+]
+
+[[package]]
 name = "serdect"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3976,7 +4153,7 @@ version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2e859df029d160cb88608f5d7df7fb4753fd20fdfb4de5644f3d8b8440841721"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "futures",
  "httparse",
@@ -3987,8 +4164,8 @@ dependencies = [
 
 [[package]]
 name = "sp-application-crypto"
-version = "45.0.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
+version = "49.0.0"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=0340e306204e8275c93a442336e534cde23a653a#0340e306204e8275c93a442336e534cde23a653a"
 dependencies = [
  "parity-scale-codec",
  "scale-info",
@@ -3999,8 +4176,8 @@ dependencies = [
 
 [[package]]
 name = "sp-arithmetic"
-version = "28.0.1"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
+version = "29.0.0"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=0340e306204e8275c93a442336e534cde23a653a#0340e306204e8275c93a442336e534cde23a653a"
 dependencies = [
  "docify",
  "integer-sqrt",
@@ -4013,8 +4190,8 @@ dependencies = [
 
 [[package]]
 name = "sp-core"
-version = "40.0.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
+version = "28.0.0"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=0340e306204e8275c93a442336e534cde23a653a#0340e306204e8275c93a442336e534cde23a653a"
 dependencies = [
  "ark-vrf",
  "array-bytes",
@@ -4051,7 +4228,7 @@ dependencies = [
  "sp-std",
  "sp-storage",
  "ss58-registry",
- "substrate-bip39 0.6.1 (git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1)",
+ "substrate-bip39 0.4.7",
  "thiserror 1.0.69",
  "tracing",
  "w3f-bls",
@@ -4061,7 +4238,7 @@ dependencies = [
 [[package]]
 name = "sp-crypto-hashing"
 version = "0.1.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=0340e306204e8275c93a442336e534cde23a653a#0340e306204e8275c93a442336e534cde23a653a"
 dependencies = [
  "blake2b_simd",
  "byteorder",
@@ -4073,8 +4250,8 @@ dependencies = [
 
 [[package]]
 name = "sp-debug-derive"
-version = "15.0.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
+version = "14.0.0"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=0340e306204e8275c93a442336e534cde23a653a#0340e306204e8275c93a442336e534cde23a653a"
 dependencies = [
  "proc-macro-warning",
  "proc-macro2",
@@ -4084,8 +4261,8 @@ dependencies = [
 
 [[package]]
 name = "sp-externalities"
-version = "0.32.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
+version = "0.25.0"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=0340e306204e8275c93a442336e534cde23a653a#0340e306204e8275c93a442336e534cde23a653a"
 dependencies = [
  "environmental",
  "parity-scale-codec",
@@ -4094,8 +4271,8 @@ dependencies = [
 
 [[package]]
 name = "sp-io"
-version = "45.0.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
+version = "49.0.0"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=0340e306204e8275c93a442336e534cde23a653a#0340e306204e8275c93a442336e534cde23a653a"
 dependencies = [
  "bytes",
  "docify",
@@ -4120,8 +4297,8 @@ dependencies = [
 
 [[package]]
 name = "sp-keystore"
-version = "0.46.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
+version = "0.34.0"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=0340e306204e8275c93a442336e534cde23a653a#0340e306204e8275c93a442336e534cde23a653a"
 dependencies = [
  "parity-scale-codec",
  "parking_lot",
@@ -4131,8 +4308,8 @@ dependencies = [
 
 [[package]]
 name = "sp-panic-handler"
-version = "13.0.2"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
+version = "13.0.0"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=0340e306204e8275c93a442336e534cde23a653a#0340e306204e8275c93a442336e534cde23a653a"
 dependencies = [
  "backtrace",
  "regex",
@@ -4140,8 +4317,8 @@ dependencies = [
 
 [[package]]
 name = "sp-runtime"
-version = "46.0.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
+version = "49.0.0"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=0340e306204e8275c93a442336e534cde23a653a#0340e306204e8275c93a442336e534cde23a653a"
 dependencies = [
  "binary-merkle-tree",
  "bytes",
@@ -4171,8 +4348,8 @@ dependencies = [
 
 [[package]]
 name = "sp-runtime-interface"
-version = "34.0.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
+version = "37.0.1"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=0340e306204e8275c93a442336e534cde23a653a#0340e306204e8275c93a442336e534cde23a653a"
 dependencies = [
  "bytes",
  "impl-trait-for-tuples",
@@ -4184,13 +4361,12 @@ dependencies = [
  "sp-storage",
  "sp-tracing",
  "sp-wasm-interface",
- "static_assertions",
 ]
 
 [[package]]
 name = "sp-runtime-interface-proc-macro"
-version = "21.0.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
+version = "17.0.0"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=0340e306204e8275c93a442336e534cde23a653a#0340e306204e8275c93a442336e534cde23a653a"
 dependencies = [
  "Inflector",
  "expander",
@@ -4202,8 +4378,8 @@ dependencies = [
 
 [[package]]
 name = "sp-state-machine"
-version = "0.50.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
+version = "0.54.0"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=0340e306204e8275c93a442336e534cde23a653a#0340e306204e8275c93a442336e534cde23a653a"
 dependencies = [
  "hash-db",
  "log",
@@ -4223,12 +4399,12 @@ dependencies = [
 [[package]]
 name = "sp-std"
 version = "14.0.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=0340e306204e8275c93a442336e534cde23a653a#0340e306204e8275c93a442336e534cde23a653a"
 
 [[package]]
 name = "sp-storage"
-version = "23.0.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
+version = "19.0.0"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=0340e306204e8275c93a442336e534cde23a653a#0340e306204e8275c93a442336e534cde23a653a"
 dependencies = [
  "impl-serde",
  "parity-scale-codec",
@@ -4239,8 +4415,8 @@ dependencies = [
 
 [[package]]
 name = "sp-tracing"
-version = "19.0.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
+version = "16.0.0"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=0340e306204e8275c93a442336e534cde23a653a#0340e306204e8275c93a442336e534cde23a653a"
 dependencies = [
  "parity-scale-codec",
  "regex",
@@ -4251,8 +4427,8 @@ dependencies = [
 
 [[package]]
 name = "sp-trie"
-version = "43.0.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
+version = "47.0.0"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=0340e306204e8275c93a442336e534cde23a653a#0340e306204e8275c93a442336e534cde23a653a"
 dependencies = [
  "ahash",
  "foldhash 0.1.5",
@@ -4276,8 +4452,8 @@ dependencies = [
 
 [[package]]
 name = "sp-wasm-interface"
-version = "24.0.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
+version = "20.0.0"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=0340e306204e8275c93a442336e534cde23a653a#0340e306204e8275c93a442336e534cde23a653a"
 dependencies = [
  "anyhow",
  "impl-trait-for-tuples",
@@ -4287,8 +4463,8 @@ dependencies = [
 
 [[package]]
 name = "sp-weights"
-version = "34.0.0"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
+version = "37.0.0"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=0340e306204e8275c93a442336e534cde23a653a#0340e306204e8275c93a442336e534cde23a653a"
 dependencies = [
  "bounded-collections",
  "parity-scale-codec",
@@ -4366,6 +4542,18 @@ dependencies = [
 
 [[package]]
 name = "substrate-bip39"
+version = "0.4.7"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=0340e306204e8275c93a442336e534cde23a653a#0340e306204e8275c93a442336e534cde23a653a"
+dependencies = [
+ "hmac",
+ "pbkdf2",
+ "schnorrkel",
+ "sha2 0.10.9",
+ "zeroize",
+]
+
+[[package]]
+name = "substrate-bip39"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d93affb0135879b1b67cbcf6370a256e1772f9eaaece3899ec20966d67ad0492"
@@ -4378,21 +4566,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "substrate-bip39"
-version = "0.6.1"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
-dependencies = [
- "hmac",
- "pbkdf2",
- "schnorrkel",
- "sha2 0.10.9",
- "zeroize",
-]
-
-[[package]]
 name = "substrate-prometheus-endpoint"
-version = "0.17.7"
-source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?tag=v0.3.1#d511a17da276c0958047c84b6d30ae599542edef"
+version = "0.17.0"
+source = "git+https://github.com/QuipNetwork/polkadot-sdk.git?rev=0340e306204e8275c93a442336e534cde23a653a#0340e306204e8275c93a442336e534cde23a653a"
 dependencies = [
  "http-body-util",
  "hyper",
@@ -4768,7 +4944,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum 0.7.9",
- "base64",
+ "base64 0.22.1",
  "bytes",
  "h2",
  "http",
@@ -4929,9 +5105,9 @@ dependencies = [
 
 [[package]]
 name = "trie-db"
-version = "0.31.0"
+version = "0.32.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7795f2df2ef744e4ffb2125f09325e60a21d305cc3ecece0adeef03f7a9e560"
+checksum = "559b3902fbd74c14b64ea1690792be25bd5ccd3820f8b6b6228754e00fe3c1d6"
 dependencies = [
  "hash-db",
  "log",
@@ -5083,45 +5259,46 @@ dependencies = [
 
 [[package]]
 name = "w3f-pcs"
-version = "0.0.2"
+version = "0.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fbe7a8d5c914b69392ab3b267f679a2e546fe29afaddce47981772ac71bd02e1"
+checksum = "1304615e0b129091634dcebd1acf9edee4d6aabd03e7d679a0c49a1a1a45fe98"
 dependencies = [
- "ark-ec 0.5.0",
- "ark-ff 0.5.0",
- "ark-poly 0.5.0",
- "ark-serialize 0.5.0",
- "ark-std 0.5.0",
+ "ark-ec 0.6.0",
+ "ark-ff 0.6.0",
+ "ark-poly 0.6.0",
+ "ark-serialize 0.6.0",
+ "ark-std 0.6.0",
  "merlin",
 ]
 
 [[package]]
 name = "w3f-plonk-common"
-version = "0.0.2"
+version = "0.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1aca389e494fe08c5c108b512e2328309036ee1c0bc7bdfdb743fef54d448c8c"
+checksum = "b87f79489cacacb6abe6a41e240bbf73edb517a9bf418a83f218fb72c178481e"
 dependencies = [
- "ark-ec 0.5.0",
- "ark-ff 0.5.0",
- "ark-poly 0.5.0",
- "ark-serialize 0.5.0",
- "ark-std 0.5.0",
+ "ark-ec 0.6.0",
+ "ark-ff 0.6.0",
+ "ark-poly 0.6.0",
+ "ark-serialize 0.6.0",
+ "ark-std 0.6.0",
  "getrandom_or_panic",
  "rand_core 0.6.4",
+ "subtle",
  "w3f-pcs",
 ]
 
 [[package]]
 name = "w3f-ring-proof"
-version = "0.0.2"
+version = "0.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a639379402ad51504575dbd258740383291ac8147d3b15859bdf1ea48c677de"
+checksum = "baebbd0c660fe839a59b6b230a680276504b16d52ab635e2cc11c7a631e5ef4e"
 dependencies = [
- "ark-ec 0.5.0",
- "ark-ff 0.5.0",
- "ark-poly 0.5.0",
- "ark-serialize 0.5.0",
- "ark-std 0.5.0",
+ "ark-ec 0.6.0",
+ "ark-ff 0.6.0",
+ "ark-poly 0.6.0",
+ "ark-serialize 0.6.0",
+ "ark-std 0.6.0",
  "ark-transcript",
  "w3f-pcs",
  "w3f-plonk-common",
@@ -5295,10 +5472,63 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
+name = "windows-core"
+version = "0.62.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8e83a14d34d0623b51dce9581199302a221863196a1dde71a7663a4c2be9deb"
+dependencies = [
+ "windows-implement",
+ "windows-interface",
+ "windows-link",
+ "windows-result",
+ "windows-strings",
+]
+
+[[package]]
+name = "windows-implement"
+version = "0.60.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "053e2e040ab57b9dc951b72c264860db7eb3b0200ba345b4e4c3b14f67855ddf"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "windows-interface"
+version = "0.59.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f316c4a2570ba26bbec722032c4099d8c8bc095efccdc15688708623367e358"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+
+[[package]]
+name = "windows-result"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7781fa89eaf60850ac3d2da7af8e5242a5ea78d1a11c49bf2910bb5a73853eb5"
+dependencies = [
+ "windows-link",
+]
+
+[[package]]
+name = "windows-strings"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7837d08f69c77cf6b07689544538e017c1bfcf57e34b4c0ff58e6c2cd3b37091"
+dependencies = [
+ "windows-link",
+]
 
 [[package]]
 name = "windows-sys"
