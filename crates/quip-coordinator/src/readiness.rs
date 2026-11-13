@@ -498,13 +498,12 @@ mod tests {
     };
     use crate::config::DescriptorParams;
     use crate::funding::FundingParams;
+    use crate::logging::test_support::{drain, init_capture, Capture};
     use crate::survey::{sanitize, RawGpu, RawSurvey};
     use sp_core::crypto::{AccountId32, Ss58Codec};
-    use std::io::{self, Write};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
-    use tracing_subscriber::fmt::MakeWriter;
 
     fn snap() -> MiningSnapshot {
         MiningSnapshot {
@@ -899,35 +898,9 @@ token = "{SENTINEL}"
         }
     }
 
-    #[derive(Clone)]
-    struct Capture(Arc<Mutex<Vec<u8>>>);
-
-    impl Write for Capture {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0.lock().expect("capture lock").extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> MakeWriter<'a> for Capture {
-        type Writer = Self;
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
-
-    fn drain(buf: &Arc<Mutex<Vec<u8>>>) -> String {
-        let mut g = buf.lock().expect("capture lock");
-        let text = String::from_utf8_lossy(&g).into_owned();
-        g.clear();
-        text
-    }
-
     #[tokio::test]
     async fn only_descriptor_required_warns_among_pallet_errors() {
+        init_capture();
         let buf = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::WARN)

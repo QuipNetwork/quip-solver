@@ -200,6 +200,8 @@ pub struct CoordinatorState {
     /// Current chain quantum-block id, refreshed by the feeder on reseed; keys
     /// the per-qblock attempt logs.
     pub qblock_id: Option<u64>,
+    /// Logging context retained across pauses and outstanding submit receipts.
+    pub(crate) round_log: Option<Arc<Mutex<crate::runtime::RoundLog>>>,
     /// Win-time stash of the most-viable sub-threshold candidates for the
     /// current generation, armed with the decay projection on reseed.
     pub stash: crate::stash::WinStash,
@@ -254,6 +256,7 @@ impl CoordinatorState {
             last_abandoned_generation: 0,
             attempt_tx: None,
             qblock_id: None,
+            round_log: None,
             stash: crate::stash::WinStash::new(WIN_STASH_K),
             timing: crate::timing::TimingTracker::with_defaults(),
             generation: 0,
@@ -502,6 +505,8 @@ pub(crate) struct PowOutcome<'a> {
     pub gates: crate::validate::QualityGates,
     /// Round best before this outcome.
     pub current_best_milli: Option<i64>,
+    /// Round context captured with the job, before validation or submit can wait.
+    pub round_log: Option<Arc<Mutex<crate::runtime::RoundLog>>>,
     /// Device time the miner reported.
     pub device_access_time_us: u64,
 }
@@ -527,6 +532,7 @@ pub(crate) async fn settle_pow_result<C: ChainClient>(
         validated,
         gates,
         current_best_milli: best,
+        round_log,
         device_access_time_us,
     } = outcome;
     let mut submitted = false;
@@ -562,7 +568,17 @@ pub(crate) async fn settle_pow_result<C: ChainClient>(
             device_access_time_us,
         };
         let job_hex = crate::chain::extrinsic::hex_encode(job_id);
+        if let Some(log) = &round_log {
+            log.lock().await.submission_started();
+        }
         let submit_result = chain.submit_proof(&proof).await;
+        if let Some(log) = &round_log {
+            log.lock().await.submission_finished(
+                submit_result.as_ref().ok(),
+                validated.best_energy_milli,
+                gates.min_energy_milli,
+            );
+        }
         match submit_result.as_ref().map(|r| r.action) {
             Ok(SubmitAction::Success) => {
                 let mut st = state.lock().await;
@@ -597,6 +613,11 @@ pub(crate) async fn settle_pow_result<C: ChainClient>(
     // Record the attempt; stash sub-threshold candidates so
     // the easing difficulty can still win them; refresh the
     // per-qblock summary when the stash or a submit changed.
+    if let Some(log) = &round_log {
+        log.lock()
+            .await
+            .observe_result(validated.raw_best_energy_milli);
+    }
     {
         let mut st = state.lock().await;
         st.results_validated += 1;
@@ -732,7 +753,7 @@ pub(crate) async fn handle_lease_result<C: ChainClient>(
     miner_id: &str,
     result: quip_proto::v1::Result,
 ) {
-    let (job, view, target, best) = {
+    let (job, view, target, best, round_log) = {
         let st = state.lock().await;
         st.metrics.record_result_received(miner_id);
         let job = st.inflight.get(&result.job_id).cloned();
@@ -744,6 +765,7 @@ pub(crate) async fn handle_lease_result<C: ChainClient>(
             st.lease_topology.clone(),
             st.target,
             st.current_best_milli,
+            st.round_log.clone(),
         )
     };
     let Some(job) = job else { return };
@@ -781,6 +803,7 @@ pub(crate) async fn handle_lease_result<C: ChainClient>(
             validated,
             gates: crate::validate::gates_from_target(Some(&target)),
             current_best_milli: best,
+            round_log,
             device_access_time_us: result.meta.as_ref().map_or(0, |m| m.device_access_time_us),
         },
     )
@@ -1000,7 +1023,7 @@ async fn run_session<C: ChainClient>(
                         .await;
                     continue 'session;
                 }
-                let (job, salt, topo, best, gates, generation) = {
+                let (job, salt, topo, best, gates, generation, round_log) = {
                     let mut st = state.lock().await;
                     st.metrics.record_result_received(&miner_id);
                     let job = st.complete_inflight(&result.job_id);
@@ -1017,7 +1040,15 @@ async fn run_session<C: ChainClient>(
                     let topo = Arc::clone(&st.resolved_topo);
                     let best = st.current_best_milli;
                     let gates = crate::validate::gates_from_target(st.target.as_ref());
-                    (job, salt, topo, best, gates, st.generation)
+                    (
+                        job,
+                        salt,
+                        topo,
+                        best,
+                        gates,
+                        st.generation,
+                        st.round_log.clone(),
+                    )
                 };
                 let job = match job {
                     // A mempool order is judged by its own gates and answered
@@ -1054,6 +1085,7 @@ async fn run_session<C: ChainClient>(
                                 validated,
                                 gates,
                                 current_best_milli: best,
+                                round_log,
                                 device_access_time_us: result
                                     .meta
                                     .as_ref()
@@ -1367,6 +1399,7 @@ pub fn shutdown_msg(grace_ms: u32) -> CoordMsg {
 mod tests {
     use super::*;
     use crate::chain::FakeChain;
+    use crate::logging::test_support::{drain, init_capture, Capture};
     use crate::router::MinerCaps;
     use quip_proto::v1::{
         Job, JobKind, LeaseDone, Provenance, Result as WireResult, SetTarget, Solution,
@@ -1454,6 +1487,115 @@ mod tests {
 
     fn notify() -> Arc<Mutex<Option<oneshot::Sender<()>>>> {
         Arc::new(Mutex::new(None))
+    }
+
+    #[tokio::test]
+    async fn session_lease_win_reports_the_round_receipt_once() {
+        init_capture();
+        let (mut st, job) = lease_state();
+        st.qblock_id = Some(64);
+        st.target.as_mut().unwrap().max_energy_milli = 1_000_000;
+        st.round_log = Some(Arc::new(Mutex::new(crate::runtime::RoundLog::new(
+            Some(64),
+            [1; 32],
+        ))));
+        let state = Arc::new(Mutex::new(st));
+        let chain = FakeChain::new(lease_snapshot(), None);
+        chain.set_submit_receipt(Ok(SubmitReceipt {
+            action: SubmitAction::Success,
+            extrinsic_hash: Some([3; 32]),
+            block_hash: Some([4; 32]),
+            block_number: Some(693),
+        }));
+        let buf = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(Capture(Arc::clone(&buf)))
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let result = winner(&job, 0);
+        handle_lease_result(&chain, &state, &notify(), "m", result.clone()).await;
+        handle_lease_result(&chain, &state, &notify(), "m", result).await;
+
+        let output = drain(&buf);
+        assert_eq!(output.matches("qblock won by us").count(), 1, "{output}");
+        for field in ["qblock_id=65", "inclusion_block=693", "target_energy=1000"] {
+            assert!(output.contains(field), "{output}");
+        }
+        assert!(output.contains("quip_coordinator::runtime"), "{output}");
+        assert_eq!(chain.submitted_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn late_session_receipt_does_not_supply_the_next_rounds_best() {
+        init_capture();
+        let (mut st, job) = lease_state();
+        let result = winner(&job, 0);
+        let target = st.target.unwrap();
+        let (verified, validated) = crate::lease::verify_and_select(
+            job.generator.as_ref().unwrap(),
+            st.lease_topology.as_ref().unwrap(),
+            &target,
+            &result,
+        )
+        .unwrap();
+        let old_round = Arc::new(Mutex::new(crate::runtime::RoundLog::new(Some(64), [1; 32])));
+        let next_round = Arc::new(Mutex::new(crate::runtime::RoundLog::new(Some(65), [1; 32])));
+        st.generation = 2;
+        st.qblock_id = Some(65);
+        st.round_log = Some(Arc::clone(&next_round));
+        let state = Arc::new(Mutex::new(st));
+        let chain = FakeChain::new(lease_snapshot(), None);
+        let buf = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(Capture(Arc::clone(&buf)))
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        // Resume settlement after the feeder has opened another round, using
+        // the context captured with the old job before validation/submission.
+        settle_pow_result(
+            &chain,
+            &state,
+            &notify(),
+            PowOutcome {
+                miner_id: "m",
+                job: &job,
+                job_id: &verified.nonce,
+                salt: Some(verified.salt),
+                validated,
+                gates: crate::validate::gates_from_target(Some(&target)),
+                current_best_milli: None,
+                round_log: Some(old_round),
+                device_access_time_us: 0,
+            },
+        )
+        .await;
+        let shared_best = state.lock().await.current_best_milli;
+        assert!(
+            shared_best.is_some(),
+            "exercise the existing late state write"
+        );
+        let mut log = next_round.lock().await;
+        log.log_heartbeat(694, 2, 1, false);
+        log.observe_pending(
+            crate::pool_watch::Clearing {
+                account: [2; 32],
+                nonce: 1.into(),
+                best_energy_milli: -5_038_000,
+            },
+            -5_030_000,
+        );
+        log.log_pause(3, 694, 0, 0);
+
+        let output = drain(&buf);
+        assert!(output.contains("qblock won by us qblock_id=65"), "{output}");
+        assert_eq!(
+            output.matches("our_best_energy_this_round=none").count(),
+            2,
+            "{output}"
+        );
     }
 
     /// Run one lease `Result` against a fresh chain. Returns the shared state

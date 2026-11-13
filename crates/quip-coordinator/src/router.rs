@@ -187,21 +187,28 @@ struct MinerQueue {
     rejected_families: HashSet<FamilyCase>,
 }
 
-/// How often one miner's dropped-job total may reach the log at `warn`.
+/// How often one miner's dropped-job total may reach the log.
 ///
 /// A miner that rejects everything it is offered (a QPU with an exhausted
 /// budget, say) drops one job per dispatch, and at credit speed that is
 /// thousands of lines a second. The count is what an operator needs, not the
 /// individual jobs.
-const DROP_WARN_INTERVAL: Duration = Duration::from_secs(30);
+const DROP_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
-/// Dropped-job accounting for one miner, for the rate-limited warn.
+/// Dropped-job accounting for one miner, for the rate-limited log.
 #[derive(Debug)]
 struct DropLog {
     /// Jobs dropped since the last line reached the log.
-    since_warn: u64,
+    since_log: u64,
     /// When that line was emitted.
-    last_warn: Instant,
+    last_log: Instant,
+}
+
+fn reject_reason_name(reason: i32) -> String {
+    RejectReason::try_from(reason).map_or_else(
+        |_| format!("Unknown({reason})"),
+        |reason| format!("{reason:?}"),
+    )
 }
 
 #[derive(Debug)]
@@ -265,8 +272,10 @@ pub struct Router {
     topology: Option<RoutingTopology>,
     /// Jobs that could not be routed (no capable miner).
     pub unroutable: Vec<Job>,
-    /// Per-miner drop counters behind [`DROP_WARN_INTERVAL`].
+    /// Per-miner warning drop counters behind [`DROP_LOG_INTERVAL`].
     drops: HashMap<String, DropLog>,
+    /// Separate Overloaded totals so INFO windows cannot suppress real warnings.
+    sit_outs: HashMap<String, DropLog>,
     /// Operator pin for family work: a miner id or a `solver_id`.
     solver_pin: Option<String>,
 }
@@ -326,7 +335,7 @@ impl Router {
 
     /// Stage `job` on a capable miner; returns the chosen `miner_id`, or `None`.
     pub fn route(&mut self, job: Job) -> Option<String> {
-        self.route_excluding(job, None)
+        self.route_excluding(job, None, true)
     }
 
     fn is_capable(&self, miner_id: &str, job: &Job) -> bool {
@@ -367,7 +376,12 @@ impl Router {
     /// Like [`Router::route`], but never selects `exclude`. Used by
     /// [`Router::on_reject`] so a rejected job is not re-staged onto the miner
     /// that just rejected it.
-    fn route_excluding(&mut self, job: Job, exclude: Option<&str>) -> Option<String> {
+    fn route_excluding(
+        &mut self,
+        job: Job,
+        exclude: Option<&str>,
+        warn_unroutable: bool,
+    ) -> Option<String> {
         let mut candidates: Vec<String> = self
             .miners
             .keys()
@@ -381,7 +395,7 @@ impl Router {
             }
             Some(id)
         } else {
-            if job_family(&job).is_some() {
+            if warn_unroutable && job_family(&job).is_some() {
                 tracing::warn!(
                     reasons = ?self.ineligible_reasons(&job),
                     pin = ?self.solver_pin,
@@ -409,7 +423,7 @@ impl Router {
                     q.staged.push_back(job);
                 }
             } else {
-                let _ = self.route_excluding(job, Some(miner_id));
+                let _ = self.route_excluding(job, Some(miner_id), true);
             }
         }
         true
@@ -467,7 +481,7 @@ impl Router {
                 q.staged.pop_front()?
             };
             if !self.is_capable(miner_id, &job) {
-                let _ = self.route_excluding(job, Some(miner_id));
+                let _ = self.route_excluding(job, Some(miner_id), true);
                 continue;
             }
             let q = self.miners.get_mut(miner_id)?;
@@ -529,53 +543,70 @@ impl Router {
                 }
             }
         }
-        if self.route_excluding(job, Some(miner_id)).is_none() {
+        let overloaded = reason == RejectReason::Overloaded as i32;
+        if self
+            .route_excluding(job, Some(miner_id), !overloaded)
+            .is_none()
+        {
             tracing::debug!(
                 miner = %miner_id,
-                reason,
+                reason = %reject_reason_name(reason),
                 "rejected job has no alternative capable miner; dropping"
             );
             self.note_drop(miner_id, reason);
         }
     }
 
-    /// Count one dropped job, and let the total through at `warn` no more than
-    /// once per [`DROP_WARN_INTERVAL`] per miner.
+    /// Count one dropped job, and log the total no more than once per
+    /// [`DROP_LOG_INTERVAL`] per miner. Deliberate sit-outs use INFO.
     ///
     /// The first drop after a quiet period reports immediately, so a one-off
     /// still surfaces; a flood collapses into one line carrying the count.
     fn note_drop(&mut self, miner_id: &str, reason: i32) {
         let now = Instant::now();
-        match self.drops.get_mut(miner_id) {
-            Some(log) if now.duration_since(log.last_warn) < DROP_WARN_INTERVAL => {
-                log.since_warn += 1;
+        let logs = if reason == RejectReason::Overloaded as i32 {
+            &mut self.sit_outs
+        } else {
+            &mut self.drops
+        };
+        let dropped = match logs.get_mut(miner_id) {
+            Some(log) if now.duration_since(log.last_log) < DROP_LOG_INTERVAL => {
+                log.since_log += 1;
+                return;
             }
             Some(log) => {
-                tracing::warn!(
-                    miner = %miner_id,
-                    reason,
-                    dropped = log.since_warn + 1,
-                    window_s = DROP_WARN_INTERVAL.as_secs(),
-                    "rejected jobs have no alternative capable miner; dropping"
-                );
-                log.since_warn = 0;
-                log.last_warn = now;
+                let dropped = log.since_log + 1;
+                log.since_log = 0;
+                log.last_log = now;
+                dropped
             }
             None => {
-                tracing::warn!(
-                    miner = %miner_id,
-                    reason,
-                    dropped = 1,
-                    "rejected job has no alternative capable miner; dropping"
-                );
-                let _ = self.drops.insert(
+                let _ = logs.insert(
                     miner_id.to_string(),
                     DropLog {
-                        since_warn: 0,
-                        last_warn: now,
+                        since_log: 0,
+                        last_log: now,
                     },
                 );
+                1
             }
+        };
+        if reason == RejectReason::Overloaded as i32 {
+            tracing::info!(
+                miner = %miner_id,
+                reason = %reject_reason_name(reason),
+                jobs_not_mined = dropped,
+                window_s = DROP_LOG_INTERVAL.as_secs(),
+                "miner declined jobs as overloaded (sitting the round out or busy); not mined"
+            );
+        } else {
+            tracing::warn!(
+                miner = %miner_id,
+                reason = %reject_reason_name(reason),
+                dropped,
+                window_s = DROP_LOG_INTERVAL.as_secs(),
+                "rejected jobs have no alternative capable miner; dropping"
+            );
         }
     }
 
@@ -902,6 +933,7 @@ fn job_max_degree(job: &Job, topology: Option<&RoutingTopology>) -> Option<u32> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::logging::test_support::capture_logs;
     use quip_proto::v1::{JobKind, Provenance};
 
     fn caps_ising() -> MinerCaps {
@@ -1108,7 +1140,7 @@ mod tests {
     /// drop still reaches the log immediately: rate limiting must not swallow
     /// the first occurrence.
     #[test]
-    fn repeated_drops_collapse_into_one_warn_window() {
+    fn repeated_drops_collapse_into_one_log_window() {
         let mut r = Router::new();
         r.register_miner("qpu-0", caps_ising());
         for g in 1..=50 {
@@ -1118,14 +1150,103 @@ mod tests {
             let dispatched = r.next_job("qpu-0").expect("dispatched");
             r.on_reject("qpu-0", dispatched, RejectReason::Overloaded as i32);
             if g == 1 {
-                let log = r.drops.get("qpu-0").expect("drop log");
-                assert_eq!(log.since_warn, 0, "the first drop opens a window");
+                let log = r.sit_outs.get("qpu-0").expect("drop log");
+                assert_eq!(log.since_log, 0, "the first drop opens a window");
             }
         }
-        let log = r.drops.get("qpu-0").expect("drop log");
+        let log = r.sit_outs.get("qpu-0").expect("drop log");
         // The first drop reports at once and resets the counter; the other 49
         // are counted for the next line instead of being logged one by one.
-        assert_eq!(log.since_warn, 49);
+        assert_eq!(log.since_log, 49);
+    }
+
+    #[test]
+    fn overloaded_family_drop_is_an_info_sit_out() {
+        let mut r = Router::new();
+        r.register_miner("qpu-0", caps_lease());
+        let mut job = lease_job(0);
+        job.generator.as_mut().unwrap().family = Some(FamilyDescriptor {
+            family_id: "quip/ice-fields".to_owned(),
+            revision: 1,
+            params: vec![1],
+            params_digest: vec![5; 32],
+        });
+        let output = capture_logs(|| {
+            for _ in 0..50 {
+                r.on_reject("qpu-0", job.clone(), RejectReason::Overloaded as i32);
+            }
+        });
+        assert!(!output.contains("WARN"), "{output}");
+        assert_eq!(output.matches("INFO").count(), 1, "{output}");
+        assert!(output.contains("declined jobs as overloaded"), "{output}");
+        assert!(output.contains("miner=qpu-0"), "{output}");
+        assert!(output.contains("reason=Overloaded"), "{output}");
+        assert!(output.contains("jobs_not_mined=1"), "{output}");
+        assert!(!output.contains("reason=4"), "{output}");
+        assert_eq!(r.unroutable.len(), 50);
+
+        r.sit_outs.get_mut("qpu-0").unwrap().last_log -= DROP_LOG_INTERVAL;
+        let output = capture_logs(|| {
+            r.on_reject("qpu-0", job, RejectReason::Overloaded as i32);
+        });
+        assert!(output.contains("jobs_not_mined=50"), "{output}");
+        assert!(!output.contains("WARN"), "{output}");
+    }
+
+    #[test]
+    fn other_rejects_keep_named_drop_warnings() {
+        for (reason, name) in [
+            (RejectReason::Malformed as i32, "Malformed"),
+            (RejectReason::UnsupportedKind as i32, "UnsupportedKind"),
+            (RejectReason::FamilyUnsupported as i32, "FamilyUnsupported"),
+            (999, "Unknown(999)"),
+        ] {
+            let mut r = Router::new();
+            r.register_miner("cpu-0", caps_ising());
+            let output = capture_logs(|| {
+                r.on_reject("cpu-0", make_job(1, JobKind::IsingSample), reason);
+            });
+            assert!(output.contains("WARN"), "{output}");
+            assert!(output.contains(&format!("reason={name}")), "{output}");
+            assert!(output.contains("dropped=1"), "{output}");
+            assert!(!output.contains("declined jobs as overloaded"), "{output}");
+        }
+    }
+
+    #[test]
+    fn sit_outs_and_other_rejects_have_separate_log_windows() {
+        for reasons in [
+            [RejectReason::Overloaded, RejectReason::Malformed],
+            [RejectReason::Malformed, RejectReason::Overloaded],
+        ] {
+            let mut r = Router::new();
+            r.register_miner("qpu-0", caps_ising());
+            let output = capture_logs(|| {
+                for reason in reasons {
+                    r.on_reject("qpu-0", make_job(1, JobKind::IsingSample), reason as i32);
+                }
+                r.on_reject(
+                    "qpu-0",
+                    make_job(2, JobKind::IsingSample),
+                    RejectReason::Overloaded as i32,
+                );
+            });
+            assert_eq!(output.matches("INFO").count(), 1, "{output}");
+            assert_eq!(output.matches("WARN").count(), 1, "{output}");
+            assert!(output.contains("jobs_not_mined=1"), "{output}");
+            assert!(output.contains("dropped=1"), "{output}");
+
+            r.sit_outs.get_mut("qpu-0").unwrap().last_log -= DROP_LOG_INTERVAL;
+            let output = capture_logs(|| {
+                r.on_reject(
+                    "qpu-0",
+                    make_job(3, JobKind::IsingSample),
+                    RejectReason::Overloaded as i32,
+                );
+            });
+            assert!(output.contains("jobs_not_mined=2"), "{output}");
+            assert!(!output.contains("WARN"), "{output}");
+        }
     }
 
     #[test]

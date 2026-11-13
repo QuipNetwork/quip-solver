@@ -137,6 +137,65 @@ pub fn init(level: Option<LogLevel>) -> Result<(), String> {
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex, Once};
+    use tracing_subscriber::fmt::MakeWriter;
+
+    pub(crate) fn init_capture() {
+        static INIT: Once = Once::new();
+        // Keep a silent subscriber alive between captures, so callsites used
+        // concurrently by uncaptured tests never cache a disabled interest.
+        INIT.call_once(|| {
+            tracing::subscriber::set_global_default(tracing_subscriber::registry())
+                .expect("test tracing registry");
+        });
+    }
+
+    #[derive(Clone)]
+    pub(crate) struct Capture(pub(crate) Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().expect("capture lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for Capture {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    pub(crate) fn drain(buf: &Arc<Mutex<Vec<u8>>>) -> String {
+        let mut g = buf.lock().expect("capture lock");
+        let text = String::from_utf8_lossy(&g).into_owned();
+        g.clear();
+        text
+    }
+
+    pub(crate) fn capture_logs(run: impl FnOnce()) -> String {
+        init_capture();
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .without_time()
+            .with_ansi(false)
+            .with_writer(Capture(Arc::clone(&buf)))
+            .finish();
+        tracing::subscriber::with_default(subscriber, run);
+        drain(&buf)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::str::FromStr as _;
