@@ -107,7 +107,7 @@ The coordinator builds a `QuantumProof` in `proof_encode.rs` with these fields:
 | `topology_hash` | The registered topology |
 | `nonce` | `derive_nonce(last_proof_block_hash, identity, salt)`, where `identity` is `blake2_256(SCALE(account))`. The pallet computes the same value in `account_to_bytes`. The coordinator supplies it from `miner_identity_bytes` (`chain/extrinsic.rs`). |
 | `salt` | 32 bytes chosen by the miner |
-| `solutions` | Spin vectors, bit-packed under `allowed_spin_values` |
+| `solutions` | Spin vectors, bit-packed under `allowed_spin_values`. On a family topology, each row is a compact witness in the codec of the family revision. |
 | `device_access_time_us` | Self-reported compute time. Consensus does not read it. |
 
 The proof carries no energies. The chain recalculates them from the solutions.

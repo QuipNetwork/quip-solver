@@ -9,6 +9,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::chain::extrinsic::account_identity_bytes;
+use crate::chain::proof_encode::decode_family_witnesses;
 use crate::chain::scale_types::QuantumProof;
 use crate::chain::{MiningSnapshot, PendingProof};
 use quantum_validation::{
@@ -112,7 +113,7 @@ fn legacy_rows(proof: &QuantumProof, snap: &MiningSnapshot) -> Result<Vec<(i64, 
     )
     .map_err(|e| format!("model: {e:?}"))?;
     let mut rows = Vec::with_capacity(proof.solutions.len());
-    for spins in unpack_rows(proof, snap, snap.nodes.len())? {
+    for spins in unpack_rows(proof, snap)? {
         let energy = energy_of_solution_indexed(&spins, &h, &snap.edges, &j, &index)
             .map_err(|e| format!("energy: {e:?}"))?;
         rows.push((energy, spins));
@@ -121,52 +122,26 @@ fn legacy_rows(proof: &QuantumProof, snap: &MiningSnapshot) -> Result<Vec<(i64, 
 }
 
 /// Each row's spins and energy on the family instance the nonce regenerates,
-/// as the pallet's `validate_family_proof` computes them. It uses the
-/// validator's own `FamilyChallenge`. A skipped nonce or one infeasible
-/// witness rejects the whole proof, as it does on chain.
+/// as the pallet's `validate_family_proof` computes them: the validator's own
+/// `FamilyChallenge::decode_witnesses` over the compact codec bytes. A skipped
+/// nonce or one bad witness rejects the whole proof, as it does on chain.
 fn family_rows(
     proof: &QuantumProof,
     snap: &MiningSnapshot,
     family: &crate::lease::ChallengeFamily,
 ) -> Result<Vec<(i64, Vec<i8>)>, String> {
-    use quantum_validation::families::{AdvertisedLimits, FamilyChallenge, CONTRACTS};
-    let descriptor = family.descriptor();
-    // Registration already bounded every instance by the chain's limits, so
-    // admission here only needs to accept what the chain accepted.
-    let limits = AdvertisedLimits {
-        max_nodes: u64::MAX,
-        max_edges: u64::MAX,
-        max_degree: 0,
-    };
-    let challenge = FamilyChallenge::admit(
-        CONTRACTS,
-        descriptor.family_id.as_bytes(),
-        descriptor.revision,
-        &descriptor.params,
+    decode_family_witnesses(
+        family,
         &snap.nodes,
         &snap.edges,
-        &limits,
+        proof.nonce.to_big_endian(),
+        &proof.solutions,
     )
-    .map_err(|e| format!("family admission: {e:?}"))?;
-    let instance = challenge
-        .regenerate(proof.nonce.to_big_endian())
-        .map_err(|e| format!("family instance: {e:?}"))?;
-    let mut rows = Vec::with_capacity(proof.solutions.len());
-    for spins in unpack_rows(proof, snap, instance.node_ids().len())? {
-        let energy = challenge
-            .verify_witness(&instance, &spins)
-            .map_err(|e| format!("family witness: {e:?}"))?;
-        rows.push((energy, spins));
-    }
-    Ok(rows)
 }
 
-/// Unpack every row to `num_spins` signs under the snapshot's spin set.
-fn unpack_rows(
-    proof: &QuantumProof,
-    snap: &MiningSnapshot,
-    num_spins: usize,
-) -> Result<Vec<Vec<i8>>, String> {
+/// Unpack every row to one sign per topology node under the snapshot's spin set.
+fn unpack_rows(proof: &QuantumProof, snap: &MiningSnapshot) -> Result<Vec<Vec<i8>>, String> {
+    let num_spins = snap.nodes.len();
     let spin_spec = AllowedValueSpec::Set(snap.allowed_spin_milli.as_slice());
     let mut rows = Vec::with_capacity(proof.solutions.len());
     for packed in &proof.solutions {
@@ -429,8 +404,8 @@ mod tests {
     }
 
     /// A polariton snapshot, the first salt whose nonce gives an instance, and
-    /// one witness of that instance that is feasible or not as asked.
-    fn family_case(want_feasible: bool) -> (MiningSnapshot, [u8; 32], Vec<i8>) {
+    /// one feasible witness of that instance.
+    fn family_case() -> (MiningSnapshot, [u8; 32], Vec<i8>) {
         use quantum_validation::families::{AdvertisedLimits, FamilyChallenge, CONTRACTS};
         let blob =
             quip_solver_conformance::topology(quip_solver_conformance::families::ROUTING_TOPOLOGY)
@@ -488,24 +463,35 @@ mod tests {
                     .map(|k| if bits >> k & 1 == 1 { -1 } else { 1 })
                     .collect::<Vec<i8>>()
             })
-            .find(|spins| challenge.verify_witness(&instance, spins).is_ok() == want_feasible)
-            .expect("the instance has a witness of each kind");
+            .find(|spins| challenge.verify_witness(&instance, spins).is_ok())
+            .expect("the instance has a feasible witness");
         (snap, salt, spins)
     }
 
     /// A pending family proof is judged on the instance its nonce regenerates,
-    /// not on the legacy draw, and one infeasible witness rejects it whole.
+    /// not on the legacy draw. Its rows are compact codec witnesses, and one
+    /// that does not decode rejects the whole proof.
     #[test]
     fn a_family_proof_is_judged_on_its_regenerated_instance() {
-        let (snap, salt, spins) = family_case(true);
-        let pending = pending_with(&snap, std::slice::from_ref(&spins), salt);
+        let (snap, salt, spins) = family_case();
+        let family = snap.family.clone().expect("a family snapshot");
+        let mut pending = pending_with(&snap, &[], salt);
+        pending.proof.solutions = crate::chain::proof_encode::encode_family_witnesses(
+            &family,
+            &snap.nodes,
+            &snap.edges,
+            pending.proof.nonce.to_big_endian(),
+            [spins.as_slice()],
+        )
+        .expect("a feasible witness encodes");
         assert!(judge_pending_proof(&pending, &snap).clears());
 
-        let (snap, salt, spins) = family_case(false);
-        let pending = pending_with(&snap, &[spins], salt);
+        for witness in &mut pending.proof.solutions {
+            witness.truncate(witness.len().saturating_sub(1));
+        }
         match judge_pending_proof(&pending, &snap) {
             Verdict::Malformed(reason) => assert!(reason.contains("family witness"), "{reason}"),
-            other => panic!("an infeasible witness is rejected: {other:?}"),
+            other => panic!("a truncated witness is rejected: {other:?}"),
         }
     }
 

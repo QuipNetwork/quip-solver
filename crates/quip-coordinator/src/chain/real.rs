@@ -15,7 +15,7 @@ use super::extrinsic::{
     SignedExtensionContext,
 };
 use super::pool::{decode_pending_proof, PendingProof};
-use super::proof_encode::{build_quantum_proof, ProofBuildContext};
+use super::proof_encode::{build_quantum_proof, ProofBuildContext, WitnessFormat};
 use super::scale_types::{
     encode_deregister_solver_call, encode_participate_call, encode_register_miner_call,
     encode_register_solver_call, encode_set_descriptor_call, encode_submit_proof_call,
@@ -1544,8 +1544,7 @@ impl ChainClient for RealChainClient {
             last_proof_block_hash: snap.last_proof_block_hash,
             miner_identity: miner_identity_bytes(&pair),
             salt,
-            num_nodes: witness_len(&snap, proof),
-            allowed_spin: spin_spec,
+            witness: witness_format(&snap, spin_spec),
         };
         let quantum = build_quantum_proof(proof, &ctx)
             .map_err(|e| ChainError::Submit(format!("encode proof: {e}")))?;
@@ -1890,15 +1889,23 @@ fn quantum_pow_api_version(rv: &Value) -> Result<u32, ChainError> {
         .ok_or_else(|| ChainError::Decode("runtime reports no QuantumPowApi".into()))
 }
 
-/// The spin count of each witness in `proof`.
-///
-/// A legacy witness covers every topology node. A family witness covers the
-/// instance its nonce regenerates, which the session checked before the proof
-/// was built, so its rows carry the length and must agree with each other.
-fn witness_len(snap: &MiningSnapshot, proof: &Proof) -> usize {
-    match (&snap.family, proof.solutions.first()) {
-        (Some(_), Some(row)) => row.spins.len(),
-        _ => snap.nodes.len(),
+/// The solution format the pallet accepts on `snap`'s topology: the family's
+/// compact codec on a family topology, otherwise the spin-spec packing over
+/// every topology node.
+fn witness_format(
+    snap: &MiningSnapshot,
+    allowed_spin: AllowedValueSpec<Vec<i32>>,
+) -> WitnessFormat {
+    match &snap.family {
+        Some(family) => WitnessFormat::Family {
+            family: family.clone(),
+            nodes: snap.nodes.clone(),
+            edges: snap.edges.clone(),
+        },
+        None => WitnessFormat::Packed {
+            num_nodes: snap.nodes.len(),
+            allowed_spin,
+        },
     }
 }
 
@@ -2481,10 +2488,12 @@ mod tests {
         }
     }
 
-    /// A family witness is packed at its instance size, which its rows carry.
-    /// A legacy witness is packed at the topology size.
+    /// A family topology takes the family's compact codec. Any other topology
+    /// takes the spin-spec packing over every topology node.
     #[test]
-    fn a_family_witness_is_packed_at_the_instance_size() {
+    fn a_family_topology_takes_the_codec_and_a_legacy_one_the_packing() {
+        use crate::chain::proof_encode::WitnessFormat;
+        use quantum_validation::AllowedValueSpec;
         let meta = family_meta(1);
         let topology = crate::topology::Topology::from_nodes_edges(
             meta.nodes.clone(),
@@ -2510,34 +2519,32 @@ mod tests {
             target_proof_blocks: crate::decay::TARGET_PROOF_BLOCKS,
             family: None,
         };
-        let proof = super::Proof {
-            job_id: Vec::new(),
-            best_energy_milli: 0,
-            diversity_milli: 0,
-            n_valid: 1,
-            solutions: vec![crate::validate::SpinRow {
-                spins: vec![1; 7],
-                energy_milli: 0,
-            }],
-            is_pow: true,
-            order_id: Vec::new(),
-            generation: 1,
-            salt: vec![0; 32],
-            device_access_time_us: 0,
-        };
-        assert_eq!(super::witness_len(&snap, &proof), meta.nodes.len());
+        let spin = AllowedValueSpec::Set(vec![-1000, 1000]);
+        assert!(matches!(
+            super::witness_format(&snap, spin.clone()),
+            WitnessFormat::Packed { num_nodes, .. } if num_nodes == meta.nodes.len()
+        ));
         let descriptor = meta.family.expect("a family topology");
-        snap.family = Some(
-            crate::lease::ChallengeFamily::admit(
-                crate::lease::FAMILY_CONTRACTS,
-                std::str::from_utf8(&descriptor.family_id).expect("ascii id"),
-                descriptor.revision,
-                descriptor.params,
-                &topology,
-            )
-            .expect("admitted"),
-        );
-        assert_eq!(super::witness_len(&snap, &proof), 7);
+        let family = crate::lease::ChallengeFamily::admit(
+            crate::lease::FAMILY_CONTRACTS,
+            std::str::from_utf8(&descriptor.family_id).expect("ascii id"),
+            descriptor.revision,
+            descriptor.params,
+            &topology,
+        )
+        .expect("admitted");
+        snap.family = Some(family.clone());
+        match super::witness_format(&snap, spin) {
+            WitnessFormat::Family {
+                family: chosen,
+                nodes,
+                edges,
+            } => {
+                assert_eq!(chosen, family);
+                assert_eq!((nodes, edges), (meta.nodes, meta.edges));
+            }
+            WitnessFormat::Packed { .. } => panic!("a family topology must take its codec"),
+        }
     }
 
     /// A legacy topology on runtime API version 3 records `family: None` and
