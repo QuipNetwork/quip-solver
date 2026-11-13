@@ -90,9 +90,6 @@ pub struct RealChainClient {
     reachable: Mutex<Option<bool>>,
     /// Kind declared on `participate`. Derived from the miners this process starts.
     participate_kind: MinerKind,
-    /// Whether a family topology may be mined. Off by default: the snapshot
-    /// then reports nothing to mine on a family topology.
-    family_mining: bool,
     /// The last family topology this client refused, so the refusal is logged
     /// once per topology rather than on every poll.
     refused_family: Mutex<Option<[u8; 32]>>,
@@ -116,16 +113,8 @@ impl RealChainClient {
             reachable: Mutex::new(None),
             participate_kind,
             registered_solver: Mutex::new(None),
-            family_mining: false,
             refused_family: Mutex::new(None),
         }
-    }
-
-    /// Allow or refuse mining a family topology (`[miner] family_mining`).
-    #[must_use]
-    pub const fn with_family_mining(mut self, enabled: bool) -> Self {
-        self.family_mining = enabled;
-        self
     }
 
     /// Construct a client over a caller-supplied transport.
@@ -416,18 +405,12 @@ impl RealChainClient {
     /// # Errors
     /// Returns why this coordinator cannot mine the topology.
     fn bind_family(
-        &self,
         topology_hash: [u8; 32],
         meta: &TopologyMetaScale,
         descriptor: &FamilyDescriptorScale,
     ) -> Result<crate::lease::ChallengeFamily, String> {
         let id = String::from_utf8_lossy(&descriptor.family_id);
         let label = format!("{id} revision {}", descriptor.revision);
-        if !self.family_mining {
-            return Err(format!(
-                "the chain mines family {label}; set [miner] family_mining = true to mine it"
-            ));
-        }
         let family_id = std::str::from_utf8(&descriptor.family_id)
             .map_err(|_| format!("family id of {label} is not UTF-8"))?;
         let topology = crate::topology::Topology::from_nodes_edges(
@@ -499,7 +482,7 @@ impl RealChainClient {
         let Some(descriptor) = &meta.family else {
             return Ok(None);
         };
-        self.bind_family(topology_hash, meta, descriptor)
+        Self::bind_family(topology_hash, meta, descriptor)
             .map(Some)
             .map_err(|reason| {
                 self.refuse_family(topology_hash, &reason);
@@ -2413,14 +2396,13 @@ mod tests {
         )
     }
 
-    fn family_client(validator: SnapshotValidator, family_mining: bool) -> RealChainClient {
+    fn family_client(validator: SnapshotValidator) -> RealChainClient {
         RealChainClient::with_transport(
             vec!["ws://scripted".to_string()],
             "//Alice".to_string(),
             MinerKind::Cpu,
             std::sync::Arc::new(validator),
         )
-        .with_family_mining(family_mining)
     }
 
     /// A family topology on runtime API version 3 binds the chain's own
@@ -2436,7 +2418,7 @@ mod tests {
             hard_milli: -900_000,
             easy_milli: -700_000,
         });
-        let client = family_client(validator, true);
+        let client = family_client(validator);
 
         let snap = client
             .fetch_mining_snapshot(None, [0u8; 32], None)
@@ -2458,9 +2440,9 @@ mod tests {
         assert_eq!(decay.energy_band_milli, Some((-900_000, -700_000)));
     }
 
-    /// Nothing is mined on a family topology that the switch keeps off, that
-    /// this build cannot admit, or whose descriptor does not hash to the
-    /// topology the chain names. Each is a round the chain would reject.
+    /// Nothing is mined on a family topology that this build cannot admit, or
+    /// whose descriptor does not hash to the topology the chain names. Each is
+    /// a round the chain would reject.
     #[tokio::test]
     async fn a_family_topology_is_not_mined_when_it_cannot_be_proven() {
         use crate::chain::ChainClient as _;
@@ -2473,14 +2455,13 @@ mod tests {
             &meta.allowed_j_values.as_slice(),
             &meta.allowed_spin_values.as_slice(),
         );
-        for (label, revision, default, switch) in [
-            ("switch off", 1, hash, false),
-            ("unknown revision", 99, hash, true),
-            ("descriptor under the legacy hash", 1, legacy, true),
+        for (label, revision, default) in [
+            ("unknown revision", 99, hash),
+            ("descriptor under the legacy hash", 1, legacy),
         ] {
             let mut validator = SnapshotValidator::new(default, 3);
             validator.meta = Some(family_meta(revision));
-            let snap = family_client(validator, switch)
+            let snap = family_client(validator)
                 .fetch_mining_snapshot(None, [0u8; 32], None)
                 .await
                 .expect("snapshot read");
@@ -2548,20 +2529,18 @@ mod tests {
     }
 
     /// A legacy topology on runtime API version 3 records `family: None` and
-    /// mines as before, with or without the switch.
+    /// mines as before.
     #[tokio::test]
     async fn a_legacy_topology_on_api_3_stays_legacy() {
         use crate::chain::ChainClient as _;
-        for switch in [false, true] {
-            let snap = family_client(SnapshotValidator::new([0x11; 32], 3), switch)
-                .fetch_mining_snapshot(None, [0u8; 32], None)
-                .await
-                .expect("snapshot")
-                .expect("a legacy topology");
-            assert_eq!(snap.spec_version, 120);
-            assert!(snap.family.is_none());
-            assert_eq!(snap.nodes, vec![0, 1, 0x11]);
-        }
+        let snap = family_client(SnapshotValidator::new([0x11; 32], 3))
+            .fetch_mining_snapshot(None, [0u8; 32], None)
+            .await
+            .expect("snapshot")
+            .expect("a legacy topology");
+        assert_eq!(snap.spec_version, 120);
+        assert!(snap.family.is_none());
+        assert_eq!(snap.nodes, vec![0, 1, 0x11]);
     }
 
     /// The topology is the one payload that never changes under its hash, so
