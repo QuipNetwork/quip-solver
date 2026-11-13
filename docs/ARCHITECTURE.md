@@ -194,9 +194,9 @@ CUDA, Metal, and D-Wave bounds live in their own repositories.
 Genesis and consensus defaults live in the chain pallet, not here. The
 coordinator reads them from the mining snapshot. The one place this repository
 names difficulty values is `seed-chain`: `DEFAULT_SEED_DIFFICULTY`
-(`chain/seed.rs:101`) writes `min_solutions = 5`,
-`max_energy_milli = -2_500_000`, and `min_diversity_milli = 200` to a fresh
-chain. The devnet acceptance test (`tests/devnet_submit.rs`) asserts that the
+(`chain/seed.rs`) writes `min_solutions = 1`,
+`max_energy_milli = -4_850_000`, and `min_diversity_milli = 0` to a fresh
+chain, with `DEFAULT_ENERGY_BAND` from -5,100,000 to -4,800,000 milli. The devnet acceptance test (`tests/devnet_submit.rs`) asserts that the
 decoded gates are sane, not that they hold fixed values. For the difficulty
 energy target, the per-topology energy ranges, and the mempool
 section-election rules, read the pallet in quip-validator. This repository

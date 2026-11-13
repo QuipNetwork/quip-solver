@@ -316,14 +316,6 @@ pub struct MinerInfoScale {
 pub const QUANTUM_POW_PALLET_INDEX: u8 = 10;
 /// Call index of `submit_proof` within `QuantumPow`.
 pub const SUBMIT_PROOF_CALL_INDEX: u8 = 4;
-/// `Sudo` pallet index in the runtime.
-pub const SUDO_PALLET_INDEX: u8 = 6;
-/// `pallet_sudo::Call::sudo` call index.
-pub const SUDO_CALL_INDEX: u8 = 0;
-/// First runtime `spec_version` without `pallet-sudo` (quip-validator v0.4.1).
-/// Root is reachable there only through a council motion that calls
-/// `ValidatorAdmission::dispatch_as_root`, and pallet index 6 is retired.
-pub const SUDO_REMOVED_SPEC_VERSION: u32 = 120;
 /// `QuantumPow::register_miner` call index. Takes no arguments; the origin is
 /// the miner. `QuantumPow::submit_proof` rejects any account that has not made
 /// this call with `MinerNotRegistered`.

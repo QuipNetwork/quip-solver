@@ -810,10 +810,6 @@ impl RealChainClient {
                 self.storage_value_present(&default_topology_storage_key(), block_hex)
                     .await
             }
-            Confirmation::Difficulty { topology_hash } => {
-                self.storage_value_present(&difficulties_storage_key(&topology_hash), block_hex)
-                    .await
-            }
             Confirmation::SolverRegistered { account } => {
                 let stored = self
                     .read_storage::<SolverInfoScale>(&solvers_storage_key(&account), block_hex)
@@ -978,10 +974,6 @@ impl RealChainClient {
             Confirmation::DefaultTopology => {
                 "dispatch failed and QuantumPow.DefaultTopology is still unset".to_string()
             }
-            Confirmation::Difficulty { .. } => {
-                "dispatch failed and QuantumPow.Difficulties has no entry for this topology"
-                    .to_string()
-            }
             Confirmation::SolverRegistered { .. } => {
                 "dispatch failed and QuantumComputeMempool.Solvers has no entry with the requested \
                  solver type for this account"
@@ -1047,8 +1039,6 @@ pub(crate) enum Confirmation {
     Participation { qblock_id: u64, account: [u8; 32] },
     /// `QuantumPow.DefaultTopology` is present. Used by seed-chain.
     DefaultTopology,
-    /// `QuantumPow.Difficulties[topology_hash]` is present. Used by seed-chain.
-    Difficulty { topology_hash: [u8; 32] },
     /// `QuantumComputeMempool.Solvers[account]` holds the configured solver type.
     SolverRegistered { account: [u8; 32] },
     /// `QuantumComputeMempool.Solvers[account]` is absent.

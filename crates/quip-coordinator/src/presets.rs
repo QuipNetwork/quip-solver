@@ -1,49 +1,30 @@
 //! Built-in topology specs, embedded in the binary.
-//!
-//! JSON fixtures provide the base specs. Aglais derives from the embedded
-//! Advantage2 spec once, without a second graph file or a filesystem read.
 
-use std::sync::LazyLock;
+/// The live D-Wave Advantage2 graph, Zephyr z(12, 4) with the removed qubits
+/// and couplers of the 2026-09-21 hardware snapshot: 4575 nodes and 41474
+/// edges. It is solver-core's `zephyr-z12t4-live` topology, the graph its
+/// live twisted-ice-dimer recipes are frozen on, and the file is
+/// byte-identical to the snapshot solver-core pins by sha256.
+const ZEPHYR_Z12T4_LIVE: &str = include_str!("../fixtures/drive/zephyr-z12t4-live.spec.json");
 
-/// D-Wave Advantage2 hardware graph: 4577 native nodes and 41515 edges.
-const ADVANTAGE2_SYSTEM1: &str = include_str!("../fixtures/drive/advantage2-system1.spec.json");
+/// The graph the spec-119 Aglais chain registered: an older Advantage2
+/// snapshot (4577 nodes) without coupler (938, 2812), and `h` fixed at 0.
+const AGLAIS: &str = include_str!("../fixtures/drive/aglais.spec.json");
 
 /// A small graph for fast smoke runs.
 const SMOKE: &str = include_str!("../fixtures/drive/smoke.spec.json");
 
-static AGLAIS: LazyLock<Result<String, String>> = LazyLock::new(|| {
-    let mut spec: serde_json::Value = serde_json::from_str(ADVANTAGE2_SYSTEM1)
-        .map_err(|error| format!("parse embedded Advantage2 topology: {error}"))?;
-    let edges = spec
-        .get_mut("edges")
-        .and_then(serde_json::Value::as_array_mut)
-        .ok_or("embedded Advantage2 topology has no edges array")?;
-    let before = edges.len();
-    // Compacted positions (880, 2695) name native IDs (938, 2812).
-    let removed = serde_json::json!([938, 2812]);
-    edges.retain(|edge| edge != &removed);
-    if edges.len() + 1 != before {
-        return Err("Aglais derivation requires exactly one native edge (938, 2812)".into());
-    }
-    let h = spec
-        .get_mut("allowed_h_milli")
-        .ok_or("embedded Advantage2 topology has no allowed_h_milli")?;
-    *h = serde_json::json!([0]);
-    serde_json::to_string(&spec)
-        .map_err(|error| format!("serialize derived Aglais topology: {error}"))
-});
-
 /// Every preset name this binary understands.
-pub const PRESET_NAMES: [&str; 3] = ["advantage2-system1", "aglais", "smoke"];
+pub const PRESET_NAMES: [&str; 3] = ["zephyr-z12t4-live", "aglais", "smoke"];
 
-/// Return the embedded or derived topology-spec JSON for `name`.
+/// Return the embedded topology-spec JSON for `name`.
 ///
 /// # Errors
-/// Returns an error for an unknown name or an invalid embedded base spec.
+/// Returns an error for an unknown name.
 pub fn preset_spec(name: &str) -> Result<&'static str, String> {
     match name {
-        "advantage2-system1" => Ok(ADVANTAGE2_SYSTEM1),
-        "aglais" => AGLAIS.as_ref().map(String::as_str).map_err(Clone::clone),
+        "zephyr-z12t4-live" => Ok(ZEPHYR_Z12T4_LIVE),
+        "aglais" => Ok(AGLAIS),
         "smoke" => Ok(SMOKE),
         other => Err(format!(
             "unknown topology preset {other:?}; valid presets: {}",
@@ -73,73 +54,40 @@ mod tests {
             let err = preset_spec(name).expect_err("unknown preset is an error");
             assert!(err.contains(name), "error names the input: {err}");
             assert!(
-                err.contains("advantage2-system1"),
+                err.contains("zephyr-z12t4-live"),
                 "error lists choices: {err}"
             );
             assert!(err.contains("aglais"), "error lists choices: {err}");
         }
     }
 
-    /// Resolving Aglais, which derives from the Advantage2 graph, must leave
-    /// the Advantage2 fixture itself untouched.
+    /// The live preset is solver-core's `zephyr-z12t4-live` graph, in the same
+    /// node and edge order.
     #[test]
-    fn advantage2_preset_matches_the_committed_fixture() {
-        let before = preset_spec("advantage2-system1").expect("Advantage2 preset resolves");
-        let _ = preset_spec("aglais").expect("Aglais preset resolves");
-        let after = preset_spec("advantage2-system1").expect("Advantage2 preset resolves");
-        assert_eq!(before, after);
-        let spec = parse_topology_spec(after).expect("preset parses");
-        assert_eq!(spec.topology.nodes.len(), 4577);
-        assert_eq!(spec.topology.edges.0.len(), 41515);
-        assert_eq!(spec.topology.edge_pairs().len(), 41_515);
-        assert_eq!(spec.allowed_h_milli, vec![-1000, 0, 1000]);
+    fn the_live_preset_is_the_solver_core_live_graph() {
+        let spec = parse_topology_spec(preset_spec("zephyr-z12t4-live").expect("live preset"))
+            .expect("live preset parses");
+        let live = quip_solver_conformance::topology("../topologies/zephyr-z12t4-live.bin.gz")
+            .expect("solver-core live topology");
+        assert_eq!(spec.topology.nodes.len(), 4_575);
+        assert_eq!(spec.topology.edge_pairs().len(), 41_474);
+        assert_eq!(spec.topology.nodes, live.nodes);
+        assert_eq!(spec.topology.edge_pairs(), live.edges);
+        assert_eq!(spec.allowed_h_milli, vec![0]);
         assert_eq!(spec.allowed_j_milli, vec![-1000, 1000]);
+        assert_eq!(spec.allowed_spin_milli, vec![-1000, 1000]);
     }
 
+    /// The Aglais preset keeps the topology hash the spec-119 chain registered.
     #[test]
-    fn aglais_matches_chain_identity_and_preserves_native_order() {
-        let base = parse_topology_spec(
-            preset_spec("advantage2-system1").expect("Advantage2 preset resolves"),
-        )
-        .expect("Advantage2 preset parses");
+    fn aglais_matches_chain_identity() {
         let spec = parse_topology_spec(preset_spec("aglais").expect("Aglais preset resolves"))
             .expect("Aglais preset parses");
-        let removed = (
-            *base.topology.nodes.get(880).expect("position 880 exists"),
-            *base.topology.nodes.get(2695).expect("position 2695 exists"),
-        );
-        assert_eq!(removed, (938, 2812));
         assert_eq!(spec.topology.nodes.len(), 4_577);
-        assert_eq!(spec.topology.nodes, base.topology.nodes);
-        let mut expected_edges = base.topology.edge_pairs();
-        assert_eq!(
-            expected_edges
-                .iter()
-                .filter(|&&edge| edge == removed)
-                .count(),
-            1
-        );
-        expected_edges.retain(|&edge| edge != removed);
         let edges = spec.topology.edge_pairs();
         assert_eq!(edges.len(), 41_514);
-        assert_eq!(edges, expected_edges);
         assert!(!edges.contains(&(938, 2812)));
         assert!(!edges.contains(&(2812, 938)));
-        let positions: std::collections::HashMap<_, _> = spec
-            .topology
-            .nodes
-            .iter()
-            .enumerate()
-            .map(|(position, &node)| (node, position))
-            .collect();
-        for &(u, v) in &edges {
-            let compacted = (
-                *positions.get(&u).expect("edge endpoint exists"),
-                *positions.get(&v).expect("edge endpoint exists"),
-            );
-            assert_ne!(compacted, (880, 2695));
-            assert_ne!(compacted, (2695, 880));
-        }
         assert_eq!(spec.allowed_h_milli, vec![0]);
         assert_eq!(spec.allowed_j_milli, vec![-1000, 1000]);
         assert_eq!(spec.allowed_spin_milli, vec![-1000, 1000]);
@@ -147,9 +95,6 @@ mod tests {
             crate::chain::extrinsic::hex_encode(&spec.topology.hash),
             "0xcbec1eb4e9dcc7ae343b386902d4dbba19b694a66cebf95bc06bd9260c3270e7"
         );
-        assert_eq!(spec.min_solutions, base.min_solutions);
-        assert_eq!(spec.max_energy_milli, base.max_energy_milli);
-        assert_eq!(spec.min_diversity_milli, base.min_diversity_milli);
     }
 
     #[test]
