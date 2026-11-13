@@ -34,8 +34,8 @@
 # both a linux-arm64 and a darwin-arm64 build.
 #
 # The cpu miner's production binaries (sa, gibbs, sb) are required; its
-# experimental kernels are fetched too but tolerate absence — see
-# CPU_EXPERIMENTAL below.
+# experimental kernels and family generators are fetched too but tolerate
+# absence — see CPU_EXPERIMENTAL and CPU_FAMILY below.
 #
 # NOTE: every run resolves tags from the GitLab API, DRY_RUN included, because
 # the asset URL it prints contains the tag.
@@ -178,6 +178,14 @@ CPU_EXPERIMENTAL=(
   quip-cpu-mps quip-cpu-mfa quip-cpu-flatiron
 )
 
+# CPU miners that link a canonical family generator. The production kernels
+# declare only the generic tier, so the router refuses them every family lease
+# with GeneratorUnsupported. quip-cpu-otsuka and quip-cpu-dimer generate
+# quip/twisted-ice-dimer revision 1. Optional for the same reason as above.
+CPU_FAMILY=(
+  quip-cpu-otsuka quip-cpu-dimer
+)
+
 # Decide which backends this run wants.
 want_cpu=false
 want_cuda=false
@@ -223,6 +231,7 @@ if [ "$want_cpu" = true ]; then
   fetch required "$CPU_TAG" "quip.network%2Fquip-solver-cpu" \
     "quip-cpu-sa" "quip-cpu-gibbs" "quip-cpu-sb"
   fetch optional "$CPU_TAG" "quip.network%2Fquip-solver-cpu" "${CPU_EXPERIMENTAL[@]}"
+  fetch optional "$CPU_TAG" "quip.network%2Fquip-solver-cpu" "${CPU_FAMILY[@]}"
 fi
 if [ "$want_cuda" = true ]; then
   if [ "$arch" != amd64 ]; then
