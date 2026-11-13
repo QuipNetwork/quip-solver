@@ -595,13 +595,13 @@ has no legacy fallback.
 
 On runtime API version 3 a registered topology has an optional family
 descriptor: one family revision with its parameter bytes. The descriptor is
-part of the topology hash. The
-coordinator mines a family topology only when all three checks pass:
+part of the topology hash. The chain chooses the topology for each round, so
+the coordinator needs no setting for a family topology. It works on one only
+when both checks pass:
 
-1. `[miner] family_mining = true`. The key defaults to `false`.
-2. `ChallengeFamily::admit` accepts the descriptor on the registered node and
+1. `ChallengeFamily::admit` accepts the descriptor on the registered node and
    edge order.
-3. The family topology hash rebuilt from the descriptor equals the hash the
+2. The family topology hash rebuilt from the descriptor equals the hash the
    chain names. The rebuild follows `hash_family_topology` in the pallet:
    `blake2_256` over `quip-family-topology-v1`, the legacy topology hash, the
    descriptor digest, and the topology order digest.
@@ -637,9 +637,7 @@ sampler, and the router applies the sampler's encoding, local-field, and
 exact-resolution limits. A rejection applies to one family, revision, and
 parameter set.
 
-`[miner].family_mining` turns on mining for a chain topology that carries a
-family descriptor. `[miner].solver_pin` limits family work to one miner id or
-`solver_id`. The pin
+`[miner].solver_pin` limits family work to one miner id or `solver_id`. The pin
 does not affect legacy work and does not admit an incompatible miner.
 
 The coordinator regenerates each family `Result` from the descriptor of the

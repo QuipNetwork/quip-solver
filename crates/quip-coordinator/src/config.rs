@@ -141,9 +141,6 @@ pub struct CoordinatorConfig {
     /// Limits family work to this miner id or `solver_id`. `None` keeps every
     /// compatible miner.
     pub solver_pin: Option<String>,
-    /// Whether a chain topology bound to a problem family is mined. Defaults
-    /// to `false`, so a family activation needs an operator decision.
-    pub family_mining: bool,
 }
 
 /// `[dashboard]` config: where to serve the attempt logs and where they live.
@@ -610,10 +607,6 @@ pub fn parse_config(toml_text: &str) -> Result<CoordinatorConfig, ConfigError> {
     }
 
     let identity = parse_miner_identity(miner)?;
-    let family_mining = miner
-        .get("family_mining")
-        .and_then(toml::Value::as_bool)
-        .unwrap_or(false);
     let solver_pin = optional_str(miner, "solver_pin");
     if let Some(pin) = &solver_pin {
         let names_miner = launch.iter().any(|entry| entry.miner_id == *pin);
@@ -641,7 +634,6 @@ pub fn parse_config(toml_text: &str) -> Result<CoordinatorConfig, ConfigError> {
         auto_mine: identity.auto_mine,
         node_log_level: identity.node_log_level,
         solver_pin,
-        family_mining,
     })
 }
 
@@ -1192,13 +1184,6 @@ idle_after_s = 600
             vec![MinerKind::Cpu, MinerKind::Metal]
         );
         assert_eq!(participate_kind(&c.launch), MinerKind::Metal);
-    }
-
-    #[test]
-    fn family_mining_is_off_unless_set() {
-        assert!(!parse_config(&cpu_config(IDENTITY)).unwrap().family_mining);
-        let on = parse_config(&cpu_config(&format!("{IDENTITY}family_mining = true\n"))).unwrap();
-        assert!(on.family_mining);
     }
 
     #[test]

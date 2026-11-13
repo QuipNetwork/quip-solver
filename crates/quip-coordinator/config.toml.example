@@ -21,9 +21,6 @@ public_port = 20050
 # Limit problem-family work to one miner id or solver_id. A pin narrows the
 # candidates and never admits a miner that cannot take the job.
 # solver_pin = "cpu-0"
-# Mine a chain topology that is bound to a problem family. Off by default:
-# with it off, the coordinator does not mine a family topology and logs why.
-# family_mining = false
 
 # Consecutive failed submissions of one proof, inside one quantum block, before
 # the coordinator stops retrying it and reports loudly. Submit outcome comes

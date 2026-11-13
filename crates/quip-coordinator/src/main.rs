@@ -359,14 +359,11 @@ fn run_config_path(config: Option<PathBuf>, log_level: LogLevel) -> StdExitCode 
         }
     };
 
-    let chain = Arc::new(
-        RealChainClient::new(
-            cfg.validators.clone(),
-            cfg.signer_key.clone(),
-            quip_coordinator::config::participate_kind(&cfg.launch),
-        )
-        .with_family_mining(cfg.family_mining),
-    );
+    let chain = Arc::new(RealChainClient::new(
+        cfg.validators.clone(),
+        cfg.signer_key.clone(),
+        quip_coordinator::config::participate_kind(&cfg.launch),
+    ));
 
     if let Some(code) = run_preflight_gate(&rt, chain.as_ref()) {
         return code;
