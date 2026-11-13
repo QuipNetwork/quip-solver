@@ -20,22 +20,19 @@ how they fit together. For build and run commands, see `AGENTS.md`.
 - `quip-coordinator drive …` — generates or replays work for one miner.
   It can read a chain topology once, then drives the miner without submissions.
   Use this mode for benchmarking and comparisons under matched conditions.
-- `quip-coordinator seed-chain …` — registers a default topology and sets its
-  difficulty on a fresh chain. You can seed a chain only once. Wipe the chain
-  data and restart the validator if `DefaultTopology` is already set. On
-  runtime 119 and earlier, the two calls go through `Sudo`. Runtime 120 has no
-  `Sudo` pallet. There, `seed-chain` sends one Foundation motion with
-  threshold 1:
+- `quip-coordinator seed-chain …` — makes a fresh runtime-120 chain mineable.
+  It registers the dimer1200 family topology (`quip/twisted-ice-dimer`
+  revision 1, solver-core's live recipe `x-w62-p1200`) on the
+  `zephyr-z12t4-live` preset, sets its difficulty and energy band, adds it to
+  the mineable whitelist, and makes it the default. Runtime 120 has no `Sudo`
+  pallet, so the five calls go in one Foundation motion with threshold 1:
   `Foundation.propose(ValidatorAdmission.dispatch_as_root(Utility.batch_all(...)))`.
-  A threshold of 1 executes at once only when the signer is the sole
-  Foundation member, as `//Alice` is on the `dev` preset. A larger Foundation
-  needs a vote. With `--family-id`, `--family-revision`,
-  `--family-params-hex`, `--band-hard-milli`, and `--band-easy-milli`, the
-  batch registers a family topology. It then sets the difficulty and the
-  energy band, adds the topology to the mineable whitelist, and makes it the
-  default. Family topologies need runtime 120. The command reads
-  `DefaultTopology` back and fails unless it equals the locally computed hash,
-  because the outer extrinsic succeeds even when the batch inside it fails.
+  Threshold 1 executes at once only when the signer is the sole Foundation
+  member, as `//Alice` is on the `dev` preset. A larger Foundation needs a
+  vote. The command refuses runtimes before 120 and a chain that already has
+  a default topology. It reads `DefaultTopology` back and fails unless it
+  equals the locally computed family hash, because the outer extrinsic
+  succeeds even when the batch inside it fails.
 
 ## Logging
 
@@ -812,7 +809,7 @@ sampling settings through `SetTarget`.
 
 Choose one topology selector: `--topology <spec.json>`,
 `--topology-preset <name>`, or `--topology-from-chain <url>`.
-Without a selector, random and lease use `advantage2-system1`.
+Without a selector, random and lease use `zephyr-z12t4-live`.
 List replay has no default topology. Nonce entries need one.
 
 The chain selector reads `QuantumPow.DefaultTopology` and calls
@@ -862,11 +859,11 @@ reported winning salts for these lease summaries.
 Negative energy arguments accept a separate value, such as
 `--target-energy -10000`. The drive target uses energy units and becomes
 `-10_000_000` milli in `SetTarget`. The seed-chain option
-`--max-energy-milli -2500000` already uses milli units.
+`--max-energy-milli -4850000` already uses milli units.
 
-The `advantage2-system1` and `smoke` preset JSON files stay under
+The `zephyr-z12t4-live`, `aglais`, and `smoke` preset JSON files stay under
 `crates/quip-coordinator/fixtures/drive/`. The binary embeds those files.
-The `aglais` preset derives from Advantage2 in memory once. It removes
-native edge `(938, 2812)`, which is `(880, 2695)` in compacted positions,
-and sets `allowed_h_milli` to `[0]`. The nodes and all other edges keep their
-order. Its 41,514 edges and hash prefix `cbec1eb4` match the Aglais topology.
+`zephyr-z12t4-live` is byte-identical to the 2026-09-21 hardware snapshot that
+solver-core pins by sha256. The `aglais` file is the older Advantage2
+snapshot without native edge `(938, 2812)`, with `allowed_h_milli` set to
+`[0]`. Its 41,514 edges and hash prefix `cbec1eb4` match the Aglais topology.

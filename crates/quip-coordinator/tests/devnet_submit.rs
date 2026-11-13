@@ -465,21 +465,21 @@ async fn devnet_submit_proof_end_to_end() {
         snap.min_diversity_milli,
         hex_encode(&snap.last_proof_block_hash),
     );
-    // The devnet is seeded from the `advantage2-system1` preset, so the
+    // The devnet is seeded from the `zephyr-z12t4-live` preset, so the
     // snapshot must report that graph exactly. Deriving the counts from the
     // preset rather than hard-coding them keeps this assertion correct if the
     // fixture ever changes, and catches a devnet seeded with the wrong graph.
-    let seeded = parse_topology_spec(preset_spec("advantage2-system1").expect("preset resolves"))
+    let seeded = parse_topology_spec(preset_spec("zephyr-z12t4-live").expect("preset resolves"))
         .expect("preset parses");
     assert_eq!(
         snap.nodes.len(),
         seeded.topology.nodes.len(),
-        "node count must match the advantage2-system1 preset"
+        "node count must match the zephyr-z12t4-live preset"
     );
     assert_eq!(
         snap.edges.len(),
         seeded.topology.edges.0.len(),
-        "edge count must match the advantage2-system1 preset"
+        "edge count must match the zephyr-z12t4-live preset"
     );
     // Difficulty parameters are chain-state-dependent (they ratchet/decay and are
     // reconfigured), so assert decode sanity rather than pinning volatile values.

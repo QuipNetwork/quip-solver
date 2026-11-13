@@ -62,7 +62,7 @@ quip-coordinator --config ./docker/config.toml
 # Drive: spawn one miner and feed it synthetic problems without submissions.
 # Use a preset, a JSON file, or a read-only chain topology lookup.
 quip-coordinator drive --miner ./miners/quip-cpu-sa --source random \
-  --topology-preset advantage2-system1 --count 100 \
+  --topology-preset zephyr-z12t4-live --count 100 \
   --target-energy -10000 --report drive.jsonl
 
 # Draw the Aglais graph with fields fixed at zero.
@@ -77,7 +77,7 @@ quip-coordinator drive --miner ./miners/quip-cpu-sa --source random \
 quip-coordinator drive --miner ./miners/quip-cpu-sa --source lease \
   --topology-preset smoke --count 200 --lease-size 32 --seed 7
 
-# Seed a fresh chain: register the default topology and set its difficulty.
+# Seed a fresh runtime-120 chain with the dimer1200 family topology.
 # Give exactly one of --sudo-key or --mnemonic-file.
 quip-coordinator seed-chain --sudo-key //Alice
 ```
@@ -86,7 +86,7 @@ Drive accepts one of `--topology <spec.json>`, `--topology-preset <name>`,
 or `--topology-from-chain <url>`. The chain option reads `DefaultTopology`
 and its metadata once at the same best-block hash. It requires no signer.
 An unset default, invalid metadata, or failed RPC stops the run before
-the miner starts. Random and lease sources default to `advantage2-system1`
+the miner starts. Random and lease sources default to `zephyr-z12t4-live`
 when you supply no selector. List replay needs a topology for nonce entries.
 
 The chain option reads graph and coefficient sets, without difficulty gates.
@@ -96,33 +96,40 @@ to set benchmark gates. Work remains synthetic, and drive submits no proofs.
 Use `--topology-preset aglais` for the fixed Aglais topology without an RPC.
 
 `seed-chain` defaults to `--validator ws://quip-validator:9944` and
-`--topology-preset advantage2-system1`. Difficulty defaults are
-`--min-solutions 5`, `--max-energy-milli -2500000`, and
-`--min-diversity-milli 200`. `--sudo-key` accepts a `//DevUri`, a BIP39
+`--topology-preset zephyr-z12t4-live`. It always registers the dimer1200
+family on that graph: `quip/twisted-ice-dimer` revision 1 with solver-core's
+live recipe `x-w62-p1200`. Difficulty defaults are `--min-solutions 1`,
+`--max-energy-milli -4850000`, and `--min-diversity-milli 0`. Band defaults
+are `--band-hard-milli -5100000` and `--band-easy-milli -4800000`.
+`--sudo-key` names a Foundation member and accepts a `//DevUri`, a BIP39
 mnemonic, a 32-byte hex master seed, or a keystore path. `--mnemonic-file`
 reads a BIP39 phrase from a file. Pass `--topology` to use a specification JSON
 file instead of a preset.
 
 Negative energy arguments accept a separate value. The drive option
 `--target-energy -10000` uses energy units. The seed-chain option
-`--max-energy-milli -2500000` uses milli units. Both options also accept the
+`--max-energy-milli -4850000` uses milli units. Both options also accept the
 equals form.
 
-You can seed a chain only once. `register_topology` writes `DefaultTopology`
-only when that value is unset. `seed-chain` refuses to run when a chain already
-has a default topology. Wipe the chain data and restart the validator instead.
+You can seed a chain only once. `seed-chain` refuses to run when a chain
+already has a default topology. Wipe the chain data and restart the validator
+instead.
 
-`seed-chain` signs `Sudo` calls, so it seeds runtime 119 and earlier only.
-Runtime 120 (quip-validator 0.5.0) removed `pallet-sudo`. On 120 and later
-`seed-chain` stops before it signs anything. Seed such a chain through a
-council motion that calls `ValidatorAdmission::dispatch_as_root`.
+`seed-chain` needs runtime 120 or later, which has family topologies and no
+`Sudo` pallet. It sends one Foundation motion with threshold 1 that runs
+register, difficulty, band, whitelist, and default through
+`ValidatorAdmission::dispatch_as_root(Utility::batch_all(...))`. Threshold 1
+executes at once only when the signer is the sole Foundation member, as
+`//Alice` is on the `dev` preset. It refuses older runtimes.
 
-The coordinator binary provides `advantage2-system1`, `aglais`, and `smoke`
+The coordinator binary provides `zephyr-z12t4-live`, `aglais`, and `smoke`
 topology presets. `drive --topology-preset` and `seed-chain` read them from
-the binary. Aglais derives from the embedded Advantage2 graph. It keeps
-4,577 native node IDs, removes native edge `(938, 2812)`, and fixes h at zero.
-The removed edge is `(880, 2695)` in compacted positions. Aglais has 41,514
-edges and topology hash prefix `cbec1eb4`.
+the binary. `zephyr-z12t4-live` is the live Advantage2 graph of the
+2026-09-21 hardware snapshot, 4,575 nodes and 41,474 edges, byte-identical to
+solver-core's `zephyr-z12t4-live` topology. Aglais is the graph the spec-119
+chain registered: an older snapshot with 4,577 native node IDs, without native
+edge `(938, 2812)`, and h fixed at zero. Aglais has 41,514 edges and topology
+hash prefix `cbec1eb4`.
 
 For ordinary drive results, compare miner energies with `raw_best_energy_milli`
 in the `--report` JSONL file. The `best_energy_milli` field describes the diversity

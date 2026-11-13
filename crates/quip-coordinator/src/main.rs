@@ -2,14 +2,12 @@
 
 use clap::{Parser, Subcommand, ValueEnum};
 use quip_coordinator::chain::extrinsic::{
-    hex_decode, hex_encode, load_hybrid_pair, miner_identity_bytes, signer_account_bytes,
+    hex_encode, load_hybrid_pair, miner_identity_bytes, signer_account_bytes,
 };
-use quip_coordinator::chain::scale_types::{
-    DifficultyConfig, EnergyBandScale, FamilyDescriptorScale,
-};
+use quip_coordinator::chain::scale_types::{DifficultyConfig, EnergyBandScale};
 use quip_coordinator::chain::{
-    seed_chain, MinerKind, RealChainClient, SeedFamily, SeedParams, SeedReport, SeedTopology,
-    DEFAULT_SEED_DIFFICULTY,
+    dimer_1200, seed_chain, MinerKind, RealChainClient, SeedParams, SeedReport, SeedTopology,
+    DEFAULT_ENERGY_BAND, DEFAULT_SEED_DIFFICULTY,
 };
 use quip_coordinator::config::{parse_config, CoordinatorConfig, LaunchEntry};
 use quip_coordinator::drive::{
@@ -73,19 +71,17 @@ struct SeedChainArgs {
     /// Validator RPC endpoint.
     #[arg(long, default_value = "ws://quip-validator:9944")]
     validator: String,
-    /// Sudo signer: a dev URI (//Alice), a BIP39 mnemonic, a 32-byte hex master
-    /// seed, or a keystore path. Mutually exclusive with --mnemonic-file.
+    /// Foundation member signer: a dev URI (//Alice), a BIP39 mnemonic, a
+    /// 32-byte hex master seed, or a keystore path. Mutually exclusive with
+    /// --mnemonic-file.
     #[arg(long, conflicts_with = "mnemonic_file")]
     sudo_key: Option<String>,
     /// Path to a file holding a BIP39 mnemonic phrase. Mount it read-only.
     #[arg(long)]
     mnemonic_file: Option<PathBuf>,
-    /// Built-in topology by name. Mutually exclusive with --topology.
-    #[arg(
-        long,
-        default_value = "advantage2-system1",
-        conflicts_with = "topology"
-    )]
+    /// Built-in topology by name. Mutually exclusive with --topology. The
+    /// dimer1200 family is registered on it.
+    #[arg(long, default_value = "zephyr-z12t4-live", conflicts_with = "topology")]
     topology_preset: String,
     /// Topology spec JSON path.
     #[arg(long)]
@@ -103,25 +99,20 @@ struct SeedChainArgs {
     /// Minimum solution-set diversity in milli units.
     #[arg(long, default_value_t = DEFAULT_SEED_DIFFICULTY.min_diversity_milli)]
     min_diversity_milli: u32,
-    /// Register the topology under this family id, for example
-    /// `quip/twisted-ice-dimer`. Runtime 120 and later only.
+    /// Hardest (most negative) end of the energy band, in milli.
     #[arg(
         long,
-        requires_all = ["family_revision", "family_params_hex", "band_hard_milli", "band_easy_milli"]
+        default_value_t = DEFAULT_ENERGY_BAND.hard_milli,
+        allow_negative_numbers = true
     )]
-    family_id: Option<String>,
-    /// Family revision.
-    #[arg(long, requires = "family_id")]
-    family_revision: Option<u32>,
-    /// Canonical family parameter bytes as hex, with or without `0x`.
-    #[arg(long, requires = "family_id")]
-    family_params_hex: Option<String>,
-    /// Hardest (most negative) end of the family energy band, in milli.
-    #[arg(long, requires = "family_id", allow_negative_numbers = true)]
-    band_hard_milli: Option<i64>,
-    /// Easiest (least negative) end of the family energy band, in milli.
-    #[arg(long, requires = "family_id", allow_negative_numbers = true)]
-    band_easy_milli: Option<i64>,
+    band_hard_milli: i64,
+    /// Easiest (least negative) end of the energy band, in milli.
+    #[arg(
+        long,
+        default_value_t = DEFAULT_ENERGY_BAND.easy_milli,
+        allow_negative_numbers = true
+    )]
+    band_easy_milli: i64,
 }
 
 #[derive(ValueEnum, Clone, Debug)]
@@ -148,7 +139,7 @@ struct DriveArgs {
     /// topology selector is given. Nonce-ref list entries need a topology.
     #[arg(long)]
     topology: Option<PathBuf>,
-    /// Built-in topology: `advantage2-system1`, `aglais`, or `smoke`.
+    /// Built-in topology: `zephyr-z12t4-live`, `aglais`, or `smoke`.
     #[arg(long)]
     topology_preset: Option<String>,
     /// Read the validator's default topology once from this RPC URL.
@@ -275,12 +266,8 @@ fn run_seed_chain_cli(args: SeedChainArgs) -> StdExitCode {
                 report.nodes,
                 report.edges
             );
-            if report.family {
-                println!("  registered as a family topology and made the default");
-            }
-            for (what, block) in &report.included {
-                println!("  {what} included in {block}");
-            }
+            println!("  registered as the dimer1200 family topology and made the default");
+            println!("  Foundation root motion included in {}", report.block);
             StdExitCode::SUCCESS
         }
         Err(e) => {
@@ -312,7 +299,12 @@ async fn seed_chain_inner(args: SeedChainArgs) -> Result<SeedReport, String> {
         None => preset_spec(&args.topology_preset)?.to_string(),
     };
     let spec = parse_topology_spec(&text).map_err(|e| format!("{e:?}"))?;
-    let family = seed_family(&args)?;
+    if args.band_hard_milli >= args.band_easy_milli {
+        return Err(format!(
+            "--band-hard-milli {} must be below --band-easy-milli {}",
+            args.band_hard_milli, args.band_easy_milli
+        ));
+    }
 
     seed_chain(SeedParams {
         validator: args.validator,
@@ -323,41 +315,14 @@ async fn seed_chain_inner(args: SeedChainArgs) -> Result<SeedReport, String> {
             max_energy_milli: args.max_energy_milli,
             min_diversity_milli: args.min_diversity_milli,
         },
-        family,
+        descriptor: dimer_1200(),
+        band: EnergyBandScale {
+            hard_milli: args.band_hard_milli,
+            easy_milli: args.band_easy_milli,
+        },
     })
     .await
     .map_err(|e| e.to_string())
-}
-
-/// The family descriptor and band from the seed-chain flags, if any. Clap
-/// already requires every family flag once `--family-id` is given.
-fn seed_family(args: &SeedChainArgs) -> Result<Option<SeedFamily>, String> {
-    let (Some(id), Some(revision), Some(params), Some(hard_milli), Some(easy_milli)) = (
-        &args.family_id,
-        args.family_revision,
-        &args.family_params_hex,
-        args.band_hard_milli,
-        args.band_easy_milli,
-    ) else {
-        return Ok(None);
-    };
-    if hard_milli >= easy_milli {
-        return Err(format!(
-            "--band-hard-milli {hard_milli} must be below --band-easy-milli {easy_milli}"
-        ));
-    }
-    let params = hex_decode(params).map_err(|e| format!("--family-params-hex: {e}"))?;
-    Ok(Some(SeedFamily {
-        descriptor: FamilyDescriptorScale {
-            family_id: id.as_bytes().to_vec(),
-            revision,
-            params,
-        },
-        band: EnergyBandScale {
-            hard_milli,
-            easy_milli,
-        },
-    }))
 }
 
 fn load_coordinator_config(
@@ -778,7 +743,7 @@ fn build_jobs(
 }
 
 /// Default for generated work when no topology selector is supplied.
-const DEFAULT_PRESET: &str = "advantage2-system1";
+const DEFAULT_PRESET: &str = "zephyr-z12t4-live";
 
 /// Resolve a file, preset, or one read-only chain lookup before job creation.
 async fn resolve_topology(args: &DriveArgs) -> Result<Option<TopologySpec>, String> {
@@ -1025,9 +990,9 @@ mod tests {
                 .await
                 .expect("resolve default topology")
                 .expect("missing default preset");
-            assert_eq!(spec.topology.nodes.len(), 4_577);
-            assert_eq!(spec.topology.edge_pairs().len(), 41_515);
-            assert_eq!(spec.allowed_h_milli, vec![-1000, 0, 1000]);
+            assert_eq!(spec.topology.nodes.len(), 4_575);
+            assert_eq!(spec.topology.edge_pairs().len(), 41_474);
+            assert_eq!(spec.allowed_h_milli, vec![0]);
         }
 
         let args = drive_args(DriveSourceKind::List);
