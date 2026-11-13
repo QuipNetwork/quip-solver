@@ -332,6 +332,27 @@ pub const REGISTER_MINER_CALL_INDEX: u8 = 0;
 pub const REGISTER_TOPOLOGY_CALL_INDEX: u8 = 2;
 /// `QuantumPow::set_difficulty` call index.
 pub const SET_DIFFICULTY_CALL_INDEX: u8 = 3;
+/// `QuantumPow::set_default_topology` call index.
+pub const SET_DEFAULT_TOPOLOGY_CALL_INDEX: u8 = 5;
+/// `QuantumPow::add_mineable_topology` call index.
+pub const ADD_MINEABLE_TOPOLOGY_CALL_INDEX: u8 = 6;
+/// `QuantumPow::set_topology_energy_band` call index.
+pub const SET_TOPOLOGY_ENERGY_BAND_CALL_INDEX: u8 = 11;
+
+/// `Utility` pallet index in the runtime.
+pub const UTILITY_PALLET_INDEX: u8 = 17;
+/// `pallet_utility::Call::batch_all` call index. All calls or none.
+pub const BATCH_ALL_CALL_INDEX: u8 = 2;
+/// `Foundation` (`pallet_collective` instance 1) pallet index on runtime 120.
+pub const FOUNDATION_PALLET_INDEX: u8 = 20;
+/// `pallet_collective::Call::propose` call index. A threshold below 2
+/// executes the proposal at once with the proposer's member origin.
+pub const PROPOSE_CALL_INDEX: u8 = 2;
+/// `ValidatorAdmission` pallet index on runtime 120.
+pub const VALIDATOR_ADMISSION_PALLET_INDEX: u8 = 22;
+/// `ValidatorAdmission::dispatch_as_root` call index. Needs 2/3 of the
+/// Foundation and dispatches its call with the Root origin.
+pub const DISPATCH_AS_ROOT_CALL_INDEX: u8 = 3;
 
 /// Pallet index of `MinerRegistry` in the runtime construct.
 pub const MINER_REGISTRY_PALLET_INDEX: u8 = 13;

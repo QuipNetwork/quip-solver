@@ -2,11 +2,13 @@
 
 use clap::{Parser, Subcommand, ValueEnum};
 use quip_coordinator::chain::extrinsic::{
-    hex_encode, load_hybrid_pair, miner_identity_bytes, signer_account_bytes,
+    hex_decode, hex_encode, load_hybrid_pair, miner_identity_bytes, signer_account_bytes,
 };
-use quip_coordinator::chain::scale_types::DifficultyConfig;
+use quip_coordinator::chain::scale_types::{
+    DifficultyConfig, EnergyBandScale, FamilyDescriptorScale,
+};
 use quip_coordinator::chain::{
-    seed_chain, MinerKind, RealChainClient, SeedParams, SeedReport, SeedTopology,
+    seed_chain, MinerKind, RealChainClient, SeedFamily, SeedParams, SeedReport, SeedTopology,
     DEFAULT_SEED_DIFFICULTY,
 };
 use quip_coordinator::config::{parse_config, CoordinatorConfig, LaunchEntry};
@@ -101,6 +103,25 @@ struct SeedChainArgs {
     /// Minimum solution-set diversity in milli units.
     #[arg(long, default_value_t = DEFAULT_SEED_DIFFICULTY.min_diversity_milli)]
     min_diversity_milli: u32,
+    /// Register the topology under this family id, for example
+    /// `quip/twisted-ice-dimer`. Runtime 120 and later only.
+    #[arg(
+        long,
+        requires_all = ["family_revision", "family_params_hex", "band_hard_milli", "band_easy_milli"]
+    )]
+    family_id: Option<String>,
+    /// Family revision.
+    #[arg(long, requires = "family_id")]
+    family_revision: Option<u32>,
+    /// Canonical family parameter bytes as hex, with or without `0x`.
+    #[arg(long, requires = "family_id")]
+    family_params_hex: Option<String>,
+    /// Hardest (most negative) end of the family energy band, in milli.
+    #[arg(long, requires = "family_id", allow_negative_numbers = true)]
+    band_hard_milli: Option<i64>,
+    /// Easiest (least negative) end of the family energy band, in milli.
+    #[arg(long, requires = "family_id", allow_negative_numbers = true)]
+    band_easy_milli: Option<i64>,
 }
 
 #[derive(ValueEnum, Clone, Debug)]
@@ -254,11 +275,12 @@ fn run_seed_chain_cli(args: SeedChainArgs) -> StdExitCode {
                 report.nodes,
                 report.edges
             );
-            println!("  register_topology included in {}", report.register_block);
-            println!(
-                "  set_difficulty    included in {}",
-                report.difficulty_block
-            );
+            if report.family {
+                println!("  registered as a family topology and made the default");
+            }
+            for (what, block) in &report.included {
+                println!("  {what} included in {block}");
+            }
             StdExitCode::SUCCESS
         }
         Err(e) => {
@@ -290,6 +312,7 @@ async fn seed_chain_inner(args: SeedChainArgs) -> Result<SeedReport, String> {
         None => preset_spec(&args.topology_preset)?.to_string(),
     };
     let spec = parse_topology_spec(&text).map_err(|e| format!("{e:?}"))?;
+    let family = seed_family(&args)?;
 
     seed_chain(SeedParams {
         validator: args.validator,
@@ -300,9 +323,41 @@ async fn seed_chain_inner(args: SeedChainArgs) -> Result<SeedReport, String> {
             max_energy_milli: args.max_energy_milli,
             min_diversity_milli: args.min_diversity_milli,
         },
+        family,
     })
     .await
     .map_err(|e| e.to_string())
+}
+
+/// The family descriptor and band from the seed-chain flags, if any. Clap
+/// already requires every family flag once `--family-id` is given.
+fn seed_family(args: &SeedChainArgs) -> Result<Option<SeedFamily>, String> {
+    let (Some(id), Some(revision), Some(params), Some(hard_milli), Some(easy_milli)) = (
+        &args.family_id,
+        args.family_revision,
+        &args.family_params_hex,
+        args.band_hard_milli,
+        args.band_easy_milli,
+    ) else {
+        return Ok(None);
+    };
+    if hard_milli >= easy_milli {
+        return Err(format!(
+            "--band-hard-milli {hard_milli} must be below --band-easy-milli {easy_milli}"
+        ));
+    }
+    let params = hex_decode(params).map_err(|e| format!("--family-params-hex: {e}"))?;
+    Ok(Some(SeedFamily {
+        descriptor: FamilyDescriptorScale {
+            family_id: id.as_bytes().to_vec(),
+            revision,
+            params,
+        },
+        band: EnergyBandScale {
+            hard_milli,
+            easy_milli,
+        },
+    }))
 }
 
 fn load_coordinator_config(
