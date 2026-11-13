@@ -21,6 +21,25 @@ fn help_exits_zero() {
     );
 }
 
+/// `--version` names the package version, then the miner wire protocol the
+/// session handshake requires. CI reads the second field as the release
+/// version, so the order is fixed.
+#[test]
+fn version_reports_the_handshake_protocol() {
+    let out = Command::new(bin())
+        .arg("--version")
+        .output()
+        .expect("run --version");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let expected = format!(
+        "quip-coordinator {} protocol {}",
+        env!("CARGO_PKG_VERSION"),
+        quip_protocol::session::PROTOCOL_VERSION
+    );
+    assert_eq!(stdout.trim(), expected);
+}
+
 /// A missing config is `ConfigInvalid` (64), and the error reaches stderr
 /// through the installed `tracing` subscriber as structured plain text.
 /// Before the subscriber was installed every `tracing` call in the binary was

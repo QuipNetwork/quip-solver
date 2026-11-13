@@ -21,18 +21,23 @@ use quip_coordinator::session::{gen_session_token, CoordinatorState};
 use quip_coordinator::supervisor::BackoffPolicy;
 use quip_coordinator::topology::Topology;
 use quip_proto::v1::{Configure, Job};
-use quip_protocol::session::ExitCode;
+use quip_protocol::session::{ExitCode, PROTOCOL_VERSION};
 use sp_core::crypto::Ss58Codec;
 use std::path::PathBuf;
 use std::process::ExitCode as StdExitCode;
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use tokio::sync::Mutex;
+
+/// `--version` text: the package version, then the miner wire protocol the
+/// session handshake requires. CI reads the second field as the release version.
+static VERSION: LazyLock<String> =
+    LazyLock::new(|| format!("{} protocol {PROTOCOL_VERSION}", env!("CARGO_PKG_VERSION")));
 
 #[derive(Parser, Debug)]
 #[command(
     name = "quip-coordinator",
-    version = concat!(env!("CARGO_PKG_VERSION"), " protocol 1"),
+    version = VERSION.as_str(),
     about = "QuIP v0.3 coordinator: chain access, routing, miner supervision"
 )]
 struct Cli {
@@ -365,7 +370,7 @@ fn run_config_path(config: Option<PathBuf>, log_level: LogLevel) -> StdExitCode 
     // first line of any captured log says what this is and what it is talking to.
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
-        protocol = 1,
+        protocol = PROTOCOL_VERSION,
         config = %config_path.display(),
         "quip-coordinator starting"
     );

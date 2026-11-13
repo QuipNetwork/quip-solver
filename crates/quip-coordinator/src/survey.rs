@@ -45,11 +45,6 @@ const REDACTED: &str = "redacted";
 /// parseable by anything that reads it as a version.
 const PYTHON_UNKNOWN: &str = "v0.0.0";
 
-/// Protocol version this coordinator speaks.
-///
-/// Mirrors the `protocol 1` the binary reports in `--version` (`main.rs`).
-const PROTOCOL_VERSION: u32 = 1;
-
 /// Wall-clock budget for the whole survey.
 ///
 /// A healthy Linux host finishes in about 46 ms: file reads plus one
@@ -156,7 +151,7 @@ pub fn sanitize(raw: RawSurvey) -> HostSurvey {
             MAX_RUNTIME_VERSION_BYTES,
             "runtime.quip_version",
         ),
-        protocol_version: PROTOCOL_VERSION,
+        protocol_version: quip_protocol::session::PROTOCOL_VERSION,
         in_docker: raw.in_docker,
         // Dropping an empty value is load-bearing, not tidiness: both shipped
         // images declare `ARG QUIP_DOCKER_IMAGE=""`, so an image built without
@@ -980,7 +975,10 @@ mod tests {
         let bare = sanitize(RawSurvey::default()).runtime;
         assert_eq!(bare.python, b"unknown");
         assert!(!bare.quip_version.is_empty());
-        assert_eq!(bare.protocol_version, 1);
+        assert_eq!(
+            bare.protocol_version,
+            quip_protocol::session::PROTOCOL_VERSION
+        );
         assert!(bare.docker_image.is_none());
         assert!(super::runtime_fits_pallet_bounds(&bare));
 
