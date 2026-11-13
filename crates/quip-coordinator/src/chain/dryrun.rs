@@ -12,19 +12,7 @@
 //! Nothing in this module may influence a `SubmitAction` or any other
 //! control-flow decision. It produces log text only.
 
-use super::scale_types::{MINER_REGISTRY_PALLET_INDEX, QUANTUM_POW_PALLET_INDEX};
-
-/// A dispatch error localised to one pallet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ModuleError {
-    /// Runtime index of the pallet that raised the error.
-    pub pallet: u8,
-    /// Pallet-local error index, little-endian in a four-byte field.
-    pub error: [u8; 4],
-}
-
-/// SCALE variant index of `DispatchError::Module`.
-const DISPATCH_ERROR_MODULE: u8 = 3;
+use super::events::{decode_dispatch_error as decode_inner, DispatchError, ModuleError};
 
 /// Decode a `system_dryRun` result into a module error, when it is one.
 ///
@@ -42,88 +30,9 @@ pub fn decode_dispatch_error(bytes: &[u8]) -> Option<ModuleError> {
     if bytes.get(1).copied()? != 0x01 {
         return None;
     }
-    if bytes.get(2).copied()? != DISPATCH_ERROR_MODULE {
-        return None;
-    }
-    let pallet = bytes.get(3).copied()?;
-    let error = bytes.get(4..8)?;
-    let mut buf = [0u8; 4];
-    buf.copy_from_slice(error);
-    Some(ModuleError { pallet, error: buf })
-}
-
-/// Error names for the pallets this coordinator calls.
-///
-/// These tables are diagnostics only. The runtime is the authority, and a stale
-/// table degrades a log line rather than a decision. The order below is the
-/// declaration order, which is the SCALE index, taken from
-/// `pallets/quantum-pow/src/lib.rs` lines 355 to 409 and
-/// `pallets/miner-registry/src/lib.rs` lines 494 to 518.
-const QUANTUM_POW_ERRORS: [&str; 25] = [
-    "MinerAlreadyRegistered",
-    "MinerNotRegistered",
-    "TopologyAlreadyRegistered",
-    "TopologyNotRegistered",
-    "InvalidCurve",
-    "GraphTooSmall",
-    "InvalidTopology",
-    "ProofLimitReached",
-    "InvalidNonce",
-    "NoSolutionsSubmitted",
-    "InvalidSpinValues",
-    "SolutionLengthMismatch",
-    "InsufficientEnergy",
-    "InsufficientDiversity",
-    "InsufficientSolutions",
-    "ArithmeticOverflow",
-    "EmptyAllowedValues",
-    "EncodingTooWide",
-    "PackedSolutionLengthMismatch",
-    "InvalidEncodedSpin",
-    "PackedSolutionTooLarge",
-    "TopologyNotMineable",
-    "TopologyIsDefault",
-    "MineableTopologyConflict",
-    "InvalidDiversityConfig",
-];
-
-const MINER_REGISTRY_ERRORS: [&str; 22] = [
-    "EmptyNodeId",
-    "EmptyNodeName",
-    "EmptyPublicHost",
-    "EmptyRpcEndpoint",
-    "EmptyMinerLabel",
-    "EmptyMinerBackend",
-    "EmptyMinerDeviceId",
-    "EmptyOsSystem",
-    "EmptyCpuBrand",
-    "EmptyCpuArch",
-    "EmptyGpuVendor",
-    "EmptyGpuName",
-    "InvalidGpuUtilization",
-    "EmptyPythonVersion",
-    "EmptyQuipVersion",
-    "EmptyDockerImage",
-    "NoMiners",
-    "InvalidPort",
-    "DescriptorNotFound",
-    "DescriptorRequired",
-    "InvalidQBlockId",
-    "DuplicateParticipation",
-];
-
-/// Render a module error for an operator.
-#[must_use]
-pub fn describe_module_error(e: &ModuleError) -> String {
-    let idx = u32::from_le_bytes(e.error) as usize;
-    let (pallet_name, table): (&str, &[&str]) = match e.pallet {
-        QUANTUM_POW_PALLET_INDEX => ("QuantumPow", &QUANTUM_POW_ERRORS),
-        MINER_REGISTRY_PALLET_INDEX => ("MinerRegistry", &MINER_REGISTRY_ERRORS),
-        other => return format!("pallet {other} error {idx} (no name table for this pallet)"),
-    };
-    match table.get(idx) {
-        Some(name) => format!("{pallet_name}::{name}"),
-        None => format!("{pallet_name} error {idx} (index beyond the known table)"),
+    match decode_inner(bytes.get(2..)?)? {
+        DispatchError::Module(module) => Some(module),
+        DispatchError::Other(_) => None,
     }
 }
 
@@ -154,23 +63,5 @@ mod tests {
         ] {
             assert_eq!(decode_dispatch_error(raw), expected, "{label}");
         }
-    }
-
-    /// The names are diagnostics only. A wrong mapping must never reach control
-    /// flow, so an unknown index still produces a readable string.
-    #[test]
-    fn known_errors_are_named_and_unknown_ones_are_still_readable() {
-        let known = describe_module_error(&ModuleError {
-            pallet: QUANTUM_POW_PALLET_INDEX,
-            error: [0, 0, 0, 0],
-        });
-        assert!(known.contains("QuantumPow"), "{known}");
-
-        let unknown = describe_module_error(&ModuleError {
-            pallet: 99,
-            error: [200, 0, 0, 0],
-        });
-        assert!(unknown.contains("99"), "{unknown}");
-        assert!(unknown.contains("200"), "{unknown}");
     }
 }

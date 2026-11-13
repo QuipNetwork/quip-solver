@@ -20,6 +20,9 @@ pub struct FakeChain {
     pub submitted: Mutex<Vec<Proof>>,
     /// Optional scripted submit receipt (default `Success`, no chain detail).
     submit_result: Mutex<Result<SubmitReceipt, ChainError>>,
+    /// When set, each `submit_proof` records its proof and then waits here,
+    /// so a test can observe what happens while a proof is in flight.
+    submit_hold: Mutex<Option<std::sync::Arc<tokio::sync::Notify>>>,
     /// Scripted `latest_qblock_id` (default `None`).
     qblock_id: Mutex<Option<u64>>,
     /// Scripted `fetch_decay_params` (default `None`).
@@ -71,6 +74,7 @@ impl FakeChain {
             pending_proofs: Mutex::new(Vec::new()),
             submitted: Mutex::new(Vec::new()),
             submit_result: Mutex::new(Ok(SubmitReceipt::action_only(SubmitAction::Success))),
+            submit_hold: Mutex::new(None),
             qblock_id: Mutex::new(None),
             decay_params: Mutex::new(None),
             balance: Mutex::new(Ok(u128::MAX)),
@@ -250,6 +254,23 @@ impl FakeChain {
     pub fn set_submit_result(&self, action: Result<SubmitAction, ChainError>) {
         let receipt = action.map(SubmitReceipt::action_only);
         self.set_submit_receipt(receipt);
+    }
+
+    /// Hold every later `submit_proof` after it records its proof, until the
+    /// returned [`tokio::sync::Notify`] is notified.
+    ///
+    /// # Panics
+    /// Panics if a prior holder poisoned this mutex.
+    pub fn hold_submits(&self) -> std::sync::Arc<tokio::sync::Notify> {
+        let hold = std::sync::Arc::new(tokio::sync::Notify::new());
+        #[expect(
+            clippy::unwrap_used,
+            reason = "test double; Mutex poison is a test failure"
+        )]
+        {
+            *self.submit_hold.lock().unwrap() = Some(std::sync::Arc::clone(&hold));
+        }
+        hold
     }
 
     /// Script the next `submit_proof` receipt in full.
@@ -548,6 +569,10 @@ impl ChainClient for FakeChain {
         )]
         {
             self.submitted.lock().unwrap().push(proof.clone());
+            let hold = self.submit_hold.lock().unwrap().clone();
+            if let Some(hold) = hold {
+                hold.notified().await;
+            }
             // Can't move out of Mutex guard for Result with ChainError (not Clone);
             // reconstruct Success/Retry/etc from a stored pattern.
             match &*self.submit_result.lock().unwrap() {

@@ -214,15 +214,26 @@ this client does not carry. Each call instead names the storage entry its own
 success writes, and the client reads that entry back at the inclusion block.
 
 When the extrinsic is in the block but the storage entry is absent, the
-client reports why in the terms of that storage rather than as one generic
-failure. For a proof it reads `QuantumPow.QBlocks` at the inclusion block and
-compares the winner:
+client first reads the pallet error from the block's `System.Events`. A full
+event decode needs runtime metadata, but the outcome record of one extrinsic
+has a fixed prefix: the phase `ApplyExtrinsic(i)`, where `i` is the
+extrinsic's position in the block, then `System` and `ExtrinsicFailed`. The
+client searches the raw events for that prefix and decodes the
+`DispatchError` after it (`chain/events.rs`). It names a pallet error as
+`Pallet::Error`, with the name table that matches the block's
+`spec_version`, because runtime 120 renumbered the `QuantumPow` errors. The
+`classify_*` functions match these names, so `QuantumPow::InvalidNonce`
+classifies as `StopRoundStale` and logs at info.
+
+When the client finds no single failure record, it reports why in the terms
+of the storage the call competes for. For a proof it reads
+`QuantumPow.QBlocks` at the inclusion block and compares the winner:
 
 | What the qblock slot holds | Meaning | Action |
 | --- | --- | --- |
 | Another account | Another miner won the race. The proof was sound. | `StopRoundStale`, logged at info |
 | The signing account | The read raced the write | `StopRoundStale` |
-| Nothing | The pallet rejected the proof itself. Check diversity, energy, and registration. | `classify_receipt` |
+| Nothing | The pallet rejected the proof. The client cannot read its error. | `StopFatal` |
 
 A lost race is the one included-but-failed case that says nothing is wrong
 with the proof, so it must not appear as a rejection.
@@ -231,9 +242,34 @@ with the proof, so it must not appear as a rejection.
 already spent. At the parent block the replay leaves out whatever the block
 ordered ahead of the extrinsic, which is the exact thing that beats a proof.
 
-Naming the pallet error variant itself, such as `InsufficientDiversity`,
-still needs metadata decoding. `classify_receipt` matches those names, so it
-only ever sees them for errors the node reports before inclusion.
+### One proof in flight
+
+The pallet derives each nonce from `LastProofBlockHash`, which changes in the
+block after any accepted proof. A proof that the next block includes after
+another proof of its round fails with `InvalidNonce` and pays the fee. A
+second proof from the same account helps only when the same block includes
+both proofs and the second beats a rival proof in that block. The reason is
+that `submit_proof` replaces the best proof of a block only for a lower
+energy, and the reward does not depend on energy. The coordinator cannot
+choose the block. The second extrinsic carries the next account nonce, so the
+chain never includes it ahead of the first.
+
+For that reason the session path and the win-time path share one submit slot in
+`CoordinatorState` (`claim_proof_submit`). The coordinator holds a proof back
+in these cases:
+
+- The proof belongs to an earlier generation, whose round has ended.
+- A proof from this account already won the generation, and the feeder has
+  not reseeded yet.
+- Another proof from this account is between submit and receipt. The session
+  path stashes the held candidate. The win-time path submits it if the
+  pending proof does not win.
+
+Before it signs, `RealChainClient::submit_proof` also reads the round root at
+the head and recomputes the nonce of the proof. For a proof mined on an older
+root, it returns `StopRoundStale` and sends nothing. A rival proof can still
+win while the proof waits in the pool. The client classifies that
+failure as stale from the decoded `InvalidNonce`.
 
 `RealChainClient` (`chain/real.rs`) is the live client over Substrate
 JSON-RPC. `FakeChain` (`chain/fake.rs`) backs the tests. Supporting

@@ -1135,7 +1135,9 @@ pub async fn feeder_loop<C>(
             // the best stashed candidate whose projected viability block has
             // arrived (and still improves on the current best), then submit it
             // off-lock. `mark_submitted` + the `beats_current` guard keep this
-            // from double-submitting or regressing what the session path sent.
+            // from double-submitting or regressing what the session path sent,
+            // and the shared submit slot (`claim_proof_submit`) keeps it from
+            // racing a pending proof or submitting into a round already won.
             let now_mono = start.elapsed().as_secs_f64();
             let now_wall = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1243,9 +1245,31 @@ pub async fn feeder_loop<C>(
                     device_access_time_us: cand.device_access_time_us,
                 };
                 let job_hex = crate::chain::extrinsic::hex_encode(&cand.job_id);
-                let receipt = chain.submit_proof(&proof).await;
-                match receipt.as_ref().map(|r| r.action) {
-                    Ok(SubmitAction::Success) => {
+                let claim = state.lock().await.claim_proof_submit(cand.generation);
+                let receipt = match claim {
+                    Ok(()) => {
+                        let receipt = chain.submit_proof(&proof).await;
+                        let won = matches!(
+                            receipt.as_ref().map(|r| r.action),
+                            Ok(SubmitAction::Success)
+                        );
+                        state
+                            .lock()
+                            .await
+                            .release_proof_submit(cand.generation, won);
+                        Some(receipt)
+                    }
+                    Err(hold) => {
+                        // A pending proof may still win, and a stale or won
+                        // round resets the stash at the next reseed. Either
+                        // way the candidate stays stashed and nothing is sent.
+                        tracing::debug!(job = %job_hex, ?hold, "win-time candidate held; not submitting");
+                        None
+                    }
+                };
+                match receipt.as_ref().map(|r| r.as_ref().map(|r| r.action)) {
+                    None => {}
+                    Some(Ok(SubmitAction::Success)) => {
                         let mut st = state.lock().await;
                         st.stash.mark_submitted(&cand.job_id);
                         let qblock_key = st.qblock_id.unwrap_or(0);
@@ -1262,7 +1286,7 @@ pub async fn feeder_loop<C>(
                             let _ = tx.send(crate::attempt::WriterMsg::Summary { qblock_id, body });
                         }
                     }
-                    Ok(SubmitAction::Retry) => {
+                    Some(Ok(SubmitAction::Retry)) => {
                         let qblock_key = state.lock().await.qblock_id.unwrap_or(0);
                         let decided = submit_ledger.record_failure(qblock_key, &cand.job_id);
                         let attempts = submit_ledger.attempts(qblock_key, &cand.job_id);
@@ -1281,20 +1305,20 @@ pub async fn feeder_loop<C>(
                             );
                         }
                     }
-                    Ok(SubmitAction::StopRoundStale) => {
+                    Some(Ok(SubmitAction::StopRoundStale)) => {
                         // Stale for this round (e.g. InvalidNonce / topology moved);
                         // the next reseed clears the stash. Stop resubmitting it now.
                         tracing::info!(job = %job_hex, "win-time submit stale for round; dropping candidate");
                         state.lock().await.stash.mark_submitted(&cand.job_id);
                     }
-                    Ok(SubmitAction::StopFatal) => {
+                    Some(Ok(SubmitAction::StopFatal)) => {
                         // Fatally rejected by the pallet (InsufficientSolutions/
                         // InsufficientDiversity/MinerNotRegistered/...): never
                         // retry it, or the same candidate loops every window.
                         tracing::error!(job = %job_hex, "win-time submit fatally rejected by pallet; dropping candidate");
                         state.lock().await.stash.mark_submitted(&cand.job_id);
                     }
-                    Err(e) => {
+                    Some(Err(e)) => {
                         // Transient chain error (RPC down / unreachable): keep the
                         // winning candidate stashed for the next due window.
                         tracing::error!(job = %job_hex, error = %e, "win-time submit failed (transient); leaving stashed for retry");

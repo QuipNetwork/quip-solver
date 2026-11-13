@@ -228,6 +228,24 @@ pub struct CoordinatorState {
     /// an order only while its id is absent, so each order is answered once;
     /// a transient submit failure removes the id to stage it again.
     pub mempool_orders: HashMap<Vec<u8>, crate::validate::QualityGates>,
+    /// Whether one of our `PoW` proofs is between submit and its receipt.
+    /// See [`CoordinatorState::claim_proof_submit`].
+    proof_in_flight: bool,
+    /// Generation in which one of our proofs won its qblock.
+    won_generation: Option<u64>,
+}
+
+/// Why a `PoW` proof is held back instead of submitted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProofHold {
+    /// The proof belongs to an earlier generation. Its round has ended, so
+    /// the pallet would reject its nonce.
+    StaleGeneration,
+    /// One of our proofs already won this generation's qblock. The next
+    /// block derives nonces from a new root, so this proof cannot land.
+    RoundWon,
+    /// Another of our proofs is still between submit and receipt.
+    ProofInFlight,
 }
 
 impl CoordinatorState {
@@ -262,6 +280,51 @@ impl CoordinatorState {
             last_proof_block_hash: String::new(),
             miner_types: HashMap::new(),
             mempool_orders: HashMap::new(),
+            proof_in_flight: false,
+            won_generation: None,
+        }
+    }
+
+    /// Claim the single proof submit slot for a proof of `generation`.
+    ///
+    /// The pallet derives every nonce from `LastProofBlockHash`, which
+    /// changes in the block after any accepted proof. A proof that lands in a
+    /// later block than another proof of its round fails with `InvalidNonce`
+    /// and still pays the fee. A second proof of ours can help only when it
+    /// lands in the same block as the first and beats a rival proof there:
+    /// `submit_proof` replaces the block's best proof only for a strictly
+    /// lower energy, and the reward does not depend on energy. The
+    /// coordinator cannot choose the block, and the second extrinsic carries
+    /// the next account nonce, so it never lands ahead of the first. Its
+    /// usual outcome is a paid `InvalidNonce` one block later. So at most one
+    /// proof is in flight. A better candidate waits in the stash, and the
+    /// win-time path submits it if the pending proof does not win.
+    ///
+    /// # Errors
+    /// Returns the [`ProofHold`] reason when the proof must not be
+    /// submitted now. On `Ok` the caller must call
+    /// [`release_proof_submit`](Self::release_proof_submit) after the submit.
+    pub(crate) fn claim_proof_submit(&mut self, generation: u64) -> Result<(), ProofHold> {
+        if generation != self.generation {
+            return Err(ProofHold::StaleGeneration);
+        }
+        if self.won_generation == Some(generation) {
+            return Err(ProofHold::RoundWon);
+        }
+        if self.proof_in_flight {
+            return Err(ProofHold::ProofInFlight);
+        }
+        self.proof_in_flight = true;
+        Ok(())
+    }
+
+    /// Release the submit slot taken by
+    /// [`claim_proof_submit`](Self::claim_proof_submit). A win closes
+    /// `generation` to further proofs.
+    pub(crate) fn release_proof_submit(&mut self, generation: u64, won: bool) {
+        self.proof_in_flight = false;
+        if won {
+            self.won_generation = Some(generation);
         }
     }
 
@@ -562,9 +625,28 @@ pub(crate) async fn settle_pow_result<C: ChainClient>(
             device_access_time_us,
         };
         let job_hex = crate::chain::extrinsic::hex_encode(job_id);
-        let submit_result = chain.submit_proof(&proof).await;
-        match submit_result.as_ref().map(|r| r.action) {
-            Ok(SubmitAction::Success) => {
+        let claim = state.lock().await.claim_proof_submit(job.generation);
+        let submit_result = match claim {
+            Ok(()) => {
+                let result = chain.submit_proof(&proof).await;
+                let won = matches!(result.as_ref().map(|r| r.action), Ok(SubmitAction::Success));
+                state.lock().await.release_proof_submit(job.generation, won);
+                Some(result)
+            }
+            Err(ProofHold::ProofInFlight) => {
+                tracing::info!(job = %job_hex, "another proof for this round is in flight; holding candidate for win-time submission");
+                retain_for_retry = true;
+                None
+            }
+            Err(hold @ (ProofHold::StaleGeneration | ProofHold::RoundWon)) => {
+                tracing::debug!(job = %job_hex, ?hold, "round ended before submission; not submitting");
+                state.lock().await.metrics.record_stale_drop(miner_id);
+                None
+            }
+        };
+        match submit_result.as_ref().map(|r| r.as_ref().map(|r| r.action)) {
+            None => {}
+            Some(Ok(SubmitAction::Success)) => {
                 let mut st = state.lock().await;
                 st.current_best_milli = Some(validated.best_energy_milli);
                 st.metrics.record_proof_submitted(miner_id);
@@ -573,26 +655,26 @@ pub(crate) async fn settle_pow_result<C: ChainClient>(
                 }
                 submitted = true;
             }
-            Ok(SubmitAction::Retry) => {
+            Some(Ok(SubmitAction::Retry)) => {
                 tracing::warn!(job = %job_hex, "session submit rejected (retryable); retaining accepted candidate for win-time retry");
                 state.lock().await.metrics.record_submission_error(miner_id);
                 retain_for_retry = true;
             }
-            Ok(SubmitAction::StopRoundStale) => {
+            Some(Ok(SubmitAction::StopRoundStale)) => {
                 tracing::info!(job = %job_hex, "session submit stale for round; dropping candidate");
                 state.lock().await.metrics.record_stale_drop(miner_id);
             }
-            Ok(SubmitAction::StopFatal) => {
+            Some(Ok(SubmitAction::StopFatal)) => {
                 tracing::error!(job = %job_hex, "session submit fatally rejected by pallet; dropping candidate");
                 state.lock().await.metrics.record_submission_error(miner_id);
             }
-            Err(e) => {
+            Some(Err(e)) => {
                 tracing::error!(job = %job_hex, error = %e, "session submit failed (transient); retaining accepted candidate for win-time retry");
                 state.lock().await.metrics.record_submission_error(miner_id);
                 retain_for_retry = true;
             }
         }
-        receipt = Some(submit_result);
+        receipt = submit_result;
     }
     // Record the attempt; stash sub-threshold candidates so
     // the easing difficulty can still win them; refresh the
@@ -1594,6 +1676,105 @@ mod tests {
         assert!(submitted
             .first()
             .is_some_and(|proof| proof.solutions.len() <= crate::validate::MAX_PROOF_SOLUTIONS));
+    }
+
+    /// Two lease winners with distinct energies, the worse one first, so the
+    /// second beats the round best the first sets.
+    fn worse_then_better(job: &Job) -> (WireResult, WireResult) {
+        let energy = |r: &WireResult| r.solutions.first().unwrap().energy_milli;
+        let mut results: Vec<WireResult> = (0..4).map(|i| winner(job, i)).collect();
+        results.sort_by_key(|r| std::cmp::Reverse(energy(r)));
+        let better = results.pop().unwrap();
+        let worse = results.swap_remove(0);
+        assert!(
+            energy(&worse) > energy(&better),
+            "fixture needs distinct energies"
+        );
+        (worse, better)
+    }
+
+    /// Once our proof wins, the next block derives nonces from a new root. A
+    /// better result of the same round can only fail with `InvalidNonce`, so
+    /// it is not submitted, even before the feeder reseeds.
+    #[tokio::test]
+    async fn no_proof_is_submitted_for_a_round_we_already_won() {
+        let (st, job) = lease_state();
+        let (worse, better) = worse_then_better(&job);
+        let state = Arc::new(Mutex::new(st));
+        let chain = FakeChain::new(lease_snapshot(), None);
+        handle_lease_result(&chain, &state, &notify(), "m", worse).await;
+        handle_lease_result(&chain, &state, &notify(), "m", better).await;
+        assert_eq!(
+            chain.submitted_count(),
+            1,
+            "the won round takes no second proof"
+        );
+    }
+
+    /// A result verified for a generation the feeder has already left belongs
+    /// to an ended round, and its nonce no longer holds.
+    #[tokio::test]
+    async fn a_result_of_an_ended_generation_is_not_submitted() {
+        let (mut st, job) = lease_state();
+        st.generation = job.generation + 1;
+        let (_, submitted) = settle(st, winner(&job, 0)).await;
+        assert!(submitted.is_empty());
+    }
+
+    /// While one proof is in flight, a better one of the same round is held in
+    /// the stash, not sent: if both landed in different blocks, the second
+    /// would fail with `InvalidNonce`.
+    #[tokio::test]
+    async fn a_second_proof_waits_in_the_stash_while_one_is_in_flight() {
+        let (mut st, job) = lease_state();
+        let (worse, better) = worse_then_better(&job);
+        let worse_energy = worse.solutions.first().unwrap().energy_milli;
+        ease_stash(&mut st, job.generation, worse_energy);
+        let state = Arc::new(Mutex::new(st));
+        let chain = Arc::new(FakeChain::new(lease_snapshot(), None));
+        let hold = chain.hold_submits();
+        let first = {
+            let (chain, state) = (Arc::clone(&chain), Arc::clone(&state));
+            tokio::spawn(async move {
+                handle_lease_result(chain.as_ref(), &state, &notify(), "m", worse).await;
+            })
+        };
+        while chain.submitted_count() == 0 {
+            tokio::task::yield_now().await;
+        }
+        let second = tokio::time::timeout(
+            Duration::from_secs(5),
+            handle_lease_result(chain.as_ref(), &state, &notify(), "m", better),
+        )
+        .await;
+        assert!(
+            second.is_ok(),
+            "the second result must not wait on the pending proof"
+        );
+        assert_eq!(chain.submitted_count(), 1, "one proof in flight at a time");
+        assert!(
+            !state.lock().await.stash.is_empty(),
+            "the held proof stays stashed for the win-time path"
+        );
+        hold.notify_one();
+        first.await.unwrap();
+    }
+
+    /// The win-time path and the session path share one submit slot. A win
+    /// closes the generation, and a later generation reopens it.
+    #[test]
+    fn the_submit_slot_is_single_and_a_win_closes_the_generation() {
+        let mut st = CoordinatorState::new();
+        st.generation = 4;
+        assert_eq!(st.claim_proof_submit(3), Err(ProofHold::StaleGeneration));
+        assert_eq!(st.claim_proof_submit(4), Ok(()));
+        assert_eq!(st.claim_proof_submit(4), Err(ProofHold::ProofInFlight));
+        st.release_proof_submit(4, false);
+        assert_eq!(st.claim_proof_submit(4), Ok(()));
+        st.release_proof_submit(4, true);
+        assert_eq!(st.claim_proof_submit(4), Err(ProofHold::RoundWon));
+        st.generation = 5;
+        assert_eq!(st.claim_proof_submit(5), Ok(()));
     }
 
     static FAMILY_TABLE: [ising_generators::descriptor::Contract; 1] =

@@ -4,6 +4,9 @@
 //! cover SCALE encode/decode, hybrid extrinsic assembly, and proof packing.
 //! Methods return transport errors when no validator is reachable.
 
+use super::events::{
+    describe_dispatch_error, extrinsic_outcome, system_events_storage_key, ExtrinsicOutcome,
+};
 use super::extrinsic::{
     build_hybrid_signed_extrinsic, default_topology_storage_key, difficulties_storage_key,
     extrinsic_hash, hex_decode, hex_encode, job_orders_storage_key,
@@ -724,9 +727,9 @@ impl RealChainClient {
         want_hash: &[u8; 32],
         confirmation: Confirmation,
     ) -> Result<SignedCallOutcome, ChainError> {
-        let included = self.block_contains(block_hex, want_hash).await?;
+        let index = self.extrinsic_index(block_hex, want_hash).await?;
         let confirmed = self.confirmation_present(block_hex, &confirmation).await?;
-        match classify_state_outcome(included, confirmed) {
+        match classify_state_outcome(index.is_some(), confirmed) {
             StateOutcome::Won => {
                 let header = self
                     .rpc_call(
@@ -740,7 +743,9 @@ impl RealChainClient {
                 })
             }
             StateOutcome::IncludedButNotWon => {
-                let (error, lost_race) = self.explain_failure(block_hex, &confirmation).await;
+                let (error, lost_race) = self
+                    .explain_failure(block_hex, index.unwrap_or_default(), &confirmation)
+                    .await;
                 Ok(SignedCallOutcome::DispatchFailed { error, lost_race })
             }
             StateOutcome::NotIncluded => Ok(SignedCallOutcome::Dropped {
@@ -749,15 +754,16 @@ impl RealChainClient {
         }
     }
 
-    /// Is our extrinsic in this block?
+    /// Position of our extrinsic in this block, or `None` when it is absent.
     ///
     /// `chain_getBlock` is in the safe RPC set. Each extrinsic comes back as a
-    /// hex blob, so inclusion is a hash comparison and needs no metadata.
-    async fn block_contains(
+    /// hex blob, so inclusion is a hash comparison and needs no metadata. The
+    /// position names the extrinsic's records in `System.Events`.
+    async fn extrinsic_index(
         &self,
         block_hex: &str,
         want_hash: &[u8; 32],
-    ) -> Result<bool, ChainError> {
+    ) -> Result<Option<u32>, ChainError> {
         let body = self
             .rpc_call(
                 "chain_getBlock",
@@ -773,14 +779,48 @@ impl RealChainClient {
                 "chain_getBlock has no block.extrinsics array".into(),
             ));
         };
-        for e in exts {
+        for (index, e) in exts.iter().enumerate() {
             let Some(hex) = e.as_str() else { continue };
             let bytes = hex_decode(hex).map_err(ChainError::Decode)?;
             if extrinsic_hash(&bytes) == *want_hash {
-                return Ok(true);
+                let index = u32::try_from(index)
+                    .map_err(|_| ChainError::Decode("extrinsic index exceeds u32".into()))?;
+                return Ok(Some(index));
             }
         }
-        Ok(false)
+        Ok(None)
+    }
+
+    /// The pallet error recorded for extrinsic `index` of `block_hex`, named
+    /// under the runtime that executed the block.
+    ///
+    /// `None` when the block's events cannot be read or hold no single
+    /// `ExtrinsicFailed` record for the extrinsic. See [`super::events`].
+    async fn dispatch_error_at(&self, block_hex: &str, index: u32) -> Option<String> {
+        let at = Value::String(block_hex.to_string());
+        let read = futures::try_join!(
+            self.rpc_call(
+                "state_getStorage",
+                Value::Array(vec![
+                    Value::String(hex_encode(&system_events_storage_key())),
+                    at.clone(),
+                ]),
+            ),
+            self.rpc_call("state_getRuntimeVersion", Value::Array(vec![at])),
+        );
+        let (events, runtime_version) = match read {
+            Ok(pair) => pair,
+            Err(e) => {
+                tracing::debug!(error = %e, "could not read the block's events");
+                return None;
+            }
+        };
+        let events = hex_decode(events.as_str()?).ok()?;
+        let spec_version = parse_spec_version(&runtime_version).ok()?;
+        match extrinsic_outcome(&events, index) {
+            ExtrinsicOutcome::Failed(error) => Some(describe_dispatch_error(&error, spec_version)),
+            ExtrinsicOutcome::Succeeded | ExtrinsicOutcome::Unknown => None,
+        }
     }
 
     /// Is the storage entry this call should have written present at `block_hex`?
@@ -926,23 +966,83 @@ impl RealChainClient {
         Ok(raw.as_str().is_some())
     }
 
-    /// Best-effort reason for a dispatch that was included but did not take
-    /// effect.
+    /// The live round root, or `None` when `proof` was mined on another one.
     ///
-    /// The pallet's own error variant lives in this block's `System.Events`,
-    /// and decoding those needs runtime metadata this client does not carry.
-    /// Replaying the extrinsic through `system_dryRun` cannot stand in for it:
-    /// at the head the nonce is already spent, and at the parent block the
-    /// replay omits whatever was ordered ahead of us inside the same block,
-    /// which is the very thing that beats a proof. So this reads the storage
-    /// the call competes for and reports what is actually there.
+    /// The pallet checks the nonce against the root of the block that
+    /// includes the proof. The feeder's snapshot can be a poll old, and a win
+    /// since then moves the root. A proof mined on the old root can only fail
+    /// with `InvalidNonce` and still pay the fee, so it is not sent.
+    async fn live_root_for(
+        &self,
+        proof: &Proof,
+        identity: [u8; 32],
+        salt: [u8; 32],
+    ) -> Result<Option<[u8; 32]>, ChainError> {
+        let root = self.live_round_root().await?;
+        if nonce_matches_root(&proof.job_id, root, identity, salt) {
+            return Ok(Some(root));
+        }
+        tracing::info!(
+            job = %hex_encode(&proof.job_id),
+            "the proof's round ended before submission; not submitting"
+        );
+        Ok(None)
+    }
+
+    /// The nonce root a proof submitted now is checked against.
     ///
-    /// The caller must treat this as log text only.
+    /// The same rule as the snapshot's `last_proof_block_hash`, read at the
+    /// current head: the head's own hash when the head holds a qblock, else
+    /// the stored `LastProofBlockHash`.
+    async fn live_round_root(&self) -> Result<[u8; 32], ChainError> {
+        let head = self
+            .rpc_call("chain_getBlockHash", Value::Array(vec![]))
+            .await?;
+        let at = head
+            .as_str()
+            .ok_or_else(|| ChainError::Decode("chain_getBlockHash not a string".into()))?;
+        let head_hash =
+            <[u8; 32]>::try_from(hex_decode(at).map_err(ChainError::Decode)?.as_slice())
+                .map_err(|_| ChainError::Decode("head hash is not 32 bytes".into()))?;
+        let last_proof_block_key = last_proof_block_storage_key();
+        let stored_root_key = last_proof_block_hash_storage_key();
+        let (header, last_proof_block, stored_root) = futures::try_join!(
+            self.rpc_call(
+                "chain_getHeader",
+                Value::Array(vec![Value::String(at.to_string())]),
+            ),
+            self.read_storage::<u32>(&last_proof_block_key, at),
+            self.read_storage::<[u8; 32]>(&stored_root_key, at),
+        )?;
+        Ok(super::snapshot::round_root(
+            head_hash,
+            parse_block_number(&header)?,
+            u64::from(last_proof_block.unwrap_or(0)),
+            stored_root.unwrap_or([0u8; 32]),
+        ))
+    }
+
+    /// Reason for a dispatch that was included but did not take effect.
+    ///
+    /// The pallet error comes from the block's `System.Events`, located by
+    /// the extrinsic's position (see [`super::events`]). It renders as
+    /// `Pallet::Error`, which the `classify_*` functions match. Replaying the
+    /// extrinsic through `system_dryRun` cannot stand in for it: at the head
+    /// the nonce is already spent, and at the parent block the replay omits
+    /// whatever was ordered ahead of us inside the same block, which is the
+    /// very thing that beats a proof.
+    ///
+    /// Without a readable error, this reads the storage the call competes
+    /// for and reports what is actually there.
     async fn explain_failure(
         &self,
         block_hex: &str,
+        index: u32,
         confirmation: &Confirmation,
     ) -> (String, bool) {
+        if let Some(error) = self.dispatch_error_at(block_hex, index).await {
+            return (error, false);
+        }
         // Only a proof competes with other miners, so only a proof can lose a
         // race. Every other call fails on its own merits.
         if let Confirmation::ProofWin { account } = confirmation {
@@ -992,6 +1092,28 @@ impl RealChainClient {
     }
 }
 
+/// Log a proof the block included but whose dispatch failed.
+///
+/// A stale rejection means another proof won the round while this one waited
+/// in the pool. Nothing is wrong with the proof, so it is not a warning.
+fn log_proof_dispatch_failure(action: SubmitAction, error: &str) {
+    if action == SubmitAction::StopRoundStale {
+        tracing::info!(error = %error, "proof included after its round ended");
+    } else {
+        tracing::warn!(error = %error, "proof included but ExtrinsicFailed");
+    }
+}
+
+/// Whether a proof mined on nonce `job_id` is still valid under `root`.
+///
+/// A `PoW` job id is the nonce the job was drawn from. An id of any other
+/// length carries no nonce to check and passes.
+fn nonce_matches_root(job_id: &[u8], root: [u8; 32], identity: [u8; 32], salt: [u8; 32]) -> bool {
+    <[u8; 32]>::try_from(job_id).map_or(true, |nonce| {
+        ising_generators::random::derive_nonce(root, identity, salt) == nonce
+    })
+}
+
 /// Turn the qblock winner recorded at a block into a reason and a race verdict.
 ///
 /// Split from the RPC read so the verdict can be tested without a chain. The
@@ -1013,8 +1135,8 @@ fn explain_proof_failure(our_account: &[u8; 32], winner: Option<[u8; 32]>) -> (S
             false,
         ),
         None => (
-            "no qblock was recorded at this block, so the pallet rejected the proof itself; \
-             check diversity, energy, and registration"
+            "no qblock was recorded at this block and the pallet error could not be read from \
+             System.Events"
                 .to_string(),
             false,
         ),
@@ -1512,10 +1634,15 @@ impl ChainClient for RealChainClient {
             topo.copy_from_slice(&snap.topology_hash);
         }
 
+        let miner_identity = miner_identity_bytes(&pair);
+        let Some(root) = self.live_root_for(proof, miner_identity, salt).await? else {
+            return Ok(SubmitReceipt::action_only(SubmitAction::StopRoundStale));
+        };
+
         let ctx = ProofBuildContext {
             topology_hash: topo,
-            last_proof_block_hash: snap.last_proof_block_hash,
-            miner_identity: miner_identity_bytes(&pair),
+            last_proof_block_hash: root,
+            miner_identity,
             salt,
             witness: witness_format(&snap, spin_spec),
         };
@@ -1553,9 +1680,10 @@ impl ChainClient for RealChainClient {
                 })
             }
             SignedCallOutcome::DispatchFailed { error, .. } => {
-                tracing::warn!(error = %error, "proof included but ExtrinsicFailed");
+                let action = classify_receipt(Some(&error));
+                log_proof_dispatch_failure(action, &error);
                 Ok(SubmitReceipt {
-                    action: classify_receipt(Some(&error)),
+                    action,
                     extrinsic_hash: Some(extrinsic_hash),
                     block_hash: None,
                     block_number: None,
@@ -1948,8 +2076,8 @@ mod tests {
         assert!(!lost_race, "winning it ourselves is not a lost race");
     }
     use super::{
-        classify_state_outcome, explain_proof_failure, hex_encode, parse_spec_version,
-        RealChainClient, StateOutcome,
+        classify_state_outcome, explain_proof_failure, hex_encode, miner_identity_bytes,
+        parse_spec_version, Proof, RealChainClient, StateOutcome, SubmitAction,
     };
 
     #[test]
@@ -2306,6 +2434,11 @@ mod tests {
                         other => panic!("unexpected runtime call {other}"),
                     }
                 }
+                // The first read of the signing path. Refusing it stops a
+                // submit before anything is signed.
+                "system_accountNextIndex" => {
+                    return Err(ChainError::Unavailable("no signing in this test".into()))
+                }
                 other => panic!("unexpected rpc method {other}"),
             })
         }
@@ -2531,6 +2664,54 @@ mod tests {
         assert_eq!(snap.spec_version, 120);
         assert!(snap.family.is_none());
         assert_eq!(snap.nodes, vec![0, 1, 0x11]);
+    }
+
+    /// A proof is sent only when its nonce holds under the root of the head.
+    /// One mined on an older root would fail with `InvalidNonce` and still
+    /// pay the fee, so the client answers stale without submitting. The
+    /// scripted validator refuses the account-nonce read that signing starts
+    /// with, so a proof that goes on to submit shows up as `Unavailable`.
+    #[tokio::test]
+    async fn a_proof_mined_on_an_ended_round_is_not_submitted() {
+        use crate::chain::ChainClient as _;
+        let client = family_client(SnapshotValidator::new([0x11; 32], 3));
+        let _ = client
+            .fetch_mining_snapshot(None, [0u8; 32], None)
+            .await
+            .expect("snapshot")
+            .expect("a legacy topology");
+        let pair = HybridPair::from_string("//Alice", None).expect("alice");
+        let identity = miner_identity_bytes(&pair);
+        let salt = [0x44u8; 32];
+        let proof = |root: [u8; 32]| Proof {
+            job_id: ising_generators::random::derive_nonce(root, identity, salt).to_vec(),
+            best_energy_milli: -1,
+            diversity_milli: 0,
+            n_valid: 1,
+            solutions: vec![crate::validate::SpinRow {
+                spins: vec![1, 1, 1],
+                energy_milli: -1,
+            }],
+            is_pow: true,
+            order_id: Vec::new(),
+            generation: 1,
+            salt: salt.to_vec(),
+            device_access_time_us: 0,
+        };
+
+        // The head at block 16 holds no qblock, so the stored root rules.
+        let stale = client
+            .submit_proof(&proof([0xCC; 32]))
+            .await
+            .expect("a stale proof is answered without a submit");
+        assert_eq!(stale.action, SubmitAction::StopRoundStale);
+        assert_eq!(stale.extrinsic_hash, None, "nothing was signed or sent");
+
+        let live = client.submit_proof(&proof(STORED_ROOT)).await;
+        assert!(
+            matches!(live, Err(ChainError::Unavailable(_))),
+            "a proof on the live root goes on to sign and submit: {live:?}"
+        );
     }
 
     /// The topology is the one payload that never changes under its hash, so
