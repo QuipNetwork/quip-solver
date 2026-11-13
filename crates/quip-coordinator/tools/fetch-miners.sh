@@ -186,6 +186,13 @@ CPU_FAMILY=(
   quip-cpu-otsuka quip-cpu-dimer
 )
 
+# CUDA miners that link a canonical family generator. quip-cuda-otsuka runs the
+# Otsuka cluster kernel on quip/twisted-ice-dimer revision 1 jobs and production
+# CUDA SA on everything else. Optional, like the CPU family list.
+CUDA_FAMILY=(
+  quip-cuda-otsuka
+)
+
 # Decide which backends this run wants.
 want_cpu=false
 want_cuda=false
@@ -243,10 +250,12 @@ if [ "$want_cuda" = true ]; then
   elif [ "$cuda_required" = true ]; then
     CUDA_TAG="$(miner_tag cuda)"
     fetch required "$CUDA_TAG" "quip.network%2Fquip-solver-cuda" "quip-cuda-sa" "quip-cuda-gibbs" "quip-cuda-msa"
+    fetch optional "$CUDA_TAG" "quip.network%2Fquip-solver-cuda" "${CUDA_FAMILY[@]}"
   else
     CUDA_TAG="$(miner_tag cuda)"
     fetch required "$CUDA_TAG" "quip.network%2Fquip-solver-cuda" "quip-cuda-sa" "quip-cuda-gibbs" "quip-cuda-msa" ||
       echo "note: cuda binaries optional (no GPU host)"
+    fetch optional "$CUDA_TAG" "quip.network%2Fquip-solver-cuda" "${CUDA_FAMILY[@]}"
   fi
 fi
 
