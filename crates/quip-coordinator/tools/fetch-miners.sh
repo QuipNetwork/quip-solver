@@ -193,6 +193,12 @@ CUDA_FAMILY=(
   quip-cuda-otsuka
 )
 
+# Metal miners that link a canonical family generator. quip-metal-otsuka runs
+# the Otsuka cluster kernel on quip/twisted-ice-dimer revision 1 jobs.
+METAL_FAMILY=(
+  quip-metal-otsuka
+)
+
 # Decide which backends this run wants.
 want_cpu=false
 want_cuda=false
@@ -232,6 +238,7 @@ if [ "$want_metal" = true ]; then
   # Optional for the same reason the experimental CPU kernels are: a Metal
   # release that predates this kernel is skipped rather than failing the run.
   fetch optional "$METAL_TAG" "quip.network%2Fquip-solver-metal" "quip-metal-msa"
+  fetch optional "$METAL_TAG" "quip.network%2Fquip-solver-metal" "${METAL_FAMILY[@]}"
 fi
 if [ "$want_cpu" = true ]; then
   CPU_TAG="$(miner_tag cpu)"
