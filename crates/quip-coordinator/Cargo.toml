@@ -15,8 +15,8 @@ path = "src/lib.rs"
 rayon = "1.10"
 quip-proto = "0.0.14"
 quip-protocol = "0.0.14"
-quantum-validation = { git = "https://gitlab.com/quip.network/quip-validator.git", tag = "v0.5.0-rc2", version = "0.5.0-rc.2" }
-quip-transaction-crypto = { git = "https://gitlab.com/quip.network/quip-validator.git", tag = "v0.5.0-rc2", version = "0.5.0-rc.2" }
+quantum-validation = { git = "https://gitlab.com/quip.network/quip-validator.git", tag = "v0.5.0", version = "0.5.0" }
+quip-transaction-crypto = { git = "https://gitlab.com/quip.network/quip-validator.git", tag = "v0.5.0", version = "0.5.0" }
 parity-scale-codec = { version = "3.7.5", default-features = false, features = ["derive", "std"] }
 sp-core = { git = "https://github.com/QuipNetwork/polkadot-sdk.git", tag = "v0.4.0", default-features = false, features = ["std"] }
 sp-crypto-hashing = { git = "https://github.com/QuipNetwork/polkadot-sdk.git", tag = "v0.4.0", default-features = false, features = ["std"] }
@@ -74,9 +74,9 @@ ising-generators = "0.0.14"
 [dev-dependencies]
 prost = { workspace = true }
 tempfile = "3"
-quantum-validation = { git = "https://gitlab.com/quip.network/quip-validator.git", tag = "v0.5.0-rc2", version = "0.5.0-rc.2" }
-quip-transaction-crypto = { git = "https://gitlab.com/quip.network/quip-validator.git", tag = "v0.5.0-rc2", version = "0.5.0-rc.2" }
-quip-transaction-crypto-core = { git = "https://gitlab.com/quip.network/quip-validator.git", tag = "v0.5.0-rc2", version = ">=0.1.0" }
+quantum-validation = { git = "https://gitlab.com/quip.network/quip-validator.git", tag = "v0.5.0", version = "0.5.0" }
+quip-transaction-crypto = { git = "https://gitlab.com/quip.network/quip-validator.git", tag = "v0.5.0", version = "0.5.0" }
+quip-transaction-crypto-core = { git = "https://gitlab.com/quip.network/quip-validator.git", tag = "v0.5.0", version = ">=0.1.0" }
 quip-protocol = "0.0.14"
 quip-proto = "0.0.14"
 sp-core = { git = "https://github.com/QuipNetwork/polkadot-sdk.git", tag = "v0.4.0", default-features = false, features = ["std"] }
