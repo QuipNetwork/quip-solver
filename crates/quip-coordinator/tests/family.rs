@@ -920,23 +920,34 @@ mod verification {
     }
 
     /// CO-4: a family witness this coordinator accepts reaches the chain as a
-    /// witness the validator accepts. The proof is packed the way
-    /// `submit_proof` packs it, and the pallet's own steps check it: the nonce
-    /// as a `U256`, the instance regenerated from its big-endian bytes, each
-    /// row unpacked at the instance size, then `FamilyChallenge::verify_witness`.
+    /// witness the validator accepts. The proof is encoded the way
+    /// `submit_proof` encodes it, with the family's compact codec, and the
+    /// pallet's own call checks it: the nonce as a `U256`, then
+    /// `FamilyChallenge::decode_witnesses` over its big-endian bytes.
     #[test]
     fn an_accepted_family_witness_passes_the_validator_check() {
         use quantum_validation::families::{AdvertisedLimits, FamilyChallenge, CONTRACTS};
-        use quantum_validation::packed::unpack_solution;
-        use quantum_validation::AllowedValueSpec;
-        use quip_coordinator::chain::proof_encode::{build_quantum_proof, ProofBuildContext};
+        use quip_coordinator::chain::proof_encode::{
+            build_quantum_proof, ProofBuildContext, WitnessFormat,
+        };
         use quip_coordinator::chain::submit::Proof;
+        use quip_coordinator::lease::{ChallengeFamily, FAMILY_CONTRACTS};
+        use quip_coordinator::topology::Topology;
 
         let (lease, verifier, result) = polariton_report(true);
         let (_, validated) = verify_and_select(&lease, &verifier, &open_target(), &result).unwrap();
         let salt: [u8; 32] = result.salt.as_slice().try_into().unwrap();
         let rows = validated.selected_solutions;
-        let spin_set = vec![-1000, 1000];
+        let blob = quip_solver_conformance::topology(ROUTING_TOPOLOGY).unwrap();
+        let descriptor = lease.family.as_ref().unwrap();
+        let family = ChallengeFamily::admit(
+            FAMILY_CONTRACTS,
+            &descriptor.family_id,
+            descriptor.revision,
+            descriptor.params.clone(),
+            &Topology::from_nodes_edges(blob.nodes.clone(), blob.edges.clone(), &[], &[], &[]),
+        )
+        .unwrap();
         let quantum = build_quantum_proof(
             &Proof {
                 job_id: result.job_id.clone(),
@@ -955,8 +966,11 @@ mod verification {
                 last_proof_block_hash: LAST_PROOF,
                 miner_identity: MINER,
                 salt,
-                num_nodes: rows[0].spins.len(),
-                allowed_spin: AllowedValueSpec::Set(spin_set.clone()),
+                witness: WitnessFormat::Family {
+                    family,
+                    nodes: blob.nodes.clone(),
+                    edges: blob.edges.clone(),
+                },
             },
         )
         .unwrap();
@@ -966,8 +980,6 @@ mod verification {
             "the lease nonce is the chain nonce in big-endian bytes"
         );
 
-        let blob = quip_solver_conformance::topology(ROUTING_TOPOLOGY).unwrap();
-        let descriptor = lease.family.as_ref().unwrap();
         let challenge = FamilyChallenge::admit(
             CONTRACTS,
             descriptor.family_id.as_bytes(),
@@ -983,14 +995,25 @@ mod verification {
         )
         .unwrap();
         let instance = challenge.regenerate(quantum.nonce.to_big_endian()).unwrap();
-        let spec = AllowedValueSpec::Set(spin_set.as_slice());
-        for (packed, row) in quantum.solutions.iter().zip(&rows) {
-            let milli = unpack_solution(packed, instance.node_ids().len(), &spec).unwrap();
-            let spins: Vec<i8> = milli.iter().map(|&v| if v > 0 { 1 } else { -1 }).collect();
-            assert_eq!(spins, row.spins);
-            assert_eq!(
-                challenge.verify_witness(&instance, &spins),
-                Ok(row.energy_milli)
+        let max_len = usize::try_from(challenge.max_witness_len()).unwrap();
+        let (spins, energies) = challenge
+            .decode_witnesses(
+                quantum.nonce.to_big_endian(),
+                quantum.solutions.iter().map(Vec::as_slice),
+            )
+            .unwrap();
+        assert_eq!(spins.len(), rows.len());
+        for ((decoded, energy), (row, bytes)) in spins
+            .iter()
+            .zip(&energies)
+            .zip(rows.iter().zip(&quantum.solutions))
+        {
+            assert_eq!(decoded.len(), instance.node_ids().len());
+            assert_eq!(*decoded, row.spins);
+            assert_eq!(*energy, row.energy_milli);
+            assert!(
+                bytes.len() <= max_len,
+                "the witness fits the registration bound"
             );
         }
     }

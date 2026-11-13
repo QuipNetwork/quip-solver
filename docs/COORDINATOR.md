@@ -612,13 +612,18 @@ from that round, because a miner that drew the legacy model cannot produce a
 family witness. A topology without a descriptor keeps the legacy draw.
 
 A family witness covers the instance that its nonce regenerates, not the base
-topology. `submit_proof` packs each row at the instance size. The pallet
-regenerates the instance from the big-endian bytes of the proof nonce, unpacks
-each row at that size, and checks each witness with
-`FamilyChallenge::verify_witness`. One infeasible witness rejects the proof.
-The pool watch replays the same steps with the validator's
-`quantum_validation::families` code before it stops a round for a pending
-family proof.
+topology. On a family topology, quip-validator 0.5.0-rc.2 and later accept only
+the compact witness codec of the descriptor's family revision. They refuse the
+one-bit packing. `submit_proof` encodes a family proof in two steps:
+
+1. It regenerates the instance from the big-endian bytes of the proof nonce.
+2. It encodes each row with the codec that the validator's
+   `FamilyChallenge::prepare_witness_codec` supplies for that instance.
+
+The pallet decodes and checks every row with
+`FamilyChallenge::decode_witnesses`. One bad witness rejects the proof. The
+pool watch makes the same call before it stops a round for a pending family
+proof.
 
 `ChallengeFamily::admit` checks a descriptor against the contract table and the
 ordered topology. The descriptor is then fixed for that challenge.
