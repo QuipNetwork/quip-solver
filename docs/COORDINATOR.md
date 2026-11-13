@@ -22,9 +22,20 @@ how they fit together. For build and run commands, see `AGENTS.md`.
   Use this mode for benchmarking and comparisons under matched conditions.
 - `quip-coordinator seed-chain …` — registers a default topology and sets its
   difficulty on a fresh chain. You can seed a chain only once. Wipe the chain
-  data and restart the validator if `DefaultTopology` is already set. The calls
-  go through `Sudo`, so this works on runtime 119 and earlier. Runtime 120
-  has no `Sudo` pallet, and `seed-chain` refuses to run there.
+  data and restart the validator if `DefaultTopology` is already set. On
+  runtime 119 and earlier, the two calls go through `Sudo`. Runtime 120 has no
+  `Sudo` pallet. There, `seed-chain` sends one Foundation motion with
+  threshold 1:
+  `Foundation.propose(ValidatorAdmission.dispatch_as_root(Utility.batch_all(...)))`.
+  A threshold of 1 executes at once only when the signer is the sole
+  Foundation member, as `//Alice` is on the `dev` preset. A larger Foundation
+  needs a vote. With `--family-id`, `--family-revision`,
+  `--family-params-hex`, `--band-hard-milli`, and `--band-easy-milli`, the
+  batch registers a family topology. It then sets the difficulty and the
+  energy band, adds the topology to the mineable whitelist, and makes it the
+  default. Family topologies need runtime 120. The command reads
+  `DefaultTopology` back and fails unless it equals the locally computed hash,
+  because the outer extrinsic succeeds even when the batch inside it fails.
 
 ## Logging
 

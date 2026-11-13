@@ -7,20 +7,31 @@
 //! `MineableTopologies` whitelist entry itself when no default exists yet, so
 //! those two calls are the whole sequence.
 //!
-//! This module encodes the calls and drives the two-call seed sequence.
+//! This module encodes the calls and drives the seed sequence.
 //!
-//! Runtime 120 removed `pallet-sudo`, so the sequence only runs on runtime 119
-//! and earlier. On 120 and later `seed_chain` stops before it signs anything.
+//! Runtime 119 and earlier wrap each call in `Sudo`. Runtime 120 removed
+//! `pallet-sudo`, so there the calls go in one `Utility::batch_all` that
+//! `ValidatorAdmission::dispatch_as_root` runs with the Root origin, proposed
+//! as a Foundation motion with threshold 1. A threshold below 2 executes at
+//! once, so this path seeds a chain whose Foundation has one member, which
+//! is the `dev` preset (`//Alice`). A larger Foundation needs a real vote.
+//!
+//! A family topology is not made the default by `register_topology`, so its
+//! sequence adds the energy band, the whitelist entry, and the default.
 
 use super::real::{Confirmation, RealChainClient, SignedCallOutcome};
 use super::scale_types::{
-    DifficultyConfig, MinerKind, QUANTUM_POW_PALLET_INDEX, REGISTER_TOPOLOGY_CALL_INDEX,
-    SET_DIFFICULTY_CALL_INDEX, SUDO_CALL_INDEX, SUDO_PALLET_INDEX, SUDO_REMOVED_SPEC_VERSION,
+    DifficultyConfig, EnergyBandScale, FamilyDescriptorScale, MinerKind,
+    ADD_MINEABLE_TOPOLOGY_CALL_INDEX, BATCH_ALL_CALL_INDEX, DISPATCH_AS_ROOT_CALL_INDEX,
+    FOUNDATION_PALLET_INDEX, PROPOSE_CALL_INDEX, QUANTUM_POW_PALLET_INDEX,
+    REGISTER_TOPOLOGY_CALL_INDEX, SET_DEFAULT_TOPOLOGY_CALL_INDEX, SET_DIFFICULTY_CALL_INDEX,
+    SET_TOPOLOGY_ENERGY_BAND_CALL_INDEX, SUDO_CALL_INDEX, SUDO_PALLET_INDEX,
+    SUDO_REMOVED_SPEC_VERSION, UTILITY_PALLET_INDEX, VALIDATOR_ADMISSION_PALLET_INDEX,
 };
 use super::ChainError;
 use crate::drive::TopologySpec;
-use crate::topology::topology_hash_sets;
-use parity_scale_codec::Encode;
+use crate::topology::{family_topology_hash, topology_hash_sets, Topology};
+use parity_scale_codec::{Compact, Encode};
 use quantum_validation::AllowedValueSpec;
 
 /// The graph and allowed-value sets a `register_topology` call carries.
@@ -97,6 +108,134 @@ pub fn encode_set_difficulty(topology_hash: [u8; 32], difficulty: &DifficultyCon
     call
 }
 
+/// A family descriptor to register with the topology, and the energy band
+/// the difficulty controller runs on for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SeedFamily {
+    /// Family id, revision, and canonical parameter bytes.
+    pub descriptor: FamilyDescriptorScale,
+    /// Root-set band, `hard_milli < easy_milli`.
+    pub band: EnergyBandScale,
+}
+
+impl SeedFamily {
+    /// The family topology hash the pallet stores for `topology`.
+    ///
+    /// # Errors
+    /// Returns the admission code when this build refuses the descriptor on
+    /// the topology. The pallet would refuse it too.
+    pub fn topology_hash(&self, topology: &SeedTopology) -> Result<[u8; 32], String> {
+        let family_id = std::str::from_utf8(&self.descriptor.family_id)
+            .map_err(|_| "family id is not UTF-8".to_string())?;
+        let ordered = Topology::from_nodes_edges(
+            topology.nodes.clone(),
+            topology.edges.clone(),
+            &topology.allowed_h_milli,
+            &topology.allowed_j_milli,
+            &topology.allowed_spin_milli,
+        );
+        let admitted = crate::lease::ChallengeFamily::admit(
+            crate::lease::FAMILY_CONTRACTS,
+            family_id,
+            self.descriptor.revision,
+            self.descriptor.params.clone(),
+            &ordered,
+        )
+        .map_err(|code| format!("family {family_id} r{}: {code:?}", self.descriptor.revision))?;
+        Ok(family_topology_hash(
+            topology.topology_hash(),
+            *admitted.descriptor_digest(),
+            *admitted.topology_order_digest(),
+        ))
+    }
+}
+
+/// `QuantumPow.register_topology` with the runtime 120 seventh argument, the
+/// optional family descriptor. No `Sudo` prefix.
+#[must_use]
+pub fn register_topology_call(topology: &SeedTopology, family: Option<&SeedFamily>) -> Vec<u8> {
+    let mut call = vec![QUANTUM_POW_PALLET_INDEX, REGISTER_TOPOLOGY_CALL_INDEX];
+    (
+        topology.nodes.clone(),
+        topology.edges.clone(),
+        AllowedValueSpec::Set(topology.allowed_h_milli.clone()),
+        AllowedValueSpec::Set(topology.allowed_j_milli.clone()),
+        AllowedValueSpec::Set(topology.allowed_spin_milli.clone()),
+        family.map(|f| f.descriptor.clone()),
+    )
+        .encode_to(&mut call);
+    call
+}
+
+/// A `QuantumPow` call that takes a topology hash and then `args`.
+fn quantum_pow_hash_call(call_index: u8, topology_hash: [u8; 32], args: &impl Encode) -> Vec<u8> {
+    let mut call = vec![QUANTUM_POW_PALLET_INDEX, call_index];
+    call.extend_from_slice(&topology_hash);
+    args.encode_to(&mut call);
+    call
+}
+
+/// The Root calls that make `topology` the mineable default on runtime 120.
+///
+/// A legacy topology becomes the default when it is registered on a chain
+/// with none. A family topology does not, so it also needs its band, its
+/// whitelist entry, and the default pointer, in the order each call checks.
+#[must_use]
+pub fn seed_root_calls(
+    topology: &SeedTopology,
+    family: Option<&SeedFamily>,
+    topology_hash: [u8; 32],
+    difficulty: &DifficultyConfig,
+) -> Vec<Vec<u8>> {
+    let mut calls = vec![
+        register_topology_call(topology, family),
+        quantum_pow_hash_call(SET_DIFFICULTY_CALL_INDEX, topology_hash, difficulty),
+    ];
+    if let Some(family) = family {
+        calls.push(quantum_pow_hash_call(
+            SET_TOPOLOGY_ENERGY_BAND_CALL_INDEX,
+            topology_hash,
+            &family.band,
+        ));
+        calls.push(quantum_pow_hash_call(
+            ADD_MINEABLE_TOPOLOGY_CALL_INDEX,
+            topology_hash,
+            &(),
+        ));
+        calls.push(quantum_pow_hash_call(
+            SET_DEFAULT_TOPOLOGY_CALL_INDEX,
+            topology_hash,
+            &(),
+        ));
+    }
+    calls
+}
+
+/// `Foundation.propose(1, ValidatorAdmission.dispatch_as_root(Utility.batch_all(calls)))`.
+///
+/// Each `Box<RuntimeCall>` encodes as the call itself, and `Vec<RuntimeCall>`
+/// as a compact count followed by the calls.
+#[must_use]
+pub fn encode_foundation_root_motion(calls: &[Vec<u8>]) -> Vec<u8> {
+    let mut root = vec![
+        VALIDATOR_ADMISSION_PALLET_INDEX,
+        DISPATCH_AS_ROOT_CALL_INDEX,
+        UTILITY_PALLET_INDEX,
+        BATCH_ALL_CALL_INDEX,
+    ];
+    let count = u32::try_from(calls.len()).unwrap_or(u32::MAX);
+    Compact(count).encode_to(&mut root);
+    for call in calls {
+        root.extend_from_slice(call);
+    }
+    let mut motion = vec![FOUNDATION_PALLET_INDEX, PROPOSE_CALL_INDEX];
+    Compact(1u32).encode_to(&mut motion);
+    motion.extend_from_slice(&root);
+    let length_bound = u32::try_from(root.len()).unwrap_or(u32::MAX);
+    Compact(length_bound).encode_to(&mut motion);
+    motion
+}
+
 /// The difficulty a fresh chain starts at. These are the values the public
 /// testnet was seeded with. They are deliberately loose: a chain with no
 /// proof history has no difficulty curve to sit on, and a CPU miner has to be
@@ -132,6 +271,8 @@ pub struct SeedParams {
     pub topology: SeedTopology,
     /// The difficulty to set for that topology.
     pub difficulty: DifficultyConfig,
+    /// A family to register the topology under. Runtime 120 and later only.
+    pub family: Option<SeedFamily>,
 }
 
 /// What `seed_chain` did.
@@ -143,25 +284,26 @@ pub struct SeedReport {
     pub nodes: usize,
     /// Edge count in the registered graph.
     pub edges: usize,
-    /// Block that included `register_topology`.
-    pub register_block: String,
-    /// Block that included `set_difficulty`.
-    pub difficulty_block: String,
+    /// Whether the topology carries a family descriptor.
+    pub family: bool,
+    /// Each submitted extrinsic and the block that included it.
+    pub included: Vec<(&'static str, String)>,
 }
 
 /// Register `params.topology` as the chain default and set its difficulty.
 ///
-/// Refuses to run on runtime 120 and later, which have no `Sudo` pallet.
-/// Refuses to run when `DefaultTopology` is already set. The pallet writes that
+/// Runtime 119 and earlier take two `Sudo` calls. Runtime 120 and later take
+/// one Foundation motion (see the module docs), and only there can the
+/// topology carry a family. Refuses to run when `DefaultTopology` is already set. The pallet writes that
 /// value only when it is empty (`register_topology`), and a second registration
 /// would land a topology that no miner selects, so a chain that is already
 /// seeded has to be wiped rather than re-seeded.
 ///
 /// # Errors
-/// Returns an error when the validator is unreachable, when the runtime has
-/// no `Sudo` pallet, when a topology is already registered, when either call
-/// fails to dispatch, or when the hash the chain stored does not match the hash
-/// computed locally.
+/// Returns an error when the validator is unreachable, when a family is given
+/// for a runtime before 120, when a topology is already registered, when a
+/// call fails to dispatch, or when the hash the chain stored does not match
+/// the hash computed locally.
 pub async fn seed_chain(params: SeedParams) -> Result<SeedReport, ChainError> {
     let client = RealChainClient::new(
         vec![params.validator.clone()],
@@ -170,7 +312,6 @@ pub async fn seed_chain(params: SeedParams) -> Result<SeedReport, ChainError> {
     );
 
     let spec_version = super::real::parse_spec_version(&client.runtime_version_raw().await?)?;
-    require_sudo(spec_version)?;
 
     if let Some(existing) = client.default_topology().await? {
         return Err(ChainError::Submit(format!(
@@ -180,9 +321,72 @@ pub async fn seed_chain(params: SeedParams) -> Result<SeedReport, ChainError> {
         )));
     }
 
+    if spec_version >= SUDO_REMOVED_SPEC_VERSION {
+        return seed_through_foundation(&client, &params).await;
+    }
+    if params.family.is_some() {
+        return Err(ChainError::Submit(format!(
+            "runtime {spec_version} has no family topologies; they start at \
+             {SUDO_REMOVED_SPEC_VERSION}"
+        )));
+    }
+    seed_through_sudo(&client, &params).await
+}
+
+/// The runtime 120 path: one Foundation motion that runs every Root call.
+async fn seed_through_foundation(
+    client: &RealChainClient,
+    params: &SeedParams,
+) -> Result<SeedReport, ChainError> {
+    let family = params.family.as_ref();
+    let expected = match family {
+        Some(family) => family
+            .topology_hash(&params.topology)
+            .map_err(ChainError::Submit)?,
+        None => params.topology.topology_hash(),
+    };
+    let calls = seed_root_calls(&params.topology, family, expected, &params.difficulty);
+    let motion = encode_foundation_root_motion(&calls);
+    let block = dispatch(
+        client,
+        &motion,
+        "Foundation.propose(dispatch_as_root(batch_all))",
+        Confirmation::DefaultTopology,
+    )
+    .await?;
+
+    // The motion and the Root dispatch both succeed as extrinsics even when
+    // the batch inside fails; only the events carry that result. The batch is
+    // all-or-nothing and its last call sets the default, so the stored
+    // default equal to the local hash shows that every call landed.
+    let stored = client.default_topology().await?;
+    if stored != Some(expected) {
+        return Err(ChainError::Submit(format!(
+            "the motion was included in {block}, but DefaultTopology is {} \
+             instead of 0x{}; read the Foundation.Executed and \
+             ValidatorAdmission.RootDispatched events of that block for the \
+             inner error",
+            stored.map_or_else(|| "unset".to_string(), |h| format!("0x{}", hex_lower(&h))),
+            hex_lower(&expected)
+        )));
+    }
+    Ok(SeedReport {
+        topology_hash: expected,
+        nodes: params.topology.nodes.len(),
+        edges: params.topology.edges.len(),
+        family: family.is_some(),
+        included: vec![("Foundation root motion", block)],
+    })
+}
+
+/// The runtime 119 path: two `Sudo` calls.
+async fn seed_through_sudo(
+    client: &RealChainClient,
+    params: &SeedParams,
+) -> Result<SeedReport, ChainError> {
     let expected = params.topology.topology_hash();
     let register_block = dispatch(
-        &client,
+        client,
         &encode_register_topology(&params.topology),
         "register_topology",
         Confirmation::DefaultTopology,
@@ -209,7 +413,7 @@ pub async fn seed_chain(params: SeedParams) -> Result<SeedReport, ChainError> {
     }
 
     let difficulty_block = dispatch(
-        &client,
+        client,
         &encode_set_difficulty(expected, &params.difficulty),
         "set_difficulty",
         Confirmation::Difficulty {
@@ -222,21 +426,12 @@ pub async fn seed_chain(params: SeedParams) -> Result<SeedReport, ChainError> {
         topology_hash: expected,
         nodes: params.topology.nodes.len(),
         edges: params.topology.edges.len(),
-        register_block,
-        difficulty_block,
+        family: false,
+        included: vec![
+            ("register_topology", register_block),
+            ("set_difficulty", difficulty_block),
+        ],
     })
-}
-
-/// Stop when the runtime at `spec_version` has no `Sudo` pallet.
-fn require_sudo(spec_version: u32) -> Result<(), ChainError> {
-    if spec_version >= SUDO_REMOVED_SPEC_VERSION {
-        return Err(ChainError::Submit(format!(
-            "runtime {spec_version} has no Sudo pallet (removed at \
-             {SUDO_REMOVED_SPEC_VERSION}); seed this chain through a council \
-             motion that calls ValidatorAdmission::dispatch_as_root"
-        )));
-    }
-    Ok(())
 }
 
 /// Submit one call and return the block that included it.
@@ -246,11 +441,11 @@ async fn dispatch(
     what: &str,
     confirmation: Confirmation,
 ) -> Result<String, ChainError> {
-    tracing::info!(call = what, "submitting sudo call");
+    tracing::info!(call = what, "submitting root call");
     let (outcome, _) = client.submit_signed_call(call, confirmation).await?;
     match outcome {
         SignedCallOutcome::Success { block, .. } => {
-            tracing::info!(call = what, block = %block, "sudo call included");
+            tracing::info!(call = what, block = %block, "root call included");
             Ok(block)
         }
         SignedCallOutcome::DispatchFailed { error, .. } => Err(ChainError::Submit(format!(
@@ -290,14 +485,6 @@ mod tests {
 
     /// The call is the sudo and inner prefixes, then the arguments as the
     /// pallet tuple, with each allowed-value list as the `Set` variant.
-    #[test]
-    fn seeding_stops_on_a_runtime_without_sudo() {
-        assert!(require_sudo(119).is_ok());
-        let err = require_sudo(120).unwrap_err().to_string();
-        assert!(err.contains("runtime 120 has no Sudo pallet"), "{err}");
-        assert!(err.contains("dispatch_as_root"), "{err}");
-    }
-
     #[test]
     fn register_topology_call_is_the_prefixes_then_the_pallet_tuple() {
         let t = tiny();
@@ -388,5 +575,109 @@ mod tests {
                 "{preset}"
             );
         }
+    }
+
+    /// The solver-core live recipe `x-w62-p1200` of `quip/twisted-ice-dimer`
+    /// revision 1, frozen for the z(12, 4) live graph.
+    const TWISTED_W62_P1200: &str =
+        "010100020000000c00020001000000040300020000003e00040004000000b0040000";
+
+    fn twisted_dimer() -> SeedFamily {
+        SeedFamily {
+            descriptor: FamilyDescriptorScale {
+                family_id: b"quip/twisted-ice-dimer".to_vec(),
+                revision: 1,
+                params: crate::chain::extrinsic::hex_decode(TWISTED_W62_P1200).unwrap(),
+            },
+            band: EnergyBandScale {
+                hard_milli: -9_000_000,
+                easy_milli: -1_000_000,
+            },
+        }
+    }
+
+    fn advantage2() -> SeedTopology {
+        let text = crate::presets::preset_spec("advantage2-system1").unwrap();
+        SeedTopology::from_spec(&crate::drive::parse_topology_spec(text).unwrap())
+    }
+
+    /// The twisted dimer recipe admits on the Advantage2 preset, and its family
+    /// hash differs from the legacy hash of the same graph.
+    #[test]
+    fn the_twisted_dimer_recipe_admits_on_advantage2() {
+        let topology = advantage2();
+        let hash = twisted_dimer().topology_hash(&topology).unwrap();
+        assert_ne!(hash, topology.topology_hash());
+    }
+
+    /// A family seed is five Root calls in the order each one checks the one
+    /// before it. A legacy seed is two, because registration makes it the
+    /// default.
+    #[test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "the call count and each fixed-width prefix are asserted first"
+    )]
+    fn a_family_seed_sends_the_activation_calls_in_order() {
+        let topology = tiny();
+        let difficulty = DEFAULT_SEED_DIFFICULTY;
+        let hash = [9u8; 32];
+        let legacy = seed_root_calls(&topology, None, hash, &difficulty);
+        let family = twisted_dimer();
+        let calls = seed_root_calls(&topology, Some(&family), hash, &difficulty);
+        let prefixes: Vec<[u8; 2]> = calls.iter().map(|c| [c[0], c[1]]).collect();
+        assert_eq!(
+            prefixes,
+            [
+                [QUANTUM_POW_PALLET_INDEX, REGISTER_TOPOLOGY_CALL_INDEX],
+                [QUANTUM_POW_PALLET_INDEX, SET_DIFFICULTY_CALL_INDEX],
+                [
+                    QUANTUM_POW_PALLET_INDEX,
+                    SET_TOPOLOGY_ENERGY_BAND_CALL_INDEX
+                ],
+                [QUANTUM_POW_PALLET_INDEX, ADD_MINEABLE_TOPOLOGY_CALL_INDEX],
+                [QUANTUM_POW_PALLET_INDEX, SET_DEFAULT_TOPOLOGY_CALL_INDEX],
+            ]
+        );
+        assert_eq!(legacy.len(), 2);
+        // The legacy registration ends with `None`; the family one with
+        // `Some(descriptor)`.
+        assert_eq!(legacy[0].last(), Some(&0));
+        let mut tail = vec![1u8];
+        family.descriptor.encode_to(&mut tail);
+        assert!(calls[0].ends_with(&tail));
+        assert_eq!(&calls[2][2..34], &hash[..]);
+        assert_eq!(&calls[2][34..], &family.band.encode()[..]);
+        assert_eq!(
+            calls[3].len(),
+            34,
+            "add_mineable_topology takes only the hash"
+        );
+    }
+
+    /// The motion is `propose(Compact(1), dispatch_as_root(batch_all(calls)),
+    /// Compact(len))`, and the length bound is the inner call length.
+    #[test]
+    fn the_foundation_motion_wraps_the_batch_in_root_dispatch() {
+        let calls = vec![vec![10, 3, 0xaa], vec![10, 6, 0xbb, 0xcc]];
+        let motion = encode_foundation_root_motion(&calls);
+        let root = [
+            VALIDATOR_ADMISSION_PALLET_INDEX,
+            DISPATCH_AS_ROOT_CALL_INDEX,
+            UTILITY_PALLET_INDEX,
+            BATCH_ALL_CALL_INDEX,
+            0x08,
+            10,
+            3,
+            0xaa,
+            10,
+            6,
+            0xbb,
+            0xcc,
+        ];
+        let mut expected = vec![FOUNDATION_PALLET_INDEX, PROPOSE_CALL_INDEX, 0x04];
+        expected.extend_from_slice(&root);
+        Compact(u32::try_from(root.len()).unwrap()).encode_to(&mut expected);
+        assert_eq!(motion, expected);
     }
 }

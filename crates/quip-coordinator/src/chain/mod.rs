@@ -35,7 +35,8 @@ pub use scale_types::{
     MAX_ORDER_SOLUTIONS,
 };
 pub use seed::{
-    encode_register_topology, encode_set_difficulty, seed_chain, SeedParams, SeedReport,
+    encode_foundation_root_motion, encode_register_topology, encode_set_difficulty,
+    register_topology_call, seed_chain, seed_root_calls, SeedFamily, SeedParams, SeedReport,
     SeedTopology, DEFAULT_SEED_DIFFICULTY,
 };
 pub use snapshot::{head_state_key, round_root, DecayParams, MiningSnapshot};
