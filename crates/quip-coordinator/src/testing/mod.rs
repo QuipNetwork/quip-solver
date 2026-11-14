@@ -3,4 +3,5 @@
 //! release library.
 
 pub mod fake_chain;
+pub mod scripted_rpc;
 pub mod session_harness;

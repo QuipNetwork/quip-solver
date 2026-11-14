@@ -502,6 +502,82 @@ mod tests {
         get_body(tmp, &uri).await
     }
 
+    /// The attempt trail is written by `observe::attempt` and read here. The
+    /// other tests read hand-written JSON lines; this one reads exactly what
+    /// `AttemptRecord` serializes, so a renamed or retyped field fails here
+    /// instead of vanishing from the dashboard.
+    #[tokio::test]
+    async fn attempt_rows_parse_what_attempt_record_serializes() {
+        use crate::observe::attempt::AttemptRecord;
+        let record = |job_id: &str, energy: i64, accepted: bool, submitted: bool| AttemptRecord {
+            ts_ms: 1_700_000_000_123,
+            qblock_id: Some(42),
+            generation: 3,
+            miner_id: "cpu-0".into(),
+            job_id: job_id.into(),
+            is_pow: true,
+            order_id: String::new(),
+            best_energy_milli: energy,
+            raw_best_energy_milli: energy,
+            diversity_milli: 250,
+            n_valid: 6,
+            accepted,
+            submitted,
+            device_access_time_us: 12_000,
+            miner_type: "CPU".into(),
+            threshold_milli: -2_500_000,
+            last_proof_block_hash: LAST_PROOF_BLOCK_HASH.into(),
+            extrinsic_hash: submitted.then(|| EXTRINSIC_HASH.to_owned()),
+            chain_block_hash: submitted.then(|| CHAIN_BLOCK_HASH.to_owned()),
+            chain_block_number: submitted.then_some(10_249),
+            pow_sequence: submitted.then_some(412),
+        };
+        let rows: Vec<String> = [
+            record("aa", -14_000, true, false),
+            record("bb", -14_200, true, true),
+        ]
+        .iter()
+        .map(|rec| serde_json::to_string(rec).unwrap())
+        .collect();
+        let tmp = tempfile::tempdir().unwrap();
+        write_rows(tmp.path(), 42, &rows);
+
+        let v = attempts_body(tmp.path(), 42).await;
+        let attempts = at(&v, "/data/attempts").as_array().unwrap();
+        assert_eq!(attempts.len(), 2);
+        for (i, (job_id, energy, submitted)) in [("aa", -14_000, false), ("bb", -14_200, true)]
+            .into_iter()
+            .enumerate()
+        {
+            let row = attempts.get(i).unwrap();
+            assert_eq!(at(row, "/job_id"), &json!(job_id), "row {i}");
+            assert_eq!(at(row, "/miner_id"), &json!("cpu-0"), "row {i}");
+            assert_eq!(at(row, "/miner_type"), &json!("CPU"), "row {i}");
+            assert_eq!(at(row, "/best_energy_milli"), &json!(energy), "row {i}");
+            assert_eq!(at(row, "/num_valid"), &json!(6), "row {i}");
+            assert_eq!(at(row, "/diversity_milli"), &json!(250), "row {i}");
+            assert_eq!(at(row, "/accepted"), &json!(true), "row {i}");
+            assert_eq!(at(row, "/submitted"), &json!(submitted), "row {i}");
+            assert_eq!(at(row, "/qpu_access_time_us"), &json!(12_000), "row {i}");
+            assert_eq!(
+                at(row, "/ts_ns"),
+                &json!("1700000000123000000"),
+                "row {i}: milliseconds become nanoseconds, as a string"
+            );
+        }
+        // The submitted row supplies the submission's chain facts.
+        let s = at(&v, "/data/submission");
+        assert_eq!(at(s, "/threshold_milli"), &json!(-2_500_000));
+        assert_eq!(
+            at(s, "/last_proof_block_hash"),
+            &json!(LAST_PROOF_BLOCK_HASH)
+        );
+        assert_eq!(at(s, "/extrinsic_hash"), &json!(EXTRINSIC_HASH));
+        assert_eq!(at(s, "/chain_block_hash"), &json!(CHAIN_BLOCK_HASH));
+        assert_eq!(at(s, "/chain_block_number"), &json!(10_249));
+        assert_eq!(at(s, "/pow_sequence"), &json!(412));
+    }
+
     /// Sentinel handling across the attempt trail, one directory per shape.
     #[tokio::test]
     async fn attempt_energy_sentinels_never_reach_the_response() {
