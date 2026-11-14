@@ -235,7 +235,20 @@ pub(crate) fn parse_spec_version(rv: &Value) -> Result<u32, ChainError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chain::client::jsonrpsee::{rpc_request, RPC_CONNECT_TIMEOUT, RPC_REQUEST_TIMEOUT};
+    use crate::chain::client::jsonrpsee::{JsonrpseeTransport, RpcTimeouts};
+    use crate::chain::client::transport::RpcTransport;
+    use std::sync::Arc;
+
+    /// Short budgets so the silent-peer tests wait milliseconds, not the
+    /// production 5 s and 15 s.
+    const TEST_TIMEOUTS: RpcTimeouts = RpcTimeouts {
+        connect: Duration::from_millis(200),
+        request: Duration::from_millis(200),
+    };
+
+    fn test_transport() -> JsonrpseeTransport {
+        JsonrpseeTransport::with_timeouts(TEST_TIMEOUTS)
+    }
 
     #[test]
     fn parse_spec_version_reads_the_number_and_rejects_absence() {
@@ -280,7 +293,8 @@ mod tests {
     /// for scheduler jitter on a loaded CI host. Must stay well under the
     /// test's outer timeout so a hang fails the test, not the harness.
     fn single_endpoint_budget() -> Duration {
-        RPC_CONNECT_TIMEOUT
+        TEST_TIMEOUTS
+            .connect
             .saturating_mul(2)
             .saturating_add(Duration::from_secs(5))
     }
@@ -288,9 +302,10 @@ mod tests {
     /// Upper bound when the first endpoint blackholes and the second refuses:
     /// one connect timeout plus a refused connect, with CI slack.
     fn failover_budget() -> Duration {
-        RPC_CONNECT_TIMEOUT
+        TEST_TIMEOUTS
+            .connect
             .saturating_mul(3)
-            .saturating_add(RPC_REQUEST_TIMEOUT)
+            .saturating_add(TEST_TIMEOUTS.request)
             .saturating_add(Duration::from_secs(5))
     }
 
@@ -299,11 +314,13 @@ mod tests {
         let addr = spawn_blackhole_listener().await;
         let url = format!("http://{addr}");
         // HTTP has no separate connect timeout; request_timeout covers the hang.
-        let budget = RPC_REQUEST_TIMEOUT.saturating_add(Duration::from_secs(10));
+        let budget = TEST_TIMEOUTS
+            .request
+            .saturating_add(Duration::from_secs(10));
         let started = Instant::now();
         let outcome = tokio::time::timeout(
             budget,
-            rpc_request(&url, "system_health", JsonValue::Array(vec![])),
+            test_transport().request(&url, "system_health", JsonValue::Array(vec![])),
         )
         .await;
         assert!(outcome.is_ok(), "http blackhole call hung past {budget:?}");
@@ -325,7 +342,7 @@ mod tests {
     /// `rpc_call` whose primary blackholes must fail over to the next
     /// validator. `rpc_call` fails over on any error, so the failover path
     /// alone cannot show that the blackhole error classifies as
-    /// `Unavailable`. Both calls wait out one real `RPC_CONNECT_TIMEOUT`, so
+    /// `Unavailable`. Both calls wait out one `TEST_TIMEOUTS.connect`, so
     /// they run concurrently to pay for that wait once.
     #[tokio::test]
     async fn ws_blackhole_errors_within_connect_budget_and_rpc_call_fails_over_past_it() {
@@ -333,16 +350,17 @@ mod tests {
         let url = format!("ws://{addr}");
         // Primary accepts and stays silent. Secondary refuses immediately so
         // the call ends after one connect timeout plus a fast connection error.
-        let client = RealChainClient::new(
+        let client = RealChainClient::with_transport(
             vec![url.clone(), "ws://127.0.0.1:1".to_string()],
             "//Alice".to_string(),
             MinerKind::Cpu,
+            Arc::new(test_transport()),
         );
         let single = async {
             let started = Instant::now();
             let outcome = tokio::time::timeout(
                 single_endpoint_budget(),
-                rpc_request(&url, "system_health", JsonValue::Array(vec![])),
+                test_transport().request(&url, "system_health", JsonValue::Array(vec![])),
             )
             .await;
             (outcome, started.elapsed())
@@ -394,8 +412,9 @@ mod tests {
         // And it must have waited long enough that the connect timeout fired
         // (not instant success / skip). A refused-only pair would be near 0.
         assert!(
-            failover_elapsed >= RPC_CONNECT_TIMEOUT,
-            "expected at least one connect timeout ({RPC_CONNECT_TIMEOUT:?}), got {failover_elapsed:?}"
+            failover_elapsed >= TEST_TIMEOUTS.connect,
+            "expected at least one connect timeout ({:?}), got {failover_elapsed:?}",
+            TEST_TIMEOUTS.connect
         );
     }
 }

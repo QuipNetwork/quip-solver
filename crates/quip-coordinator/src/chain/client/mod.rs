@@ -83,7 +83,7 @@ impl RealChainClient {
             last_spin_spec: Mutex::new(None),
             topology: Mutex::new(None),
             tx_context: Mutex::new(None),
-            transport: Arc::new(JsonrpseeTransport),
+            transport: Arc::new(JsonrpseeTransport::default()),
             reachable: Mutex::new(None),
             participate_kind,
             registered_solver: Mutex::new(None),

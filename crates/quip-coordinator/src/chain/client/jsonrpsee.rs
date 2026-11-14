@@ -24,20 +24,43 @@ pub(crate) const RPC_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// node; it does not wait a full minute before moving on.
 pub(crate) const RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
-pub(crate) async fn rpc_request(
+/// The two budgets a transport applies to every call.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RpcTimeouts {
+    /// See [`RPC_CONNECT_TIMEOUT`].
+    pub(crate) connect: Duration,
+    /// See [`RPC_REQUEST_TIMEOUT`].
+    pub(crate) request: Duration,
+}
+
+impl RpcTimeouts {
+    /// The production budgets.
+    pub(crate) const PRODUCTION: Self = Self {
+        connect: RPC_CONNECT_TIMEOUT,
+        request: RPC_REQUEST_TIMEOUT,
+    };
+}
+
+async fn rpc_request(
+    timeouts: RpcTimeouts,
     url: &str,
     method: &str,
     params: Value,
 ) -> Result<Value, ChainError> {
     // Support both ws:// and http(s):// via jsonrpsee.
     if url.starts_with("ws://") || url.starts_with("wss://") {
-        rpc_ws(url, method, params).await
+        rpc_ws(timeouts, url, method, params).await
     } else {
-        rpc_http(url, method, params).await
+        rpc_http(timeouts, url, method, params).await
     }
 }
 
-async fn rpc_http(url: &str, method: &str, params: Value) -> Result<Value, ChainError> {
+async fn rpc_http(
+    timeouts: RpcTimeouts,
+    url: &str,
+    method: &str,
+    params: Value,
+) -> Result<Value, ChainError> {
     use jsonrpsee::core::client::ClientT;
     use jsonrpsee::http_client::HttpClientBuilder;
 
@@ -45,7 +68,7 @@ async fn rpc_http(url: &str, method: &str, params: Value) -> Result<Value, Chain
     // wraps the full transport send (connect + response), so one budget covers
     // both phases and surfaces as Unavailable for failover.
     let client = HttpClientBuilder::default()
-        .request_timeout(RPC_REQUEST_TIMEOUT)
+        .request_timeout(timeouts.request)
         .build(url)
         .map_err(|e| ChainError::Unavailable(format!("http client: {e}")))?;
     let result: Value = client
@@ -55,7 +78,12 @@ async fn rpc_http(url: &str, method: &str, params: Value) -> Result<Value, Chain
     Ok(result)
 }
 
-async fn rpc_ws(url: &str, method: &str, params: Value) -> Result<Value, ChainError> {
+async fn rpc_ws(
+    timeouts: RpcTimeouts,
+    url: &str,
+    method: &str,
+    params: Value,
+) -> Result<Value, ChainError> {
     use jsonrpsee::core::client::ClientT;
     use jsonrpsee::ws_client::WsClientBuilder;
 
@@ -63,10 +91,10 @@ async fn rpc_ws(url: &str, method: &str, params: Value) -> Result<Value, ChainEr
     // accepts and never completes the WebSocket handshake still hangs build(),
     // so the whole build is wrapped in the same connect budget.
     let build = WsClientBuilder::default()
-        .connection_timeout(RPC_CONNECT_TIMEOUT)
-        .request_timeout(RPC_REQUEST_TIMEOUT)
+        .connection_timeout(timeouts.connect)
+        .request_timeout(timeouts.request)
         .build(url);
-    let client = match tokio::time::timeout(RPC_CONNECT_TIMEOUT, build).await {
+    let client = match tokio::time::timeout(timeouts.connect, build).await {
         Ok(Ok(client)) => client,
         Ok(Err(e)) => {
             return Err(ChainError::Unavailable(format!("ws client: {e}")));
@@ -74,7 +102,7 @@ async fn rpc_ws(url: &str, method: &str, params: Value) -> Result<Value, ChainEr
         Err(_) => {
             return Err(ChainError::Unavailable(format!(
                 "ws connect timed out after {}s",
-                RPC_CONNECT_TIMEOUT.as_secs()
+                timeouts.connect.as_secs()
             )));
         }
     };
@@ -104,12 +132,31 @@ fn rpc_params_from_value(params: Value) -> jsonrpsee::core::params::ArrayParams 
 
 /// Native transport over jsonrpsee. Opens a fresh connection per request, so a
 /// dropped socket costs one call rather than wedging the client.
-pub struct JsonrpseeTransport;
+pub struct JsonrpseeTransport {
+    timeouts: RpcTimeouts,
+}
+
+impl Default for JsonrpseeTransport {
+    fn default() -> Self {
+        Self {
+            timeouts: RpcTimeouts::PRODUCTION,
+        }
+    }
+}
+
+impl JsonrpseeTransport {
+    /// A transport with caller-chosen budgets, for tests that wait out a
+    /// silent peer.
+    #[cfg(test)]
+    pub(crate) fn with_timeouts(timeouts: RpcTimeouts) -> Self {
+        Self { timeouts }
+    }
+}
 
 #[async_trait]
 impl RpcTransport for JsonrpseeTransport {
     async fn request(&self, url: &str, method: &str, params: Value) -> Result<Value, ChainError> {
-        rpc_request(url, method, params).await
+        rpc_request(self.timeouts, url, method, params).await
     }
 
     async fn subscribe(
@@ -122,17 +169,18 @@ impl RpcTransport for JsonrpseeTransport {
         use jsonrpsee::core::client::{Subscription, SubscriptionClientT};
         use jsonrpsee::ws_client::WsClientBuilder;
 
+        let timeouts = self.timeouts;
         let build = WsClientBuilder::default()
-            .connection_timeout(RPC_CONNECT_TIMEOUT)
-            .request_timeout(RPC_REQUEST_TIMEOUT)
+            .connection_timeout(timeouts.connect)
+            .request_timeout(timeouts.request)
             .build(url);
-        let client = match tokio::time::timeout(RPC_CONNECT_TIMEOUT, build).await {
+        let client = match tokio::time::timeout(timeouts.connect, build).await {
             Ok(Ok(c)) => c,
             Ok(Err(e)) => return Err(ChainError::Unavailable(format!("ws client: {e}"))),
             Err(_) => {
                 return Err(ChainError::Unavailable(format!(
                     "ws connect timed out after {}s",
-                    RPC_CONNECT_TIMEOUT.as_secs()
+                    timeouts.connect.as_secs()
                 )))
             }
         };
