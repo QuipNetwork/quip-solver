@@ -33,7 +33,9 @@ max_submit_attempts = 5
 [cpu]
 binary = "quip-cpu-sa"        # or quip-cpu-gibbs, quip-cpu-sb, or any
 # experimental kernel fetch-miners.sh found (quip-cpu-bsb, -hdsb, -hbsb, -gbsb,
-# -gdsb, -tedsb, -sbqa, -ggdsb, -fsa, -msa, -mps, -mfa, -flatiron). The
+# -gdsb, -tedsb, -sbqa, -ggdsb, -fsa, -msa, -mps, -mfa, -flatiron, -greedy), or
+# a family kernel (quip-cpu-otsuka, -dimer, -ice-sat, -pairworm, -flow,
+# -flow-loops, -tileworm, -gadget-repair, -routing, -dipolar). The
 # experimental set is present only when the quip-solver-cpu release published it;
 # `ls miners/quip-cpu-*` shows what this host has.
 queue_depth = 3

@@ -167,23 +167,26 @@ fetch() {
 }
 
 # Experimental CPU kernels, fetched alongside the production three. These build
-# behind quip-solver-cpu's opt-in `experimental` cargo feature, and that repo has
-# not attached them to a release yet, so every name here is optional: the ones a
-# release carries land in DEST and the rest are skipped without failing an image
-# build. They are inert until a config.toml `[cpu] binary =` names one.
+# behind quip-solver-cpu's opt-in `experimental` cargo feature, so every name
+# here is optional: the ones a release carries land in DEST and the rest are
+# skipped without failing an image build. They are inert until a config.toml
+# `[cpu] binary =` names one.
 # Source of truth for the list: the binaries table in quip-solver-cpu's README.
 CPU_EXPERIMENTAL=(
   quip-cpu-bsb quip-cpu-hdsb quip-cpu-hbsb quip-cpu-gbsb quip-cpu-gdsb
   quip-cpu-tedsb quip-cpu-sbqa quip-cpu-ggdsb quip-cpu-fsa quip-cpu-msa
-  quip-cpu-mps quip-cpu-mfa quip-cpu-flatiron
+  quip-cpu-mps quip-cpu-mfa quip-cpu-flatiron quip-cpu-greedy
 )
 
 # CPU miners that link a canonical family generator. The production kernels
 # declare only the generic tier, so the router refuses them every family lease
-# with GeneratorUnsupported. quip-cpu-otsuka and quip-cpu-dimer generate
-# quip/twisted-ice-dimer revision 1. Optional for the same reason as above.
+# with GeneratorUnsupported. Each of these runs its own method on its families
+# and a generic sampler on every other job. Optional for the same reason as
+# above.
 CPU_FAMILY=(
-  quip-cpu-otsuka quip-cpu-dimer
+  quip-cpu-otsuka quip-cpu-dimer quip-cpu-ice-sat quip-cpu-pairworm
+  quip-cpu-flow quip-cpu-flow-loops quip-cpu-tileworm quip-cpu-gadget-repair
+  quip-cpu-routing quip-cpu-dipolar
 )
 
 # Decide which backends this run wants.
