@@ -2,6 +2,7 @@
 //! miner session server, and process supervision for the v0.3 protocol.
 
 pub mod attempt;
+pub mod cancel_timing;
 pub mod chain;
 pub mod config;
 pub mod dashboard;

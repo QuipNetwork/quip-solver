@@ -179,9 +179,13 @@ struct MinerQueue {
     /// Lease salts the miner finished for the current round. Reset when a new
     /// round starts, not when the miner re-registers.
     round_salts: u64,
-    /// Jobs this miner finished (Result or Reject) since it registered.
+    /// Jobs this miner finished with a `Result` since it registered.
     /// The heartbeat reads this total. Polls do not reset it.
     completed: u64,
+    /// Jobs this miner answered with a `Reject` since it registered. Kept
+    /// apart from `completed` so a miner that refuses everything does not
+    /// read as one that mines.
+    rejected: u64,
     unsupported_kinds: HashSet<i32>,
     /// Family cases this miner rejected. A capability snapshot clears them.
     rejected_families: HashSet<FamilyCase>,
@@ -325,6 +329,7 @@ impl Router {
                         salts_since_poll: 0,
                         round_salts: 0,
                         completed: 0,
+                        rejected: 0,
                         unsupported_kinds: HashSet::new(),
                         rejected_families: HashSet::new(),
                     },
@@ -499,11 +504,24 @@ impl Router {
             .map_or(0, |q| std::mem::take(&mut q.consumed_since_poll))
     }
 
-    /// Record that `miner_id` finished a job (Result or Reject).
+    /// Record that `miner_id` finished a job with a `Result` or `LeaseDone`.
     pub fn record_completion(&mut self, miner_id: &str) {
         if let Some(q) = self.miners.get_mut(miner_id) {
             q.completed = q.completed.saturating_add(1);
         }
+    }
+
+    /// Record that `miner_id` answered a job with a `Reject`.
+    pub fn record_reject(&mut self, miner_id: &str) {
+        if let Some(q) = self.miners.get_mut(miner_id) {
+            q.rejected = q.rejected.saturating_add(1);
+        }
+    }
+
+    /// Jobs `miner_id` has rejected since it registered. 0 if unknown.
+    #[must_use]
+    pub fn jobs_rejected(&self, miner_id: &str) -> u64 {
+        self.miners.get(miner_id).map_or(0, |q| q.rejected)
     }
 
     /// Jobs `miner_id` has finished since it registered. 0 if unknown.
@@ -1076,6 +1094,21 @@ mod tests {
         assert_eq!(r.take_consumed("unknown"), 0);
         assert_eq!(r.jobs_completed("cpu-0"), 3);
         assert_eq!(r.jobs_completed("unknown"), 0);
+    }
+
+    /// A reject is not mining work: it moves its own counter and leaves the
+    /// completion total that the throughput heartbeat reports alone.
+    #[test]
+    fn rejects_count_apart_from_completions() {
+        let mut r = Router::new();
+        r.register_miner("cpu-0", caps_ising());
+        r.record_completion("cpu-0");
+        r.record_reject("cpu-0");
+        r.record_reject("cpu-0");
+        r.record_reject("unknown");
+        assert_eq!(r.jobs_completed("cpu-0"), 1);
+        assert_eq!(r.jobs_rejected("cpu-0"), 2);
+        assert_eq!(r.jobs_rejected("unknown"), 0);
     }
 
     #[test]

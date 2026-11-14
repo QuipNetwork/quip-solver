@@ -1,5 +1,6 @@
 //! tonic `MinerService` server: token verify, handshake, job dispatch, results.
 
+use crate::cancel_timing::{CancelLatency, CancelTiming};
 use crate::chain::{
     ChainClient, ChainError, Proof, SubmitAction, SubmitReceipt, MAX_ORDER_SOLUTIONS,
 };
@@ -10,7 +11,7 @@ use quip_proto::v1::miner_service_server::{MinerService, MinerServiceServer};
 use quip_proto::v1::{
     coord_msg, miner_msg, Capabilities, Configure, CoordMsg, MinerMsg, Shutdown, Welcome,
 };
-use quip_protocol::session::{SessionConfig, PROTOCOL_VERSION};
+use quip_protocol::session::PROTOCOL_VERSION;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::Path;
@@ -28,18 +29,6 @@ use tonic::{Request, Response, Status, Streaming};
 /// Grants are single `u32`s, so this only absorbs a burst of `JobRequest`s
 /// arriving while the dispatcher is mid-send.
 const GRANT_CHANNEL_DEPTH: usize = 1024;
-
-/// Credits the coordinator grants when the miner sends `Ready`.
-///
-/// `queue_depth = 0` on the wire means the operator set no depth, and the miner
-/// picks its own. The miner SDKs then run at their default of 3 and size their
-/// credit window on the assumption that the coordinator seeds that same 3, so
-/// the seed comes from the depth `SessionConfig` resolves, not the wire value.
-/// A miner that wants a deeper pipeline, such as the D-Wave miner, grants the
-/// rest itself with `JobRequest`; the seed adds to that and never caps it.
-pub(crate) fn seed_credits(configure: &Configure) -> u32 {
-    SessionConfig::from_configure(String::new(), configure).queue_depth
-}
 
 /// Grant `credits` and send every job the miner is now entitled to.
 ///
@@ -196,6 +185,8 @@ pub struct CoordinatorState {
     /// job completes. The feeder sends a zero-credit grant here after it stages
     /// work, which re-runs the drain without changing the credit balance.
     pub wakeups: HashMap<String, mpsc::Sender<u32>>,
+    /// Live per-session `Cancel` timing, registered beside `outbound`.
+    pub(crate) cancel_timings: HashMap<String, Arc<CancelTiming>>,
     /// `job_id` (nonce) → the 32-byte salt it was derived from, so the winning
     /// `Proof` carries the salt live submit requires. Recorded when the feeder
     /// stages a job, consumed on its `Result`, cleared on reseed.
@@ -260,6 +251,7 @@ impl CoordinatorState {
             inflight_owner: HashMap::new(),
             lease_issued_at: HashMap::new(),
             outbound: HashMap::new(),
+            cancel_timings: HashMap::new(),
             wakeups: HashMap::new(),
             salts: HashMap::new(),
             current_best_milli: None,
@@ -396,6 +388,7 @@ impl CoordinatorState {
         }
         jobs.extend(self.router.reclaim(miner_id));
         let _ = self.outbound.remove(miner_id);
+        let _ = self.cancel_timings.remove(miner_id);
         jobs
     }
 
@@ -460,6 +453,7 @@ impl CoordinatorState {
     pub fn deregister_outbound(&mut self, miner_id: &str) {
         let _ = self.outbound.remove(miner_id);
         let _ = self.wakeups.remove(miner_id);
+        let _ = self.cancel_timings.remove(miner_id);
     }
 }
 
@@ -481,7 +475,7 @@ pub struct CoordinatorService<C: ChainClient + 'static> {
 
 #[tonic::async_trait]
 impl<C: ChainClient + 'static> MinerService for CoordinatorService<C> {
-    type SessionStream = ReceiverStream<Result<CoordMsg, Status>>;
+    type SessionStream = OutboundStream;
 
     async fn session(
         &self,
@@ -492,13 +486,45 @@ impl<C: ChainClient + 'static> MinerService for CoordinatorService<C> {
         let state = Arc::clone(&self.state);
         let chain = Arc::clone(&self.chain);
         let submit_notify = Arc::clone(&self.submit_notify);
+        let cancel_timing = Arc::new(CancelTiming::default());
+        let outbound = outbound_stream(rx, Arc::clone(&cancel_timing));
 
         drop(tokio::spawn(async move {
-            run_session(&mut inbound, &tx, state, chain, submit_notify).await;
+            run_session(
+                &mut inbound,
+                &tx,
+                state,
+                chain,
+                submit_notify,
+                cancel_timing,
+            )
+            .await;
         }));
 
-        Ok(Response::new(ReceiverStream::new(rx)))
+        Ok(Response::new(outbound))
     }
+}
+
+/// A session's outbound messages as the transport reads them.
+pub type OutboundStream =
+    std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<CoordMsg, Status>> + Send>>;
+
+/// Wrap a session's outbound channel so `timing` sees each message at the
+/// moment the transport takes it off the channel.
+#[expect(
+    clippy::result_large_err,
+    reason = "tonic fixes the stream item as Result<CoordMsg, Status>"
+)]
+fn outbound_stream(
+    rx: mpsc::Receiver<Result<CoordMsg, Status>>,
+    timing: Arc<CancelTiming>,
+) -> OutboundStream {
+    Box::pin(ReceiverStream::new(rx).map(move |item| {
+        if let Ok(msg) = &item {
+            timing.observe_outbound(msg);
+        }
+        item
+    }))
 }
 
 /// One validated proof-of-work outcome to settle.
@@ -793,9 +819,10 @@ pub(crate) async fn handle_lease_result<C: ChainClient>(
         tracing::debug!(miner = %miner_id, "lease result reports no solutions; dropping");
         return;
     }
-    let (verified, validated) = match crate::lease::verify_and_select(
-        generator, &view, &target, &result,
-    ) {
+    let started = tokio::time::Instant::now();
+    let verification = crate::lease::verify_and_select(generator, &view, &target, &result);
+    log_validation(miner_id, &result.job_id, started.elapsed());
+    let (verified, validated) = match verification {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(miner = %miner_id, error = %e, "lease result failed verification; dropping");
@@ -875,6 +902,7 @@ async fn run_session<C: ChainClient>(
     state: Arc<Mutex<CoordinatorState>>,
     chain: Arc<C>,
     submit_notify: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    cancel_timing: Arc<CancelTiming>,
 ) {
     // 1. Hello
     let Some(Ok(MinerMsg {
@@ -947,7 +975,6 @@ async fn run_session<C: ChainClient>(
     {
         return;
     }
-    let seed_credits = seed_credits(&configure);
     if tx
         .send(Ok(coord(coord_msg::Msg::Configure(configure))))
         .await
@@ -971,7 +998,13 @@ async fn run_session<C: ChainClient>(
 
     // Register this session's outbound channel so the supervisor can push an
     // in-band Shutdown/cancel while it runs; dropped when the loop exits.
-    state.lock().await.register_outbound(&miner_id, tx.clone());
+    {
+        let mut st = state.lock().await;
+        st.register_outbound(&miner_id, tx.clone());
+        let _ = st
+            .cancel_timings
+            .insert(miner_id.clone(), Arc::clone(&cancel_timing));
+    }
 
     // Declared before the dispatcher so the wakeup sender can be registered
     // alongside it; see `wake_dispatcher`.
@@ -1006,16 +1039,14 @@ async fn run_session<C: ChainClient>(
             break;
         };
         match msg.msg {
-            // Seed credits from Configure so the first job can dispatch before
-            // the miner sends JobRequest (quip-mock-miner only requests after
-            // completing a job). Routed through the dispatcher like every other
-            // grant, so it never sends on the read path.
+            // Ready says the session is established, not that the miner wants
+            // work. A miner that has nothing to spend, such as a QPU with an
+            // exhausted budget, sends no JobRequest, so it receives no jobs.
             Some(miner_msg::Msg::Ready(_)) => {
-                tracing::debug!(miner = %miner_id, credits = seed_credits, "miner ready; seeding credits");
-                if grants.send(seed_credits).await.is_err() {
-                    break 'session;
-                }
+                tracing::debug!(miner = %miner_id, "miner ready; dispatch waits for its JobRequest");
             }
+            // The only source of dispatch credit. Routed through the dispatcher
+            // so a job send never blocks the read path.
             Some(miner_msg::Msg::JobRequest(req)) => {
                 tracing::debug!(miner = %miner_id, credits = req.credits, "miner requested work");
                 if grants.send(req.credits).await.is_err() {
@@ -1083,7 +1114,9 @@ async fn run_session<C: ChainClient>(
                         st_metrics_stale(&state, &miner_id).await;
                     }
                     if let Some(ising) = job.ising.as_ref() {
+                        let started = tokio::time::Instant::now();
                         let validated = validate_result(ising, &result.solutions, &gates, &topo);
+                        log_validation(&miner_id, &result.job_id, started.elapsed());
                         settle_pow_result(
                             chain.as_ref(),
                             &state,
@@ -1113,11 +1146,14 @@ async fn run_session<C: ChainClient>(
                 // miner's reject path), so the coordinator only re-routes the
                 // job to a capable miner; an unknown job_id needs nothing.
                 if let Some(job) = st.complete_inflight(&rej.job_id) {
-                    st.router.record_completion(&miner_id);
+                    st.router.record_reject(&miner_id);
                     st.router.on_reject(&miner_id, job, rej.reason);
                 }
             }
             Some(miner_msg::Msg::Status(s)) => {
+                if let Some(latency) = cancel_timing.acknowledge(s.abandoned_generation) {
+                    log_cancel_acknowledged(&miner_id, s.abandoned_generation, &latency);
+                }
                 let mut st = state.lock().await;
                 if s.abandoned_generation > 0 {
                     st.last_abandoned_generation = s.abandoned_generation;
@@ -1176,19 +1212,61 @@ async fn run_session<C: ChainClient>(
     state.lock().await.deregister_outbound(&miner_id);
 }
 
-/// Push a cancel for generations `<= max_generation` to a live session channel.
+/// Push a cancel for generations `<= max_generation` to a live session
+/// channel, timing it on `timing` when the session has one.
 ///
 /// # Errors
 ///
 /// Returns a send error if the session channel is closed.
-pub async fn send_cancel(
+pub(crate) async fn send_cancel(
     tx: &mpsc::Sender<Result<CoordMsg, Status>>,
+    timing: Option<&CancelTiming>,
     max_generation: u64,
 ) -> Result<(), mpsc::error::SendError<Result<CoordMsg, Status>>> {
+    if let Some(t) = timing {
+        t.send_started(max_generation);
+    }
     tx.send(Ok(coord(coord_msg::Msg::Cancel(quip_proto::v1::Cancel {
         max_generation,
     }))))
-    .await
+    .await?;
+    if let Some(t) = timing {
+        t.enqueued(max_generation);
+    }
+    Ok(())
+}
+
+/// Report how long one miner took to acknowledge a `Cancel`, split into the
+/// intervals [`CancelLatency`] describes. An interval the transport never
+/// observed prints as `-`.
+fn log_cancel_acknowledged(miner_id: &str, abandoned_generation: u64, latency: &CancelLatency) {
+    let ms = |d: Option<Duration>| {
+        d.map_or_else(
+            || "-".to_owned(),
+            |d| format!("{:.1}", d.as_secs_f64() * 1000.0),
+        )
+    };
+    tracing::info!(
+        miner = %miner_id,
+        max_generation = latency.max_generation,
+        abandoned_generation,
+        send_wait_ms = %ms(latency.send_wait),
+        queue_delay_ms = %ms(latency.queue_delay),
+        ack_wait_ms = %ms(latency.ack_wait),
+        total_ms = %ms(Some(latency.total)),
+        "miner acknowledged cancel"
+    );
+}
+
+/// Report how long one result took to validate. Debug, because lease
+/// results arrive once per salt.
+fn log_validation(miner_id: &str, job_id: &[u8], elapsed: Duration) {
+    tracing::debug!(
+        miner = %miner_id,
+        job = %short_job_id(job_id),
+        validation_us = elapsed.as_micros(),
+        "result validated"
+    );
 }
 
 /// Validate a mempool result against its order's gates and answer the order
@@ -1416,20 +1494,6 @@ mod tests {
         Job, JobKind, LeaseDone, Provenance, Result as WireResult, SetTarget, Solution,
     };
     use quip_protocol::lease::{LeaseSpec, TopologyView};
-
-    /// An unset depth on the wire still seeds the 3 credits the miner SDKs
-    /// count on, so a depth-3 miner keeps its dispatch rate; an explicit depth
-    /// seeds itself.
-    #[test]
-    fn seed_credits_follow_the_effective_depth() {
-        let depth = |queue_depth| Configure {
-            queue_depth,
-            ..Configure::default()
-        };
-        assert_eq!(seed_credits(&depth(0)), 3);
-        assert_eq!(seed_credits(&depth(1)), 1);
-        assert_eq!(seed_credits(&depth(7)), 7);
-    }
 
     fn lease_snapshot() -> crate::chain::snapshot::MiningSnapshot {
         let nodes = vec![0, 1, 2, 3];
@@ -2193,6 +2257,7 @@ mod tests {
             Arc::clone(&state),
             Arc::new(FakeChain::new(lease_snapshot(), None)),
             Arc::new(Mutex::new(None)),
+            Arc::new(CancelTiming::default()),
         )
         .await;
         let st = state.lock().await;
@@ -2245,5 +2310,266 @@ mod tests {
                 ..Job::default()
             }
         ));
+    }
+
+    /// One in-process session. The test plays the miner on `miner` and the
+    /// transport on `outbound`.
+    struct LiveSession {
+        miner: mpsc::Sender<MinerMsg>,
+        outbound: OutboundStream,
+        tx: mpsc::Sender<Result<CoordMsg, Status>>,
+        state: Arc<Mutex<CoordinatorState>>,
+    }
+
+    fn frame(msg: miner_msg::Msg) -> MinerMsg {
+        MinerMsg { msg: Some(msg) }
+    }
+
+    async fn next_msg(outbound: &mut OutboundStream) -> coord_msg::Msg {
+        let item = outbound.next().await.expect("session is open");
+        item.expect("no error frames").msg.expect("message body")
+    }
+
+    /// Start a session for miner `m` with an outbound channel of
+    /// `outbound_depth`, and complete its handshake. No `Configure` is set,
+    /// so the coordinator sends `queue_depth = 0`, which the miner SDKs read
+    /// as 3: the depth the removed `Ready` seed used to grant.
+    async fn start_session(chain: Arc<FakeChain>, outbound_depth: usize) -> LiveSession {
+        use quip_proto::v1::Hello;
+
+        let mut st = CoordinatorState::new();
+        let _ = st
+            .expected_tokens
+            .insert("m".to_owned(), "token".to_owned());
+        let state = Arc::new(Mutex::new(st));
+        let (miner, miner_rx) = mpsc::channel(16);
+        let (tx, rx) = mpsc::channel(outbound_depth);
+        let timing = Arc::new(CancelTiming::default());
+        let mut outbound = outbound_stream(rx, Arc::clone(&timing));
+        {
+            let state = Arc::clone(&state);
+            let tx = tx.clone();
+            drop(tokio::spawn(async move {
+                let mut inbound = ReceiverStream::new(miner_rx).map(Ok);
+                run_session(&mut inbound, &tx, state, chain, notify(), timing).await;
+            }));
+        }
+        miner
+            .send(frame(miner_msg::Msg::Hello(Hello {
+                miner_id: "m".to_owned(),
+                session_token: "token".to_owned(),
+                capabilities: Some(Capabilities {
+                    protocol_version: PROTOCOL_VERSION,
+                    supported_kinds: vec![JobKind::IsingSample as i32],
+                    ..Capabilities::default()
+                }),
+            })))
+            .await
+            .expect("session reads Hello");
+        assert!(matches!(
+            next_msg(&mut outbound).await,
+            coord_msg::Msg::Welcome(_)
+        ));
+        assert!(matches!(
+            next_msg(&mut outbound).await,
+            coord_msg::Msg::Configure(_)
+        ));
+        LiveSession {
+            miner,
+            outbound,
+            tx,
+            state,
+        }
+    }
+
+    /// Stage `jobs` for `m` and wake its dispatcher, as the feeder does.
+    async fn stage(state: &Arc<Mutex<CoordinatorState>>, jobs: &[&[u8]]) {
+        let mut st = state.lock().await;
+        for id in jobs {
+            assert!(st.router.stage_on("m", job(id)));
+        }
+        st.wake_dispatcher("m");
+    }
+
+    /// `Ready` grants nothing. A budgeted miner, such as a QPU that sends no
+    /// `JobRequest` until it decides to spend, receives no jobs while work
+    /// is staged for it, and its first grant dispatches exactly that many.
+    #[tokio::test(start_paused = true)]
+    async fn a_budgeted_miner_receives_no_jobs_before_its_first_grant() {
+        let mut s = start_session(Arc::new(FakeChain::new(lease_snapshot(), None)), 8).await;
+        stage(&s.state, &[b"a", b"b"]).await;
+        s.miner
+            .send(frame(miner_msg::Msg::Ready(quip_proto::v1::Ready {})))
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_mins(1), s.outbound.next())
+                .await
+                .is_err(),
+            "Ready must not dispatch work"
+        );
+        assert!(s.state.lock().await.inflight.is_empty());
+
+        s.miner
+            .send(frame(miner_msg::Msg::JobRequest(
+                quip_proto::v1::JobRequest { credits: 1 },
+            )))
+            .await
+            .unwrap();
+        let coord_msg::Msg::Job(first) = next_msg(&mut s.outbound).await else {
+            panic!("the grant dispatches a job");
+        };
+        assert_eq!(first.job_id, b"a".to_vec());
+        assert!(
+            tokio::time::timeout(Duration::from_mins(1), s.outbound.next())
+                .await
+                .is_err(),
+            "one credit dispatches one job"
+        );
+    }
+
+    /// A reject frees the job and re-routes it, and counts as a reject, not
+    /// as completed mining work. The miner's replacement credit still flows.
+    #[tokio::test(start_paused = true)]
+    async fn a_reject_counts_apart_from_completed_work_and_keeps_flow_control() {
+        let mut s = start_session(Arc::new(FakeChain::new(lease_snapshot(), None)), 8).await;
+        stage(&s.state, &[b"a", b"b"]).await;
+        s.miner
+            .send(frame(miner_msg::Msg::JobRequest(
+                quip_proto::v1::JobRequest { credits: 1 },
+            )))
+            .await
+            .unwrap();
+        assert!(
+            matches!(next_msg(&mut s.outbound).await, coord_msg::Msg::Job(j) if j.job_id == b"a")
+        );
+        s.miner
+            .send(frame(miner_msg::Msg::Reject(quip_proto::v1::Reject {
+                job_id: b"a".to_vec(),
+                reason: quip_proto::v1::RejectReason::Overloaded as i32,
+            })))
+            .await
+            .unwrap();
+        s.miner
+            .send(frame(miner_msg::Msg::JobRequest(
+                quip_proto::v1::JobRequest { credits: 1 },
+            )))
+            .await
+            .unwrap();
+        assert!(
+            matches!(next_msg(&mut s.outbound).await, coord_msg::Msg::Job(j) if j.job_id == b"b")
+        );
+        let st = s.state.lock().await;
+        assert!(
+            !st.inflight.contains_key(b"a".as_slice()),
+            "the rejected job is cleaned up"
+        );
+        assert_eq!(st.router.jobs_rejected("m"), 1);
+        assert_eq!(st.router.jobs_completed("m"), 0);
+    }
+
+    /// The `Cancel` queues behind the jobs already in the outbound channel,
+    /// and the miner's acknowledging `Status` queues behind a `Result` whose
+    /// submit is slow. The timing puts each delay in its own interval.
+    ///
+    /// The transport reads one message every 10 ms from a full channel of 4
+    /// jobs. The `Cancel` waits 10 ms for a slot, then 40 ms for the 4 jobs
+    /// ahead of it. The miner then sends a `Result` and the `Status`; the
+    /// `Result`'s 50 ms submit holds the `Status` in the read loop.
+    #[tokio::test(start_paused = true)]
+    async fn cancel_timing_locates_queued_jobs_and_a_slow_result_reader() {
+        init_capture();
+        let buf = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(Capture(Arc::clone(&buf)))
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let chain = Arc::new(FakeChain::new(lease_snapshot(), None));
+        chain.set_submit_delay(Duration::from_millis(50));
+        let mut s = start_session(Arc::clone(&chain), 4).await;
+        stage(&s.state, &[b"j1", b"j2", b"j3", b"j4"]).await;
+        s.miner
+            .send(frame(miner_msg::Msg::JobRequest(
+                quip_proto::v1::JobRequest { credits: 4 },
+            )))
+            .await
+            .unwrap();
+        while s.tx.capacity() > 0 {
+            tokio::task::yield_now().await;
+        }
+
+        let timing = s
+            .state
+            .lock()
+            .await
+            .cancel_timings
+            .get("m")
+            .cloned()
+            .unwrap();
+        let start = tokio::time::Instant::now();
+        let cancel = {
+            let tx = s.tx.clone();
+            tokio::spawn(async move { send_cancel(&tx, Some(&timing), 1).await })
+        };
+
+        let mut jobs = 0;
+        loop {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            match next_msg(&mut s.outbound).await {
+                coord_msg::Msg::Job(_) => jobs += 1,
+                coord_msg::Msg::Cancel(c) => {
+                    assert_eq!(c.max_generation, 1);
+                    break;
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert_eq!(
+            jobs, 4,
+            "the Cancel leaves the channel after the queued jobs"
+        );
+        assert_eq!(start.elapsed(), Duration::from_millis(50));
+        cancel.await.unwrap().unwrap();
+
+        s.miner
+            .send(frame(miner_msg::Msg::Result(WireResult {
+                job_id: b"j1".to_vec(),
+                solutions: vec![Solution {
+                    spins: quip_protocol::wire::encode_spins_packed(&[1, 1]),
+                    energy_milli: 0,
+                }],
+                ..WireResult::default()
+            })))
+            .await
+            .unwrap();
+        s.miner
+            .send(frame(miner_msg::Msg::Status(quip_proto::v1::Status {
+                miner_id: "m".to_owned(),
+                abandoned_generation: 1,
+                ..quip_proto::v1::Status::default()
+            })))
+            .await
+            .unwrap();
+        while !drain_peek(&buf).contains("miner acknowledged cancel") {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+
+        let output = drain(&buf);
+        assert_eq!(chain.submitted_count(), 1, "the slow submit ran: {output}");
+        for field in [
+            "max_generation=1",
+            "send_wait_ms=10.0",
+            "queue_delay_ms=40.0",
+            "ack_wait_ms=50.0",
+            "total_ms=100.0",
+        ] {
+            assert!(output.contains(field), "{field} missing: {output}");
+        }
+    }
+
+    fn drain_peek(buf: &Arc<std::sync::Mutex<Vec<u8>>>) -> String {
+        String::from_utf8_lossy(&buf.lock().unwrap()).into_owned()
     }
 }

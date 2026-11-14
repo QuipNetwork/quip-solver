@@ -12,7 +12,7 @@
 use crate::config::LaunchEntry;
 use crate::drive::report::JobRow;
 use crate::router::{MinerCaps, Router};
-use crate::session::{coord, seed_credits, shutdown_msg, CoordinatorState};
+use crate::session::{coord, shutdown_msg, CoordinatorState};
 use crate::topology::Topology;
 use crate::validate::validate_result;
 use quip_proto::v1::miner_service_server::{MinerService, MinerServiceServer};
@@ -227,8 +227,8 @@ impl MinerService for DriveManyService {
 }
 
 /// Hello -> token/version check -> register + stage every job -> Welcome/
-/// Configure/Topology. Returns the effective `Configure`, or `None` on a
-/// failed handshake (stream is dropped; a well-behaved miner exits 77).
+/// Configure/Topology. Returns `false` on a failed handshake (stream is
+/// dropped; a well-behaved miner exits 77).
 async fn handshake(
     inbound: &mut Streaming<MinerMsg>,
     tx: &mpsc::Sender<Result<CoordMsg, Status>>,
@@ -236,12 +236,12 @@ async fn handshake(
     jobs: &Arc<Mutex<Vec<Job>>>,
     run: &Arc<RunState>,
     miner_id: &str,
-) -> Option<Configure> {
+) -> bool {
     let Ok(Some(MinerMsg {
         msg: Some(miner_msg::Msg::Hello(hello)),
     })) = inbound.message().await
     else {
-        return None;
+        return false;
     };
     let caps = hello.capabilities.clone().unwrap_or_default();
     {
@@ -258,7 +258,7 @@ async fn handshake(
             || hello.capabilities.is_none()
             || caps.protocol_version != PROTOCOL_VERSION
         {
-            return None;
+            return false;
         }
     }
     let configure = {
@@ -287,7 +287,7 @@ async fn handshake(
         }))))
         .await;
     let _ = tx
-        .send(Ok(coord(coord_msg::Msg::Configure(configure.clone()))))
+        .send(Ok(coord(coord_msg::Msg::Configure(configure))))
         .await;
     {
         let st = state.lock().await;
@@ -300,7 +300,7 @@ async fn handshake(
             let _ = tx.send(Ok(coord(coord_msg::Msg::SetTarget(*target)))).await;
         }
     }
-    Some(configure)
+    true
 }
 
 /// Depth of the read loop's queue of credit grants to the dispatcher task.
@@ -506,16 +506,10 @@ async fn handle_message(
     tx: &mpsc::Sender<Result<CoordMsg, Status>>,
     run: &Arc<RunState>,
     grants: &mpsc::Sender<u32>,
-    seed_credits: u32,
 ) -> bool {
     match msg.msg {
-        // Seed credits from Configure so the first job can dispatch before the
-        // miner sends JobRequest: quip-mock-miner only requests after
-        // completing a job. This makes the pool exceed the miner's stated depth
-        // by `queue_depth` — harmless now that neither side couples reads to
-        // writes, but see the note in quip-solver-core's SPEC.md about making the miner
-        // the sole credit source once every backend sends an initial request.
-        Some(miner_msg::Msg::Ready(_)) => grants.send(seed_credits).await.is_ok(),
+        // The miner is the only source of credit, as in a production session:
+        // Ready grants nothing, and the miner's first JobRequest follows it.
         // Hand the grant to the dispatcher task rather than dispatching here:
         // sending jobs blocks once the outbound channel fills, and this is the
         // only task reading results. Blocking here stops us reading the very
@@ -582,16 +576,15 @@ async fn run_drive_session(
     run: Arc<RunState>,
     miner_id: String,
 ) {
-    let Some(configure) = handshake(inbound, tx, &state, &jobs, &run, &miner_id).await else {
+    if !handshake(inbound, tx, &state, &jobs, &run, &miner_id).await {
         return;
-    };
+    }
     // Nothing left to run — either no jobs, or every job was unroutable and
     // already reconciled during handshake. Shut down without waiting for Ready.
     if run.total == 0 || run.is_complete() {
         let _ = tx.send(Ok(shutdown_msg(500))).await;
         return;
     }
-    let seed_credits = seed_credits(&configure);
     // Dispatcher task: the only place that writes `Job`s. Kept off the read
     // path so a full outbound channel can never stop us draining results.
     let (grants, mut grant_rx) = mpsc::channel::<u32>(GRANT_CHANNEL_DEPTH);
@@ -617,8 +610,7 @@ async fn run_drive_session(
         let Ok(Some(msg)) = inbound.message().await else {
             break;
         };
-        let keep_going =
-            handle_message(msg, &state, &miner_id, tx, &run, &grants, seed_credits).await;
+        let keep_going = handle_message(msg, &state, &miner_id, tx, &run, &grants).await;
         if !keep_going {
             break;
         }
@@ -748,8 +740,8 @@ mod tests {
     use crate::validate::MAX_PROOF_SOLUTIONS_WIRE;
     use quip_proto::v1::miner_service_client::MinerServiceClient;
     use quip_proto::v1::{
-        ising_problem, Capabilities, EdgeList, Hello, JobKind, LeaseDone, Provenance, Ready,
-        SetTarget, Solution,
+        ising_problem, Capabilities, EdgeList, Hello, JobKind, JobRequest, LeaseDone, Provenance,
+        Ready, SetTarget, Solution,
     };
     use quip_protocol::chacha8::draw_ising_milli;
     use quip_protocol::wire::encode_spins_packed;
@@ -848,6 +840,15 @@ mod tests {
             session
         }
 
+        /// Send `Ready` and then the first `JobRequest`, as a miner SDK
+        /// does. `Ready` grants nothing, so the 3 credits come from the
+        /// request.
+        async fn ready(&self) {
+            self.send(miner_msg::Msg::Ready(Ready {})).await;
+            self.send(miner_msg::Msg::JobRequest(JobRequest { credits: 3 }))
+                .await;
+        }
+
         async fn send(&self, msg: miner_msg::Msg) {
             self.inbound
                 .send(MinerMsg { msg: Some(msg) })
@@ -938,7 +939,7 @@ mod tests {
                 ..Capabilities::default()
             }))
             .await;
-        // The snapshot wake must use existing credits before Ready grants more.
+        // The snapshot wake must use existing credits before the miner grants more.
         let mut dispatched = Vec::new();
         for id in [1, 3] {
             let coord_msg::Msg::Job(job) = session.receive().await else {
@@ -964,7 +965,7 @@ mod tests {
             assert_eq!(row.raw_best_energy_milli, i64::MAX);
             assert_eq!(row.wall_ms, 0);
         }
-        session.send(miner_msg::Msg::Ready(Ready {})).await;
+        session.ready().await;
         session.finish(&dispatched).await;
         assert_eq!(
             session
@@ -980,7 +981,8 @@ mod tests {
         assert_eq!(st.router.take_consumed("m"), 2);
         assert_eq!(st.router.take_lease_salts("m"), 7);
         assert_eq!(st.router.round_salts("m"), 9);
-        // Four existing credits plus three from Ready, minus two dispatched jobs.
+        // Four existing credits plus three from the JobRequest after Ready,
+        // minus two dispatched jobs.
         for id in 10..15 {
             assert!(st.router.stage_on("m", inline_job(id, 22, &[(0, 1)])));
             assert_eq!(
@@ -1021,7 +1023,7 @@ mod tests {
                 ..Capabilities::default()
             }))
             .await;
-        session.send(miner_msg::Msg::Ready(Ready {})).await;
+        session.ready().await;
         let coord_msg::Msg::Job(job) = session.receive().await else {
             panic!("the proven inline subgraph must dispatch");
         };
@@ -1102,7 +1104,7 @@ mod tests {
                 ..Capabilities::default()
             }))
             .await;
-        session.send(miner_msg::Msg::Ready(Ready {})).await;
+        session.ready().await;
         let mut dispatched = Vec::new();
         for id in [1, 2] {
             let coord_msg::Msg::Job(job) = session.receive().await else {

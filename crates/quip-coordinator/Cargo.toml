@@ -85,7 +85,7 @@ jsonrpsee = { version = "0.24", features = ["ws-client", "client-ws-transport-tl
 blake2 = "0.10"
 twox-hash = "1.6"
 rand = "0.8"
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "test-util"] }
 quip-solver-conformance = "0.0.14"
 quip-solver-core = "0.0.14"
 
