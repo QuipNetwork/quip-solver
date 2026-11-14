@@ -14,6 +14,13 @@ For deeper detail, see the companion guides: `docs/COORDINATOR.md` covers how th
 
 - `crates/` — the Cargo workspace (root manifest: `Cargo.toml`):
   - `quip-coordinator` — the coordinator binary: chain access, routing, miner supervision.
+    Its `src/` has ten top-level modules, one concern each: `types` (shared
+    plain data), `observe`, `config`, `host`, `chain` (validator operations),
+    `miner` (session protocol and supervision), `coordinator` (solver logic),
+    `dashboard`, `app` (the chain and drive environments), and `cli` (one file
+    per subcommand). `testing` holds the test doubles behind the
+    `test-support` feature. `docs/ARCHITECTURE.md` lists which module may
+    import which, and `tests/layering.rs` enforces it.
   - `quip-solver-exec` — a miner that shells out to a generic external solver.
   - `quip-mock-miner` — the miner test double the coordinator tests spawn.
 - `docker/` — image builds (`Dockerfile.quip-solver`, `Dockerfile.quip-solver-cuda`), `entrypoint.sh`, and `config.toml`.

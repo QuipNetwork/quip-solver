@@ -11,10 +11,11 @@ how they fit together. For build and run commands, see `AGENTS.md`.
 
 ## Run modes
 
-`main.rs` parses one CLI:
+`main.rs` parses the command line, and `cli::dispatch` runs it. Each
+subcommand has its own file in `cli/`:
 
 - `quip-coordinator --config <config.toml>` — the production runtime
-  (`run_config_path` → `runtime::run_runtime`). Connects to the validators,
+  (`cli/run.rs`, then `app::chain_env::run`, then `app::run`). Connects to the validators,
   spawns and supervises the configured miners, feeds them chain work, submits
   proofs.
 - `quip-coordinator drive …` — generates or replays work for one miner.
@@ -54,7 +55,8 @@ runtimes before 120.
 
 ## Logging
 
-`logging.rs` installs the subscriber, and `main` calls it first. The `tracing`
+`observe/logging.rs` installs the subscriber, and `cli::dispatch` calls it
+first through `app::init_logging`. The `tracing`
 macros only dispatch to an installed subscriber. Without that call every log
 statement in the process does nothing and `RUST_LOG` has no effect.
 
@@ -94,12 +96,12 @@ seconds warns once.
   `[dwave]`/`[qpu]` launches no miners and can never mine. The error names the
   v0.2 `quip-miner` format when it sees that format's keys, because the two
   configs are not interchangeable.
-- **An incompatible validator.** `chain::preflight` reads the runtime version
+- **An incompatible validator.** `chain::startup::preflight` reads the runtime version
   and checks `QuantumPowApi`. The coordinator drives version 2 or newer, the
   version that added `difficulty_for`, which every poll calls. Version 3,
   in runtime 120, adds a `family` field to the topology record. Each poll reads
   the version and decodes the record in the layout of that version.
-- **An unfunded miner account.** `funding.rs` reads the account balance and,
+- **An unfunded miner account.** `chain/registration/funding.rs` reads the account balance and,
   when the balance is below `min_balance_plancks` (2 UNIT), requests a top up
   from `faucet_url`. It retries with backoff for `funding_timeout_s` (10
   minutes by default), then gives up. An account that cannot pay transaction
@@ -151,10 +153,13 @@ When the key is absent it defaults to `["ws://quip-validator:9944",
 
 ## Runtime wiring
 
-`run_runtime` (in `runtime.rs`) is the production entry point. It:
+`app::run` (in `app/mod.rs`) is the production entry point. It runs over any
+`Environment`: `app::chain_env::ChainEnv` in production, and a fake chain in
+the tests. It:
 
 1. Binds a Unix-domain socket and serves the gRPC `MinerService` on it
-   (`CoordinatorService`). Miners connect back over this socket.
+   (`miner::session::service::SessionService` over the coordinator's
+   `CoordinatorService`). Miners connect back over this socket.
 2. Seeds each miner's `Configure` from the launch plan so the server can answer
    the handshake.
 3. Spawns one `supervise_miner` task per configured miner.
@@ -164,7 +169,7 @@ When the key is absent it defaults to `["ws://quip-validator:9944",
    drains the feeder and supervisors (so in-band `Shutdown` and any kill-after-
    grace finish), aborts the server, and removes the socket.
 
-`CoordinatorState` (in `session.rs`) is the shared state behind an
+`CoordinatorState` (in `coordinator/state.rs`) is the shared state behind an
 `Arc<Mutex<…>>`: the `Router`, the in-flight map, the current `Topology` and
 difficulty `target`, per-miner `Configure`, and the salt→job bookkeeping.
 
@@ -253,18 +258,21 @@ Naming the pallet error variant itself, such as `InsufficientDiversity`,
 still needs metadata decoding. `classify_receipt` matches those names, so it
 only ever sees them for errors the node reports before inclusion.
 
-`RealChainClient` (`chain/real.rs`) is the live client over Substrate
-JSON-RPC. `FakeChain` (`chain/fake.rs`) backs the tests. Supporting
-modules: `extrinsic` (H4 hybrid sr25519 + FN-DSA-512 signing, `load_hybrid_pair`,
-`miner_identity_bytes`, `signer_account_bytes`), `snapshot`
-(`MiningSnapshot`, `DecayParams`),
-`mempool` (`JobOrder`), `submit` (`Proof`, `classify_receipt`, `SubmitAction`),
-plus `proof_encode` and `scale_types` for SCALE codec. Nothing outside
-`chain/` talks to the node directly.
+`RealChainClient` (`chain/client/mod.rs`) is the live client over Substrate
+JSON-RPC. `FakeChain` (`testing/fake_chain.rs`) backs the tests. The client's
+operations live in the `chain` folders by concern. `chain/client/` holds the
+transport and storage reads. `chain/codec/` holds `extrinsic` (H4 hybrid
+sr25519 + FN-DSA-512 signing, `load_hybrid_pair`, `miner_identity_bytes`,
+`signer_account_bytes`), `proof_encode`, and `scale_types`. `chain/sign/`
+holds submission and `classify_receipt`. `chain/registration/`,
+`chain/mining/`, `chain/governance/`, and `chain/startup/` hold the rest. The
+plain data (`MiningSnapshot`, `DecayParams`, `JobOrder`, `Proof`,
+`SubmitAction`) is in `types/`. Nothing outside `chain/` talks to the node
+directly.
 
 ## Job production — the feeder
 
-`feeder_loop` (in `runtime.rs`) runs one poll every `poll_interval_ms`
+`feeder_loop` (in `coordinator/feeder/mod.rs`) runs one poll every `poll_interval_ms`
 (1000 ms in production). The poll runs every 250 ms when the miners are
 stopped for a pending win. A win is visible on the next poll, so the
 worst-case delay before `Cancel` is one poll interval plus the snapshot RPC.
@@ -313,7 +321,7 @@ The states, in order:
 8. **Awaiting qblock.** Off the walk. On each poll in state 7 the feeder
    reads `author_pendingExtrinsics`, decodes every signed
    `QuantumPow.submit_proof`, and replays the pallet gates against the
-   snapshot (`pool_watch::judge_pending_proof`). The decoder drops an entry
+   snapshot (`chain::mining::pool::judge_pending_proof`). The decoder drops an entry
    whose compact length does not match its bytes, and an entry with a mortal
    era. It verifies the hybrid signature with the genesis hash and the runtime
    versions. For `CheckMetadataHash` mode Enabled it checks only that the
@@ -451,7 +459,7 @@ Each session times its `Cancel` until the miner acknowledges it with a
 The session logs the validation time of each result at `debug`, as
 `result validated` with `validation_us`.
 
-Mempool jobs carry generation `0` (`producer::mempool::job_order_to_job`).
+Mempool jobs carry generation `0` (`coordinator::producer::mempool::job_order_to_job`).
 Reseeds keep those jobs. PoW jobs carry the live generation. The feeder drops
 them when their round ends. A cancelled in-flight job is not re-queued, not
 scored, and not submitted. The miner refunds its credit with `JobRequest{1}`.
@@ -475,7 +483,7 @@ the floor. The feeder then clamps the depth to `stage_ceiling`, a per-miner
 budget of 64 MiB of staged Ising models (`MAX_STAGE_BYTES_PER_MINER`), so a
 fast miner on a large topology cannot stage an unbounded reserve. The EMA
 tracks queue drain. A job leaves the staged queue at dispatch, so that is the
-signal the feeder sizes against. The default floor is 256 (`main.rs`),
+signal the feeder sizes against. The default floor is 256 (`app/chain_env/run.rs`),
 generous enough to keep every miner fed from the first poll. The one-minute
 heartbeat reports completions, not this dispatch counter.
 
@@ -483,7 +491,7 @@ heartbeat reports completions, not this dispatch counter.
 
 The chain eases `max_energy_milli` between wins. A solution that misses the
 threshold now may clear it later in the same round, so the session path
-stashes it and the feeder submits it at the projected block. `decay.rs`
+stashes it and the feeder submits it at the projected block. `coordinator/round/decay.rs`
 mirrors the chain's rule so the projection needs no per-block RPC.
 
 The chain has shipped three rules. Runtime 117 steps the threshold once per
@@ -529,7 +537,7 @@ operator can confirm which rule and target a round ran under.
 
 ## Routing and credits
 
-`Router` (`router.rs`) indexes miner capabilities and holds a staged queue per miner.
+`Router` (`coordinator/router/`) indexes miner capabilities and holds a staged queue per miner.
 `route` selects the first capable miner by sorted miner id.
 `stage_on` targets a specific miner, which is what the feeder uses.
 Both paths check job kinds, the lease generator, node and edge limits, and degree.
@@ -584,9 +592,12 @@ They do not restore dropped jobs.
 
 ## The miner session
 
-`CoordinatorService<C>` is the server side of the gRPC `MinerService`
-(`session.rs`), the streaming miner protocol carried over the Unix socket. Per
-session it runs the handshake (`Hello` → `Welcome`), applies `Configure`, then
+`SessionService` (`miner/session/service.rs`) is the server side of the gRPC
+`MinerService`, the streaming miner protocol carried over the Unix socket. Each
+session runs one loop (`miner/session/handlers.rs`), and the loop reports to a
+`SessionEvents` impl: `CoordinatorService` (`coordinator/events.rs`) in
+production, and the drive harness in `app/local_env/`. Per session the loop
+runs the handshake (`Hello` → `Welcome`), applies `Configure`, then
 services the bidirectional stream: a `JobRequest` grants credits, the
 coordinator dispatches staged `Job`s, and each `Result` or `Reject` is a
 terminal event that frees a credit and advances accounting. A periodic `Ping`
@@ -632,7 +643,7 @@ than zero, the miner counts as a round participant.
 
 ## Problem families
 
-`FAMILY_CONTRACTS` in `crates/quip-coordinator/src/lease.rs` is
+`FAMILY_CONTRACTS` in `crates/quip-coordinator/src/types/family.rs` is
 `ising_generators::registry::CONTRACTS`, every family revision that the
 generator crate ships. A snapshot with a family issues only family leases and
 has no legacy fallback.
@@ -698,7 +709,7 @@ revision are not in `FAMILY_CONTRACTS`.
 
 ## Supervision and shutdown
 
-`supervise_miner` (`supervisor.rs`) owns one miner for the run. It spawns the
+`supervise_miner` (`miner/supervisor.rs`) owns one miner for the run. It spawns the
 binary with the session token in the `QUIP_SESSION_TOKEN` environment variable
 (never argv) and three arguments — `--quip-coordinator <socket-uri>`,
 `--miner-id <id>`, and `--log-level <level>` — and sets `kill_on_drop`. The
@@ -722,7 +733,7 @@ the grace period (`grace_ms`).
 
 ## Config to launch plan
 
-`parse_config` (`config.rs`) turns `config.toml` into a `CoordinatorConfig`:
+`parse_config` (`config/mod.rs`) turns `config.toml` into a `CoordinatorConfig`:
 the `[miner]` section gives `validators`, `signer_key`, the required
 descriptor keys (`public_host`, `public_port`), and the optional keys
 (`node_name`, `log_level`, `node_id`, `auto_mine`). Each backend section

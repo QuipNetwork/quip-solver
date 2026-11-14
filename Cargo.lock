@@ -3182,7 +3182,7 @@ dependencies = [
 
 [[package]]
 name = "quip-coordinator"
-version = "0.3.9-rc6"
+version = "0.3.9-rc7"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -3198,6 +3198,7 @@ dependencies = [
  "parity-scale-codec",
  "prost",
  "quantum-validation",
+ "quip-coordinator",
  "quip-proto",
  "quip-protocol",
  "quip-solver-conformance",

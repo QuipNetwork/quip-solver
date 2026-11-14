@@ -12,7 +12,7 @@ mod handshake {
     //! Handshake rejection against `quip-mock-miner`. The accepting path runs in
     //! every test that drives the mock miner end to end.
 
-    use quip_coordinator::session::serve_one_session_expecting;
+    use quip_coordinator::testing::session_harness::serve_one_session_expecting;
 
     #[tokio::test]
     async fn rejects_wrong_token_miner_exits() {
@@ -36,8 +36,10 @@ mod handshake {
 mod protocol_version {
     //! The coordinator accepts only `PROTOCOL_VERSION` in a miner `Hello`.
 
-    use quip_coordinator::chain::FakeChain;
-    use quip_coordinator::session::{CoordinatorService, CoordinatorState};
+    use quip_coordinator::coordinator::events::CoordinatorService;
+    use quip_coordinator::coordinator::state::CoordinatorState;
+    use quip_coordinator::miner::session::service::SessionService;
+    use quip_coordinator::testing::fake_chain::FakeChain;
     use quip_proto::v1::miner_service_client::MinerServiceClient;
     use quip_proto::v1::miner_service_server::MinerServiceServer;
     use quip_proto::v1::{coord_msg, miner_msg, Capabilities, Configure, Hello, JobKind, MinerMsg};
@@ -57,8 +59,11 @@ mod protocol_version {
         let sock = format!("/tmp/quip-proto-{}.sock", std::process::id());
         let _ = std::fs::remove_file(&sock);
         let mut st = CoordinatorState::new();
-        let _ = st.expected_tokens.insert("cpu-0".into(), "tok".into());
-        let _ = st.configure.insert(
+        let _ = st
+            .sessions
+            .expected_tokens
+            .insert("cpu-0".into(), "tok".into());
+        let _ = st.sessions.configure.insert(
             "cpu-0".into(),
             Configure {
                 queue_depth: 1,
@@ -69,22 +74,26 @@ mod protocol_version {
             },
         );
         let chain = Arc::new(FakeChain::new(
-            quip_coordinator::drive::parse_topology_spec(
-                quip_coordinator::presets::preset_spec("smoke").expect("preset"),
+            quip_coordinator::types::topology_spec::parse_topology_spec(
+                quip_coordinator::types::topology_spec::preset_spec("smoke").expect("preset"),
             )
             .expect("spec")
             .to_snapshot(),
             None,
         ));
+        let state = Arc::new(Mutex::new(st));
         let svc = CoordinatorService {
-            state: Arc::new(Mutex::new(st)),
-            chain,
+            state: Arc::clone(&state),
+            sink: chain,
             submit_notify: Arc::new(Mutex::new(None)),
         };
         let incoming = UnixListenerStream::new(UnixListener::bind(&sock).expect("bind"));
         let server = tokio::spawn(
             Server::builder()
-                .add_service(MinerServiceServer::new(svc))
+                .add_service(MinerServiceServer::new(SessionService::new(
+                    state,
+                    Arc::new(svc),
+                )))
                 .serve_with_incoming(incoming),
         );
 
@@ -196,10 +205,10 @@ mod supervisor {
     #[cfg(unix)]
     #[tokio::test]
     async fn clean_exit_reclaims_and_reroutes_inflight() {
-        use quip_coordinator::config::LaunchEntry;
-        use quip_coordinator::router::MinerCaps;
-        use quip_coordinator::session::CoordinatorState;
-        use quip_coordinator::supervisor::{supervise_miner, BackoffPolicy};
+        use quip_coordinator::config::launch::LaunchEntry;
+        use quip_coordinator::coordinator::router::MinerCaps;
+        use quip_coordinator::coordinator::state::CoordinatorState;
+        use quip_coordinator::miner::supervisor::{supervise_miner, BackoffPolicy};
         use quip_proto::v1::{Configure, Job, JobKind, Provenance};
         use std::sync::Arc;
         use std::time::Duration;
@@ -215,7 +224,7 @@ mod supervisor {
                 deadline_ms: 9_999_999,
                 ising: Some({
                     let mut problem =
-                        quip_coordinator::producer::problem::milli_problem(None, &[0; 2], &[0; 1]);
+                        quip_coordinator::types::problem::milli_problem(None, &[0; 2], &[0; 1]);
                     problem.num_reads = 0;
                     problem
                 }),
@@ -277,7 +286,7 @@ mod supervisor {
             Arc::clone(&state),
             policy,
             200,
-            quip_coordinator::logging::LogLevel::Info,
+            quip_coordinator::types::log::LogLevel::Info,
             stop_rx,
         ));
 
@@ -314,9 +323,9 @@ mod supervisor {
     #[cfg(unix)]
     #[tokio::test]
     async fn spawned_child_receives_device_flag() {
-        use quip_coordinator::config::LaunchEntry;
-        use quip_coordinator::session::CoordinatorState;
-        use quip_coordinator::supervisor::{supervise_miner, BackoffPolicy};
+        use quip_coordinator::config::launch::LaunchEntry;
+        use quip_coordinator::coordinator::state::CoordinatorState;
+        use quip_coordinator::miner::supervisor::{supervise_miner, BackoffPolicy};
         use quip_proto::v1::Configure;
         use std::sync::Arc;
         use std::time::Duration;
@@ -375,7 +384,7 @@ mod supervisor {
             Arc::clone(&state),
             policy,
             200,
-            quip_coordinator::logging::LogLevel::Info,
+            quip_coordinator::types::log::LogLevel::Info,
             stop_rx,
         ));
 
