@@ -367,6 +367,23 @@ fn target_from_snapshot(snap: &MiningSnapshot) -> SetTarget {
     }
 }
 
+/// One miner's line on the throughput heartbeat. Each count has a window,
+/// the change since the last heartbeat, and a total since registration.
+#[derive(Debug)]
+struct MinerThroughput {
+    id: String,
+    /// Jobs finished with a `Result` or `LeaseDone`.
+    completed: u64,
+    completed_total: u64,
+    /// Jobs the miner refused. Not mining work, so counted apart.
+    rejected: u64,
+    rejected_total: u64,
+    window: usize,
+    staged: usize,
+    round_salts: u64,
+    salts_per_s: f64,
+}
+
 /// Broadcast `target` to every live miner off-lock: clone the outbound senders
 /// under the state lock, drop it, then await the sends so the fan-out never
 /// holds the state lock across I/O.
@@ -402,18 +419,20 @@ async fn broadcast_topology(state: &Arc<Mutex<CoordinatorState>>, topo: quip_pro
 /// miner-side cooperative-cancel guard and the cleared salts (which already make
 /// a late stale-generation result unsubmittable). Returns how many miners were
 /// told.
+///
+/// Each session times its `Cancel` until the miner's `Status` acknowledges
+/// it, so the returned count says only that the `Cancel`s were queued.
 async fn broadcast_cancel(state: &Arc<Mutex<CoordinatorState>>, max_generation: u64) -> usize {
     let senders: Vec<_> = {
         let st = state.lock().await;
-        st.outbound.values().cloned().collect()
+        st.outbound
+            .iter()
+            .map(|(id, tx)| (tx.clone(), st.cancel_timings.get(id).cloned()))
+            .collect()
     };
     let n = senders.len();
-    for tx in senders {
-        let _ = tx
-            .send(Ok(coord(coord_msg::Msg::Cancel(quip_proto::v1::Cancel {
-                max_generation,
-            }))))
-            .await;
+    for (tx, timing) in senders {
+        let _ = crate::session::send_cancel(&tx, timing.as_deref(), max_generation).await;
     }
     n
 }
@@ -793,10 +812,10 @@ pub async fn feeder_loop<C>(
     // one line per poll. `None` until the first poll completes.
     let mut feed_state: Option<FeedState> = None;
     let mut last_heartbeat = std::time::Instant::now();
-    // Completions printed on the last heartbeat, per miner. The next
-    // heartbeat reports the delta from this map so the line does not
+    // Completion and reject totals printed on the last heartbeat, per miner.
+    // The next heartbeat reports the delta from this map so the line does not
     // depend on which poll it lands on.
-    let mut last_completed: HashMap<String, u64> = HashMap::new();
+    let mut last_finished: HashMap<String, (u64, u64)> = HashMap::new();
     let faucet = build_faucet(params.funding.faucet_url.as_deref());
     let mut round: Option<RoundState> = None;
     // Participation bookkeeping. `last_declared` is the candidate qblock the
@@ -1207,9 +1226,8 @@ pub async fn feeder_loop<C>(
                 );
             }
             // Per-miner drain/staging stats for the heartbeat, collected here
-            // and emitted off-lock below. The completion pair is (window,
-            // total): window is completions since the last heartbeat.
-            let mut stats: Vec<(String, u64, u64, usize, usize, u64, f64)> = Vec::new();
+            // and emitted off-lock below.
+            let mut stats: Vec<MinerThroughput> = Vec::new();
             let rate_secs = last_rate_update.elapsed().as_secs_f64();
             last_rate_update = std::time::Instant::now();
             for id in st.router.miner_ids() {
@@ -1309,17 +1327,20 @@ pub async fn feeder_loop<C>(
                 // job and the coordinator waits for a request, forever.
                 st.wake_dispatcher(&id);
                 let completed_total = st.router.jobs_completed(&id);
-                let completed_window =
-                    completed_total.saturating_sub(last_completed.get(&id).copied().unwrap_or(0));
-                stats.push((
-                    id.clone(),
-                    completed_window,
+                let rejected_total = st.router.jobs_rejected(&id);
+                let (completed_before, rejected_before) =
+                    last_finished.get(&id).copied().unwrap_or_default();
+                stats.push(MinerThroughput {
+                    id: id.clone(),
+                    completed: completed_total.saturating_sub(completed_before),
                     completed_total,
-                    depth,
-                    st.router.staged_len(&id),
-                    st.router.round_salts(&id),
+                    rejected: rejected_total.saturating_sub(rejected_before),
+                    rejected_total,
+                    window: depth,
+                    staged: st.router.staged_len(&id),
+                    round_salts: st.router.round_salts(&id),
                     salts_per_s,
-                ));
+                });
             }
             if stats.is_empty() {
                 // Miners are configured but none has completed a handshake, so
@@ -1375,20 +1396,21 @@ pub async fn feeder_loop<C>(
                 "feeder: poll"
             );
             if last_heartbeat.elapsed() >= FEEDER_HEARTBEAT {
-                for (id, completed, completed_total, depth, staged, round_salts, salts_per_s) in
-                    &stats
-                {
+                for m in &stats {
                     tracing::info!(
-                        miner = %id,
-                        jobs_completed = completed,
-                        jobs_completed_total = completed_total,
-                        staged = staged,
-                        window = depth,
-                        round_salts = round_salts,
-                        salts_per_s = %format!("{salts_per_s:.0}"),
+                        miner = %m.id,
+                        jobs_completed = m.completed,
+                        jobs_completed_total = m.completed_total,
+                        jobs_rejected = m.rejected,
+                        jobs_rejected_total = m.rejected_total,
+                        staged = m.staged,
+                        window = m.window,
+                        round_salts = m.round_salts,
+                        salts_per_s = %format!("{:.0}", m.salts_per_s),
                         "miner throughput"
                     );
-                    let _ = last_completed.insert(id.clone(), *completed_total);
+                    let _ =
+                        last_finished.insert(m.id.clone(), (m.completed_total, m.rejected_total));
                 }
                 if let Some(log) = &round_log {
                     log.lock()

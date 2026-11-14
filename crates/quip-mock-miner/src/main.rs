@@ -121,12 +121,12 @@ fn miner(msg: miner_msg::Msg) -> MinerMsg {
     MinerMsg { msg: Some(msg) }
 }
 
-fn status_msg(miner_id: &str) -> MinerMsg {
+fn status_msg(miner_id: &str, abandoned_generation: u64) -> MinerMsg {
     miner(miner_msg::Msg::Status(Status {
         miner_id: miner_id.into(),
         utilization: 0.0,
         jobs_done: 0,
-        abandoned_generation: 0,
+        abandoned_generation,
         sampler_stats: std::collections::HashMap::default(),
     }))
 }
@@ -409,6 +409,7 @@ async fn run_session(uri: &str, miner_id: &str) -> Result<(), ExitCode> {
     let mut session_topo: Option<SessionTopo> = None;
     let mut raw_topo: Option<Topology> = None;
     let mut session_target: Option<SetTarget> = None;
+    let mut abandoned: u64 = 0;
     loop {
         let idle = u64::from(config.as_ref().map_or(300, |c| c.idle_timeout_s));
         let next = tokio::time::timeout(Duration::from_secs(idle), inbound.message()).await;
@@ -429,8 +430,15 @@ async fn run_session(uri: &str, miner_id: &str) -> Result<(), ExitCode> {
                 }
             }
             Some(coord_msg::Msg::Configure(c)) => {
-                config = Some(SessionConfig::from_configure(miner_id.into(), &c));
+                let session = SessionConfig::from_configure(miner_id.into(), &c);
+                // Ready grants nothing. The first JobRequest opens the
+                // pipeline, as the miner SDK does.
+                let credits = session.queue_depth;
+                config = Some(session);
                 tx.send(miner(miner_msg::Msg::Ready(Ready {})))
+                    .await
+                    .map_err(|_| ExitCode::InternalFatal)?;
+                tx.send(miner(miner_msg::Msg::JobRequest(JobRequest { credits })))
                     .await
                     .map_err(|_| ExitCode::InternalFatal)?;
             }
@@ -448,14 +456,16 @@ async fn run_session(uri: &str, miner_id: &str) -> Result<(), ExitCode> {
                     tx.send(reply).await.map_err(|_| ExitCode::InternalFatal)?;
                 }
             }
-            Some(coord_msg::Msg::Cancel(_)) => {
-                // No jobs buffered in this mock; acknowledge via Status.
-                tx.send(status_msg(miner_id))
+            Some(coord_msg::Msg::Cancel(c)) => {
+                // No jobs buffered in this mock. Acknowledge via Status with
+                // the new watermark, as the miner SDK does.
+                abandoned = abandoned.max(c.max_generation);
+                tx.send(status_msg(miner_id, abandoned))
                     .await
                     .map_err(|_| ExitCode::InternalFatal)?;
             }
             Some(coord_msg::Msg::Ping(_)) => {
-                tx.send(status_msg(miner_id))
+                tx.send(status_msg(miner_id, abandoned))
                     .await
                     .map_err(|_| ExitCode::InternalFatal)?;
             }

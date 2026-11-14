@@ -59,6 +59,8 @@ pub struct FakeChain {
     solver_registration_result: Mutex<Result<RegistrationOutcome, ChainError>>,
     /// Calls that reached the `register_solver` submit path.
     solver_registration_submits: Mutex<usize>,
+    /// How long each `submit_proof` takes before it returns.
+    submit_delay: Mutex<std::time::Duration>,
 }
 
 impl FakeChain {
@@ -97,6 +99,21 @@ impl FakeChain {
             solver_registered: Mutex::new(false),
             solver_registration_result: Mutex::new(Ok(RegistrationOutcome::Registered)),
             solver_registration_submits: Mutex::new(0),
+            submit_delay: Mutex::new(std::time::Duration::ZERO),
+        }
+    }
+
+    /// Make every later `submit_proof` take `delay`, as a slow validator does.
+    ///
+    /// # Panics
+    /// Panics if a prior holder poisoned this mutex.
+    pub fn set_submit_delay(&self, delay: std::time::Duration) {
+        #[expect(
+            clippy::unwrap_used,
+            reason = "test double; Mutex poison is a test failure"
+        )]
+        {
+            *self.submit_delay.lock().unwrap() = delay;
         }
     }
 
@@ -542,6 +559,14 @@ impl ChainClient for FakeChain {
     }
 
     async fn submit_proof(&self, proof: &Proof) -> Result<SubmitReceipt, ChainError> {
+        #[expect(
+            clippy::unwrap_used,
+            reason = "test double; Mutex poison is a test failure"
+        )]
+        let delay = *self.submit_delay.lock().unwrap();
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
         #[expect(
             clippy::unwrap_used,
             reason = "test double; Mutex poison is a test failure"

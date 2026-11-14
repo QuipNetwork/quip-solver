@@ -434,7 +434,22 @@ Startup drives states 2 through 6. A funding failure at startup is still exit
 download after miners connect.
 
 One `info` line names the new generation, the cancelled staged-job count, the
-miner count, and the refreshed target.
+miner count, and the refreshed target. The coordinator writes that line after
+it queues each `Cancel`, before any miner has the `Cancel`.
+
+Each session times its `Cancel` until the miner acknowledges it with a
+`Status` whose `abandoned_generation` covers the `Cancel`. An `info` line,
+`miner acknowledged cancel`, then reports these intervals:
+
+| Field | Interval |
+|-------|----------|
+| `send_wait_ms` | The send waited for space in the full outbound channel. |
+| `queue_delay_ms` | The `Cancel` waited in the outbound channel for the transport to take it. Jobs queued ahead of the `Cancel` add to this interval. |
+| `ack_wait_ms` | From the transport taking the `Cancel` to the session reading the `Status`. This interval covers network and miner time. It also covers messages queued ahead of the `Status` in the session's read loop. |
+| `total_ms` | From the start of the send to the session reading the `Status`. |
+
+The session logs the validation time of each result at `debug`, as
+`result validated` with `validation_us`.
 
 Mempool jobs carry generation `0` (`producer::mempool::job_order_to_job`).
 Reseeds keep those jobs. PoW jobs carry the live generation. The feeder drops
@@ -532,11 +547,14 @@ Jobs already dispatched continue under the existing result and reject rules.
 A snapshot with an incompatible protocol version leaves the current envelope intact.
 
 A **credit pool** gates dispatch, not a queue depth. The miner grants
-`width` credits up front and one more per terminal event (`Result` or
-`Reject`). Each dispatch spends one credit (`next_job`). Dispatch stays
+`width` credits with its first `JobRequest` and one more per terminal event
+(`Result` or `Reject`). `Ready` grants nothing. Each dispatch spends one credit (`next_job`). Dispatch stays
 one-to-one with completion, and the credits the miner has issued bound the
 in-flight count. In-flight jobs live in `CoordinatorState`, so the
 router keeps no separate outstanding counter.
+
+The once-a-minute `miner throughput` line counts rejects in `jobs_rejected`,
+apart from the `jobs_completed` count of finished work.
 
 On a reject with `UnsupportedKind`, the router records that the miner cannot
 serve that job kind and re-routes the job to another capable miner. On a miner
@@ -723,9 +741,11 @@ Leave `queue_depth` out of a section to let the miner choose its depth. The
 coordinator then sends `queue_depth = 0`, which means "not set" on the wire.
 The CPU, CUDA and Metal miners use a depth of 3. The D-Wave miner uses 96,
 so up to 96 QPU submissions are in flight at once. An explicit `queue_depth`
-goes to the miner unchanged. When the miner sends `Ready`, the coordinator
-grants credits equal to the depth the miner uses, which is 3 when the field
-is 0. The D-Wave miner grants the rest of its 96 credits itself.
+goes to the miner unchanged. `Ready` grants no credits. The miner sends its
+first `JobRequest` after `Ready`, and the coordinator dispatches work only
+against credits from `JobRequest`. A D-Wave miner with a budget sends no
+`JobRequest` until it decides to spend QPU time, so it receives no jobs
+before then.
 
 For D-Wave, set `budget` and `budget_reset_day` in `[dwave]`:
 
