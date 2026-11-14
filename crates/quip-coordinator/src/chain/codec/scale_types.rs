@@ -1053,24 +1053,23 @@ mod tests {
 
     #[test]
     fn job_order_decode_rejects_bad_enum_tag() {
-        // `mode: JobMode` is a 3-field composite; corrupt the SCALE variant tag
-        // of the first enum (`mode`, after the fixed-size spec_id/proposer and
-        // the variable ising_params). A tag past the variant count must error,
-        // not panic. Scan for the first byte whose flip yields an out-of-range
-        // enum tag by fuzzing each position and asserting no decode panics.
-        let enc = valid_job_order().encode();
-        for i in 0..enc.len() {
-            let mut bad = enc.clone();
-            #[expect(
-                clippy::indexing_slicing,
-                reason = "i iterates 0..enc.len(); in-bounds by construction"
-            )]
-            {
-                bad[i] = 0xFF; // 0xFF is out of range for every enum in the struct
-            }
-            // Must return Ok or Err, never panic (the point of the guard).
-            let _ = JobOrderScale::decode(&mut &bad[..]);
+        // `mode` follows spec_id, proposer, the variable-length ising_params,
+        // and reward. Its first byte is the SCALE variant tag; 0xFF is past
+        // every variant, so decode must return Err at exactly that offset.
+        let order = valid_job_order();
+        let mode_tag_offset = order.spec_id.encode().len()
+            + order.proposer.encode().len()
+            + order.ising_params.encode().len()
+            + order.reward.encode().len();
+        let mut bytes = order.encode();
+        #[expect(
+            clippy::indexing_slicing,
+            reason = "the offset is the encoded length of the preceding fields"
+        )]
+        {
+            bytes[mode_tag_offset] = 0xFF;
         }
+        assert!(JobOrderScale::decode(&mut &bytes[..]).is_err());
     }
 
     fn chain_meta_fixture() -> Result<([u8; 32], TopologyMetaScale), String> {

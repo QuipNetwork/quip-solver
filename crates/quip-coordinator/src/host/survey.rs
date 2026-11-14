@@ -102,6 +102,15 @@ pub struct RawSurvey {
 /// startup or process exit.
 #[must_use]
 pub fn collect(budget: Duration) -> Option<HostSurvey> {
+    collect_with(budget, probe)
+}
+
+/// [`collect`] over a caller-supplied probe, so a test controls how long the
+/// probe takes instead of racing the real hardware probes.
+fn collect_with(
+    budget: Duration,
+    probe: impl FnOnce() -> RawSurvey + Send + 'static,
+) -> Option<HostSurvey> {
     let (tx, rx) = std::sync::mpsc::sync_channel::<RawSurvey>(1);
     let spawned = std::thread::Builder::new()
         .name("quip-survey".to_owned())
@@ -752,8 +761,8 @@ fn macos_gpus(cpu_brand: &str) -> Vec<RawGpu> {
 #[cfg(test)]
 mod tests {
     use super::{
-        clamp_utf8, collect, fits_pallet_bounds, looks_like_credential, sanitize, RawGpu,
-        RawSurvey, SURVEY_BUDGET,
+        clamp_utf8, collect, collect_with, fits_pallet_bounds, looks_like_credential, sanitize,
+        RawGpu, RawSurvey, SURVEY_BUDGET,
     };
     use std::time::Duration;
 
@@ -942,7 +951,22 @@ mod tests {
 
     #[test]
     fn deadline_is_real() {
-        assert!(collect(Duration::from_millis(0)).is_none());
+        // The probe blocks until the test releases it, so it cannot beat the
+        // budget however fast the host is.
+        let (release, hold) = std::sync::mpsc::channel::<()>();
+        let missed = collect_with(Duration::from_millis(20), move || {
+            let _ = hold.recv();
+            RawSurvey::default()
+        });
+        assert!(missed.is_none(), "a probe past the budget must yield None");
+        // Release the detached thread so the test leaves nothing blocked.
+        drop(release);
+    }
+
+    #[test]
+    fn a_probe_inside_the_budget_is_sanitized() {
+        let survey = collect_with(Duration::from_secs(30), RawSurvey::default);
+        assert!(survey.is_some_and(|s| fits_pallet_bounds(&s.system)));
     }
 
     #[test]

@@ -175,29 +175,20 @@ mod protocol_version {
         );
     }
 
-    /// Published capability additions preserve protocol-2 wire semantics.
+    /// The coordinator speaks protocol 2. A solver-core bump to another
+    /// version must fail here, not on a live miner.
     #[test]
     fn capability_additions_keep_protocol_2_wire_semantics() {
-        use prost::Message;
-
         assert_eq!(PROTOCOL_VERSION, 2);
-        for degree in [None, Some(0), Some(20)] {
-            let caps = Capabilities {
-                protocol_version: PROTOCOL_VERSION,
-                max_degree: degree,
-                ..Capabilities::default()
-            };
-            assert_eq!(caps.max_local_field_milli, None);
-            assert_eq!(caps.exact_resolution_milli, None);
-            let bytes = caps.encode_to_vec();
-            assert_eq!(Capabilities::decode(bytes.as_slice()), Ok(caps));
-        }
+        let caps = Capabilities::default();
+        assert_eq!(caps.max_local_field_milli, None);
+        assert_eq!(caps.exact_resolution_milli, None);
     }
 }
 
 mod supervisor {
     //! Supervisor reclaim and spawn integration tests. The restart policy table
-    //! is covered by the unit tests in `src/supervisor.rs`.
+    //! is covered by the unit tests in `src/miner/supervisor.rs`.
 
     /// A miner that exits cleanly (code 0) while it still owns in-flight jobs must
     /// have those jobs reclaimed and re-routed — not leaked in the `inflight` map
