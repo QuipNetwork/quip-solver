@@ -435,9 +435,13 @@ build-coordinator-darwin-arm64:
   # .toolchain. The key is fixed rather than built from Cargo.lock: this job
   # runs only on tags, and each rc tag bumps the version in Cargo.lock, so a
   # lockfile key would start every release cold. Cargo reuses whatever still
-  # matches and rebuilds the rest.
+  # matches and rebuilds the rest. Each macOS runner keeps its own local
+  # cache, and one of them stops jobs at 10 minutes, which a cold build
+  # exceeds. `when: always` saves the downloads from a run that times out, so
+  # the next run on that runner starts warm instead of cold again.
   cache:
     key: cargo-$CI_JOB_NAME
+    when: always
     paths:
       - .cargo/registry/index/
       - .cargo/registry/cache/
