@@ -376,6 +376,46 @@ pub fn default_topology_storage_key() -> Vec<u8> {
     key
 }
 
+/// Prefix of the `QuantumPow.MineableTopologies` map. Each key continues with
+/// `blake2_128(hash) ++ hash`.
+#[must_use]
+pub fn mineable_topologies_prefix() -> Vec<u8> {
+    let mut key = Vec::with_capacity(32);
+    key.extend_from_slice(&twox128(b"QuantumPow"));
+    key.extend_from_slice(&twox128(b"MineableTopologies"));
+    key
+}
+
+/// `QuantumPow.RegisteredTopologies[hash]`, a `Blake2_128Concat` map.
+#[must_use]
+pub fn registered_topologies_storage_key(hash: &[u8; 32]) -> Vec<u8> {
+    let mut key = Vec::with_capacity(16 + 16 + 16 + 32);
+    key.extend_from_slice(&twox128(b"QuantumPow"));
+    key.extend_from_slice(&twox128(b"RegisteredTopologies"));
+    key.extend_from_slice(&blake2_128(hash));
+    key.extend_from_slice(hash);
+    key
+}
+
+/// `Foundation.Members`, the sorted member accounts.
+#[must_use]
+pub fn foundation_members_storage_key() -> Vec<u8> {
+    let mut key = Vec::with_capacity(32);
+    key.extend_from_slice(&twox128(b"Foundation"));
+    key.extend_from_slice(&twox128(b"Members"));
+    key
+}
+
+/// `Foundation.Voting[proposal_hash]`, an `Identity` map.
+#[must_use]
+pub fn foundation_voting_storage_key(proposal_hash: &[u8; 32]) -> Vec<u8> {
+    let mut key = Vec::with_capacity(32 + 32);
+    key.extend_from_slice(&twox128(b"Foundation"));
+    key.extend_from_slice(&twox128(b"Voting"));
+    key.extend_from_slice(proposal_hash);
+    key
+}
+
 /// `QuantumPow::QBlocks[block_number]` — the accepted proof for one block.
 ///
 /// The map is `Blake2_128Concat` over `BlockNumberFor<T>`, which is `u32` on

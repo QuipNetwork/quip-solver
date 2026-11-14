@@ -80,6 +80,13 @@ quip-coordinator drive --miner ./miners/quip-cpu-sa --source lease \
 # Seed a fresh runtime-120 chain with the dimer1200 family topology.
 # Give exactly one of --sudo-key or --mnemonic-file.
 quip-coordinator seed-chain --sudo-key //Alice
+
+# Move a seeded chain to another twisted-ice dimer topology. Check first with
+# --dry-run, which signs nothing. The signer comes from --mnemonic-file or
+# QUIP_FOUNDATION_KEY.
+quip-coordinator set-family --weak-milli 45 --pairs 1350 \
+  --topology ./live.spec.json --max-energy-milli -4886000 \
+  --band-hard-milli -5136000 --band-easy-milli -4836000 --dry-run
 ```
 
 Drive accepts one of `--topology <spec.json>`, `--topology-preset <name>`,
@@ -111,16 +118,33 @@ Negative energy arguments accept a separate value. The drive option
 `--max-energy-milli -4850000` uses milli units. Both options also accept the
 equals form.
 
-You can seed a chain only once. `seed-chain` refuses to run when a chain
-already has a default topology. Wipe the chain data and restart the validator
-instead.
+`seed-chain` refuses a chain that already has a default topology. To move a
+seeded chain to another family topology, use `set-family`.
 
-`seed-chain` needs runtime 120 or later, which has family topologies and no
-`Sudo` pallet. It sends one Foundation motion with threshold 1 that runs
-register, difficulty, band, whitelist, and default through
-`ValidatorAdmission::dispatch_as_root(Utility::batch_all(...))`. Threshold 1
-executes at once only when the signer is the sole Foundation member, as
-`//Alice` is on the `dev` preset. It refuses older runtimes.
+`set-family` takes `--weak-milli` and `--pairs`, or `--params-hex`, for
+`quip/twisted-ice-dimer` revision 1 on Zephyr z(12, 4). It takes the graph
+from `--topology` or `--topology-preset`. `--max-energy-milli`,
+`--band-hard-milli` and `--band-easy-milli` have no defaults, because the
+energies depend on the parameters. The ceiling must sit inside the band. On
+a seeded chain the batch removes every other topology from the mineable
+whitelist, so only the new topology stays mineable.
+
+The signer comes from `--mnemonic-file` or the `QUIP_FOUNDATION_KEY`
+environment variable, never from a command-line value.
+
+A `--dry-run` signs nothing. Its output lists the calls, the family hash,
+the proposal hash and the motion, worked out from the current chain state.
+
+Both commands need runtime 120 or later, which has family topologies and no
+`Sudo` pallet. The calls go through
+`ValidatorAdmission::dispatch_as_root(Utility::batch_all(...))` in one
+Foundation motion. Its threshold is two thirds of the Foundation members,
+rounded up. With one member, as `//Alice` is on the `dev` preset, the motion
+executes at once. With more members, every member runs the same command.
+The first run proposes the motion. Each run votes aye, and the run whose
+vote reaches the threshold closes the motion. quip-validator v0.4.1 also
+reports spec 120 but has no family topologies; on it the batch fails and the
+command reports that the default did not move.
 
 The coordinator binary provides `zephyr-z12t4-live`, `aglais`, and `smoke`
 topology presets. `drive --topology-preset` and `seed-chain` read them from
