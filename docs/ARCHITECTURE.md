@@ -44,6 +44,60 @@ A miner is any process that speaks the protocol. Miners ship from separate
 repositories, and the D-Wave miner ships from Python over the
 `quip-solver-core` PyPI wheel.
 
+## Coordinator module layout
+
+`quip-coordinator` is one library and one binary. The library has ten
+top-level modules under `crates/quip-coordinator/src/`. Each module has one
+concern, and imports point down the layers only.
+
+| Module | Concern | May import |
+|--------|---------|------------|
+| `types` | Plain data that every module shares | nothing in the crate |
+| `observe` | Metrics, the dashboard record writer, log setup | `types` |
+| `config` | `config.toml` parsing and the per-miner launch plan | `types` |
+| `host` | The hardware survey | `types` |
+| `chain` | Validator operations behind `ChainClient` | `types`, `observe`, `host` |
+| `miner` | The miner session protocol and process supervision | `types`, `observe`, `config` |
+| `coordinator` | The solver logic: rounds, routing, scoring, settlement | `types`, `observe`, `miner` |
+| `dashboard` | The `/api/v1` REST surface | `types`, `observe` |
+| `app` | The composition root: the chain and drive environments | every module except `cli` |
+| `cli` | One file per subcommand, and dispatch | `app`, `chain`, `config`, `types` |
+
+A trait lives in the module that calls it. The module that supplies the
+behavior provides the `impl`. The `miner` module defines `SessionEvents`,
+`SessionGate`, and `MinerBroadcast`. The `coordinator` module defines
+`WorkSource` and `ResultSink`. The `app` module defines `Environment`, which
+is a `WorkSource` and a `ResultSink` together. `app::chain_env` provides it
+over the chain. `app::local_env` runs the drive path without a chain.
+
+The four areas in the middle (`coordinator`, `miner`, `chain`, `dashboard`) do
+not import each other, with one exception. The `coordinator` module imports
+`miner` to provide the `SessionEvents` impl. The design also keeps one
+exception to the table: `config` reads the funding defaults from
+`chain::registration::funding`.
+
+The `testing` module holds the test doubles, `testing::fake_chain` and
+`testing::session_harness`. The crate builds it for unit tests, and for other
+builds only with the `test-support` feature. The integration tests turn that
+feature on through a dev-dependency on the crate itself.
+
+`crates/quip-coordinator/tests/layering.rs` checks these rules on every
+`cargo test -p quip-coordinator`. It reads every production `crate::` path and
+fails on a forbidden import, on any import cycle, and on a listed exception
+that no longer occurs.
+
+The `chain` module splits by concern:
+
+| Folder | Holds |
+|--------|-------|
+| `chain/client/` | `RealChainClient`, the RPC transport, storage reads, extrinsic watch, dry runs |
+| `chain/codec/` | SCALE types, extrinsic assembly, proof encoding |
+| `chain/sign/` | Signing, submission, inclusion checks, failure explanation |
+| `chain/registration/` | Miner and solver registration, the node descriptor, funding, account reads |
+| `chain/mining/` | The snapshot, the challenge family, participation, proofs, the transaction pool, mempool orders |
+| `chain/governance/` | `seed-chain`, `set-family`, and the Foundation motion |
+| `chain/startup/` | The compatibility check and the sync wait |
+
 ## The five seams
 
 The architecture rests on five boundaries. The source references below back
@@ -52,42 +106,45 @@ each one.
 ### 1. One blockchain touchpoint
 
 Every chain interaction sits in `crates/quip-coordinator/src/chain/` behind the
-`ChainClient` trait (`chain/mod.rs:43`). Its core methods are
+`ChainClient` trait (`chain/mod.rs`). Its core methods are
 `fetch_mining_snapshot` and `submit_proof` for proof-of-work, and
 `ensure_solver_registered`, `fetch_mempool_orders`, and `submit_solution` for
 mempool orders. Two types
-provide it: `RealChainClient` over Substrate JSON-RPC (`chain/real.rs:61`)
-and `FakeChain` for tests (`chain/fake.rs:14`). The JSON-RPC transport is
-`jsonrpsee`, wrapped in `chain/transport_jsonrpsee.rs`. The module owns
+provide it: `RealChainClient` over Substrate JSON-RPC (`chain/client/mod.rs`)
+and `FakeChain` for tests (`testing/fake_chain.rs`). The JSON-RPC transport is
+`jsonrpsee`, wrapped in `chain/client/jsonrpsee.rs`. The module owns
 everything downstream of the seam:
 extrinsic building, SCALE types, proof encoding, snapshot decoding, mempool
 decoding, and submission. Nothing outside `chain/` talks to the node.
 
 ### 2. Feeder and per-miner dispatch
 
-Job staging runs through three files that form one control path. `producer/`
-builds jobs: `pow.rs` derives the proof-of-work job from the chain snapshot,
-`mempool.rs` converts fetched `JobOrder`s into wire `Job`s. `runtime::feeder_loop`
-(`runtime.rs:604`) follows the chain head, bumps a generation on each new
-`last_proof_block_hash`, and stages jobs per miner using an adaptive window read
-off the router's drain rate (`adaptive_depth`, `runtime.rs:135`). `router.rs`
-holds the capability-indexed staged queues and the dispatch credits. The target
-design named a single module here. The code splits it into producer, feeder,
-and router. The split is deliberate: the router is a reusable queue primitive,
-and the feeder is the policy on top of it.
+Job staging runs through three parts of `coordinator/` that form one control
+path. `coordinator/producer/` builds jobs: `pow.rs` derives the proof-of-work
+job from the chain snapshot, and `mempool.rs` converts fetched `JobOrder`s into
+wire `Job`s. `coordinator::feeder::feeder_loop` (`coordinator/feeder/mod.rs`)
+follows the chain head. On each new `last_proof_block_hash` it bumps the
+generation. It stages jobs per miner in a window that adapts to the
+router's drain rate (`adaptive_depth`, `coordinator/feeder/pow.rs`). The
+staging for proof-of-work, leases, and mempool orders is in
+`coordinator/feeder/pow.rs`, `lease.rs`, and `mempool.rs`.
+`coordinator/router/` holds the capability-indexed staged queues and the
+dispatch credits. The router is a reusable queue primitive, and the feeder is
+the policy on top of it.
 
 ### 3. Spawn, kill, and the protocol kill line
 
-`supervise_miner` (`supervisor.rs:176`) starts each miner: it spawns the binary
-with a fresh per-spawn session token and applies the exit-code restart policy
-(`restart_policy`, `supervisor.rs:25`). Clean exits respawn on demand,
+`supervise_miner` (`miner/supervisor.rs`) starts each miner: it spawns the
+binary (`miner/process.rs`) with a fresh per-spawn session token and applies
+the exit-code restart policy (`restart_policy`, `miner/supervisor.rs`). Clean exits respawn on demand,
 operator and environment errors (64, 69, 77) never respawn, and crashes back off
 by `2^consecutive` within a failure budget. A clap usage error (2) also never
 respawns: the argv does not match the binary, and no retry can fix that.
 `supervise_miner` also ends the run: on a stop signal it sends an in-band
 `Shutdown`, waits the grace period, then kills any survivor. The protocol kill
 line is the `Shutdown` and `Cancel` control messages. The coordinator emits
-them (`send_cancel`, `session.rs:1141`, and `shutdown_msg`, `session.rs:1406`).
+them: `send_cancel` in `miner/session/stream.rs` sends `Cancel`, and the
+`SessionGate` impl sends the in-band `Shutdown`.
 The `quip-solver-core` harness honors them and drains in-flight work (its
 session loop and `SPEC.md` section 5, "Cancellation", cover the cancel
 semantics).
@@ -106,14 +163,13 @@ that call `run`. The D-Wave miner is Python, built on the `quip-solver-core`
 PyPI wheel. For a backend that is a standalone executable rather than a
 Rust `Sampler`, `quip-solver-exec` is the plug-in point: it serializes each job
 to a JSON model, execs a configured external solver (by file or stdin), and
-parses the solver's JSON solutions back over the same session protocol. One part
-of the target design still differs from the source:
+parses the solver's JSON solutions back over the same session protocol.
 
-- The random, list, and lease job sources (the driver for benchmarking without
-  a chain) live coordinator-side under `drive/` (`drive/random_source.rs`,
-  `drive/list_source.rs`, `drive/lease_source.rs`, `drive/harness.rs`), reached
-  through the `drive` subcommand. They generate jobs, so the coordinator is
-  their natural home, and the miner stays a pure solver.
+The random, list, and lease job sources (the driver for benchmarking without a
+chain) live coordinator-side in `app/local_env/` (`random_source.rs`,
+`list_source.rs`, `lease_source.rs`, and the harness in `mod.rs`), reached
+through the `drive` subcommand. The sources generate jobs, so they belong to the
+coordinator. The miner stays a pure solver.
 
 ### 5. Miners are isolated solvers
 
@@ -136,7 +192,7 @@ A proof-of-work job flows through the system in one pass:
    block that includes the winning proof, one block before the pallet stores
    it. A proof pending in the pool that clears the round also stops the
    miners, until the block that includes it arrives.
-3. `producer::derive_pow_job` builds the job from the snapshot. Mempool orders
+3. `coordinator::producer::pow::derive_pow_job` builds the job from the snapshot. Mempool orders
    take a parallel path. The feeder registers the signing account in
    `QuantumComputeMempool.Solvers` once per round until the call succeeds, and
    proof-of-work mining does not wait for it. After registration, the feeder
@@ -146,10 +202,10 @@ A proof-of-work job flows through the system in one pass:
 4. The feeder stages jobs on each miner's queue up to the adaptive depth. The
    router dispatches them and tracks a dispatch-to-completion credit.
 5. The miner samples and streams results back over the session.
-6. `validate.rs` scores the returned set. A solution is energy-valid when its
+6. `coordinator/scoring/validate.rs` scores the returned set. A solution is energy-valid when its
    milli-energy is strictly below the gate floor. The coordinator accepts the
    set when `n_valid >= min_solutions` and `diversity_milli >= min_diversity_milli`
-   (`check_proof_gates`, `validate.rs:131`). A mempool result uses the gates of
+   (`check_proof_gates`). A mempool result uses the gates of
    its own order, not the round target.
 7. On an accepted proof-of-work set, the coordinator submits the
    `QuantumPow.submit_proof` extrinsic through `ChainClient`. An accepted
@@ -160,7 +216,7 @@ For a miner that advertises the BLAKE3/ChaCha8 generator, the feeder stages
 `ISING_GENERATE` leases instead of plain proof-of-work jobs. Each lease names a
 range of salts. The miner draws, samples, and scores one problem per salt. It
 sends a `Result` for each salt it reports, carrying every read, unfiltered by
-target. `lease::verify_and_select` checks each `Result` in two steps. First,
+target. `coordinator::scoring::lease::verify_and_select` checks each `Result` in two steps. First,
 `quip_protocol::lease::verify_lease_result` with a permissive target redraws the
 problem and rescores every read. Second, the gates and selection that plain
 results use pick the proof set against the live target. An authentic `Result`
@@ -194,7 +250,7 @@ CUDA, Metal, and D-Wave bounds live in their own repositories.
 Genesis and consensus defaults live in the chain pallet, not here. The
 coordinator reads them from the mining snapshot. The one place this repository
 names difficulty values is `seed-chain`: `DEFAULT_SEED_DIFFICULTY`
-(`chain/seed.rs`) writes `min_solutions = 1`,
+(`chain/governance/seed.rs`) writes `min_solutions = 1`,
 `max_energy_milli = -4_850_000`, and `min_diversity_milli = 0` to a fresh
 chain, with `DEFAULT_ENERGY_BAND` from -5,100,000 to -4,800,000 milli. The devnet acceptance test (`tests/devnet_submit.rs`) asserts that the
 decoded gates are sane, not that they hold fixed values. For the difficulty
@@ -213,7 +269,7 @@ spawn. Keeping both independent of the production serve loop is what lets
 them script failures the real path would never produce.
 
 The `drive` subcommand runs the coordinator against synthetic problems with no
-chain, using the `drive/` job sources. It is the fast offline path for load
+chain, using the job sources in `app/local_env/`. It is the fast offline path for load
 and behavior testing.
 
 ## Build and run
