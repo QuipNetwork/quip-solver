@@ -2,30 +2,14 @@
 //! miner session server, and process supervision for the v0.3 protocol.
 
 pub mod app;
-pub mod attempt;
-pub mod cancel_timing;
 pub mod chain;
+pub mod cli;
 pub mod config;
 pub mod coordinator;
 pub mod dashboard;
-pub mod decay;
-pub mod drive;
-pub mod funding;
-pub mod keygen;
-pub mod lease;
-pub mod liveness;
-pub mod logging;
-pub mod metrics;
-pub mod pool_watch;
-/// `PoW` and mempool job construction helpers.
-pub mod producer;
-pub mod round;
-pub mod router;
-pub mod runtime;
-pub mod session;
-pub mod stash;
-pub mod supervisor;
-pub mod survey;
-pub mod timing;
+pub mod host;
+pub mod miner;
+pub mod observe;
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing;
 pub mod types;
-pub mod validate;

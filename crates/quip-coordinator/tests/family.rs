@@ -4,7 +4,7 @@
 mod dispatch {
     //! CO-1: family capability matching and the operator solver pin.
 
-    use quip_coordinator::router::{Ineligible, MinerCaps, Router};
+    use quip_coordinator::coordinator::router::{Ineligible, MinerCaps, Router};
     use quip_coordinator::types::problem::milli_problem;
     use quip_proto::v1::{
         ising_problem, EdgeList, FamilyBinding, FamilyDescriptor, FamilySupport,
@@ -356,9 +356,9 @@ mod drive {
 
     use ising_generators::descriptor::{params_digest, Contract};
     use ising_generators::Code;
-    use quip_coordinator::drive::drain_all;
-    use quip_coordinator::drive::lease_source::LeaseSource;
-    use quip_coordinator::lease::{build_lease_job, lease_generator};
+    use quip_coordinator::app::local_env::drain_all;
+    use quip_coordinator::app::local_env::lease_source::LeaseSource;
+    use quip_coordinator::coordinator::scoring::lease::{build_lease_job, lease_generator};
     use quip_coordinator::types::family::ChallengeFamily;
     use quip_coordinator::types::snapshot::head_state_key;
     use quip_coordinator::types::topology::Topology;
@@ -533,7 +533,7 @@ mod verification {
     use ising_generators::polariton::POLARITON_V1;
     use ising_generators::random::derive_nonce;
     use ising_generators::registry::CONTRACTS as REGISTRY;
-    use quip_coordinator::lease::{
+    use quip_coordinator::coordinator::scoring::lease::{
         build_lease_job, lease_generator, verify_and_select, LeaseTopology,
     };
 

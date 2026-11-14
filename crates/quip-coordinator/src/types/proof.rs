@@ -4,6 +4,17 @@
 use parity_scale_codec::{Decode, Encode};
 use sp_core::{H256, U256};
 
+/// Upper bound on solutions packed into a submitted proof. Must not exceed the
+/// chain pallet's `QuantumPowMaxSolutions` (`BoundedVec` bound, currently 32):
+/// a proof carrying more rows fails SCALE bounded-vector decode before the
+/// extrinsic dispatches. The coordinator therefore submits only the
+/// diverse-selected subset, and the pallet re-selects within it.
+pub const MAX_PROOF_SOLUTIONS: usize = 32;
+
+/// [`MAX_PROOF_SOLUTIONS`] as the wire `SetTarget.max_proof_solutions` value.
+pub const MAX_PROOF_SOLUTIONS_WIRE: u32 = 32;
+const _: () = assert!(MAX_PROOF_SOLUTIONS == MAX_PROOF_SOLUTIONS_WIRE as usize);
+
 /// One decoded solution: spins in node order and the energy this coordinator
 /// scored for them. The internal form of a proof row. Wire solutions are
 /// decoded once, when a result is validated.
@@ -102,7 +113,7 @@ pub struct Validated {
     /// Whether `n_valid` and diversity clear the advertised gates.
     pub accepted: bool,
     /// The diverse-selected *gate-passing* solutions to submit now
-    /// (≤ `MAX_PROOF_SOLUTIONS`). Empty when no rows cleared the energy gate.
+    /// (≤ [`MAX_PROOF_SOLUTIONS`]). Empty when no rows cleared the energy gate.
     /// Packed into the immediate-submit proof instead of the raw result rows so
     /// submissions stay within the pallet's bound.
     pub selected_solutions: Vec<SpinRow>,
@@ -111,7 +122,7 @@ pub struct Validated {
     /// no shape-valid row exists. The decay-ratchet stash uses this minimum to
     /// project when an easing gate can admit a returned solution.
     pub raw_best_energy_milli: i64,
-    /// The deduped rows (≤ `MAX_PROOF_SOLUTIONS`) the stash retains for a
+    /// The deduped rows (≤ [`MAX_PROOF_SOLUTIONS`]) the stash retains for a
     /// future, eased-ceiling submission, chosen regardless of the current gate.
     /// Ordered by ascending energy and pruned so that every prefix of them
     /// still clears the chain's diversity gate.

@@ -2,12 +2,13 @@
 //! to the chain, and each round walks the readiness steps on chain.
 
 pub mod readiness;
+pub mod run;
 
+use crate::chain::funding::{ensure_funded, BalanceSource, FundingParams, HttpFaucet};
 use crate::chain::sync::{wait_until_synced, SyncOutcome, SyncSource};
 use crate::chain::ChainClient;
 use crate::config::DescriptorParams;
 use crate::coordinator::{ResultSink, WorkSource};
-use crate::funding::{ensure_funded, BalanceSource, FundingParams, HttpFaucet};
 use crate::types::miner::MinerInfo;
 use crate::types::order::JobOrder;
 use crate::types::proof::{Proof, SubmitReceipt};

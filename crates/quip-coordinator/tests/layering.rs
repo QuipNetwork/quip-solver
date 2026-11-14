@@ -1,8 +1,9 @@
 //! The module dependency rules of `docs/ARCHITECTURE.md`, checked against the
 //! source. Every `crate::` path (and every `super::` path that climbs to the
 //! crate root) in production code is an edge from the top-level module that
-//! holds the file to the top-level module the path names. Test modules are
-//! skipped, because a test may reach across layers to build its fixtures.
+//! holds the file to the top-level module the path names. Test modules, inline
+//! or in their own file, are skipped, because a test may reach across layers
+//! to build its fixtures.
 
 #![expect(
     clippy::expect_used,
@@ -13,38 +14,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-/// The layer each top-level module of `src/` belongs to.
-const LAYER_OF: &[(&str, &str)] = &[
-    ("types", "types"),
-    ("app", "app"),
-    ("coordinator", "coordinator"),
-    ("attempt", "observe"),
-    ("logging", "observe"),
-    ("metrics", "observe"),
-    ("config", "config"),
-    ("survey", "host"),
-    ("chain", "chain"),
-    ("funding", "chain"),
-    ("cancel_timing", "miner"),
-    ("liveness", "miner"),
-    ("session", "miner"),
-    ("supervisor", "miner"),
-    ("decay", "coordinator"),
-    ("lease", "coordinator"),
-    ("pool_watch", "coordinator"),
-    ("producer", "coordinator"),
-    ("round", "coordinator"),
-    ("router", "coordinator"),
-    ("stash", "coordinator"),
-    ("timing", "coordinator"),
-    ("validate", "coordinator"),
-    ("dashboard", "dashboard"),
-    ("drive", "app"),
-    ("runtime", "app"),
-    ("keygen", "cli"),
-];
-
-/// The layers each layer may import, besides itself.
+/// The layers each top-level module may import, besides itself. Every
+/// top-level module of `src/` is its own layer. `testing` holds test doubles,
+/// built only for tests, and may import any module but `cli`.
 const MAY_IMPORT: &[(&str, &[&str])] = &[
     ("types", &[]),
     ("observe", &["types"]),
@@ -68,28 +40,39 @@ const MAY_IMPORT: &[(&str, &[&str])] = &[
         ],
     ),
     ("cli", &["app", "chain", "config", "types"]),
+    (
+        "testing",
+        &[
+            "types",
+            "observe",
+            "config",
+            "host",
+            "chain",
+            "miner",
+            "coordinator",
+            "dashboard",
+            "app",
+        ],
+    ),
 ];
 
-/// Module edges the layer rules forbid but the design keeps on purpose.
+/// Paths the layer rules forbid but the design keeps on purpose: the importing
+/// top-level module, the imported path, and why. A path matches when it starts
+/// with the listed one.
 const EXCEPTIONS: &[(&str, &str, &str)] = &[(
     "config",
-    "funding",
+    "chain::funding",
     "the config parser reads its funding defaults from the module that uses them",
 )];
 
-/// Module edges that break the layer rules today and that a later step of the
-/// layout change removes. Each entry must still exist, so the list shrinks as
-/// the edges go.
-const PENDING: &[(&str, &str)] = &[
-    ("session", "chain"),
-    ("session", "coordinator"),
-    ("session", "lease"),
-    ("session", "round"),
-    ("session", "router"),
-    ("session", "stash"),
-    ("session", "timing"),
-    ("session", "validate"),
-];
+/// One production use of another top-level module.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Use {
+    /// The file, relative to `src/`.
+    file: String,
+    /// The path used, from the top-level module on, such as `chain::funding`.
+    path: String,
+}
 
 fn src_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
@@ -110,26 +93,33 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Drop `#[cfg(test)]` modules (inline or out of line) and comment lines.
-/// The source is rustfmt-formatted, so an inline module closes on the first
-/// line that is its own indentation followed by `}`.
+/// The item after a `#[cfg(test)]` at line `at`, without visibility: the
+/// line index and the item text.
+fn item_after_cfg_test<'a>(lines: &[&'a str], at: usize) -> (usize, &'a str, &'a str) {
+    let mut j = at + 1;
+    while lines.get(j).is_some_and(|l| l.trim().starts_with("#[")) {
+        j += 1;
+    }
+    let item = lines.get(j).copied().unwrap_or_default();
+    let indent = &item[..item.len() - item.trim_start().len()];
+    let head = item.trim_start();
+    let head = head
+        .strip_prefix("pub(crate) ")
+        .or_else(|| head.strip_prefix("pub "))
+        .unwrap_or(head);
+    (j, indent, head)
+}
+
+/// Drop inline `#[cfg(test)]` modules, out-of-line test module declarations,
+/// and comment lines. The source is rustfmt-formatted, so an inline module
+/// closes on the first line that is its own indentation followed by `}`.
 fn production_lines(text: &str) -> Vec<&str> {
     let lines: Vec<&str> = text.lines().collect();
     let mut out = Vec::new();
     let mut i = 0;
     while let Some(&line) = lines.get(i) {
         if line.trim() == "#[cfg(test)]" {
-            let mut j = i + 1;
-            while lines.get(j).is_some_and(|l| l.trim().starts_with("#[")) {
-                j += 1;
-            }
-            let item = lines.get(j).copied().unwrap_or_default();
-            let indent = &item[..item.len() - item.trim_start().len()];
-            let head = item.trim_start();
-            let head = head
-                .strip_prefix("pub(crate) ")
-                .or_else(|| head.strip_prefix("pub "))
-                .unwrap_or(head);
+            let (j, indent, head) = item_after_cfg_test(&lines, i);
             if head.starts_with("mod ") && head.ends_with(';') {
                 i = j + 1;
                 continue;
@@ -152,26 +142,58 @@ fn production_lines(text: &str) -> Vec<&str> {
     out
 }
 
-/// Identifiers that follow each occurrence of `prefix` in `line`.
-fn names_after<'a>(line: &'a str, prefix: &str) -> Vec<&'a str> {
-    let mut names = Vec::new();
+/// Files that hold an out-of-line `#[cfg(test)] mod name;` of `file`.
+fn test_module_files(file: &Path, text: &str) -> Vec<PathBuf> {
+    let lines: Vec<&str> = text.lines().collect();
+    let dir = if file.file_name().is_some_and(|n| n == "mod.rs") {
+        file.parent().map(Path::to_path_buf)
+    } else {
+        file.parent()
+            .zip(file.file_stem())
+            .map(|(parent, stem)| parent.join(stem))
+    };
+    let Some(dir) = dir else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if line.trim() != "#[cfg(test)]" {
+            continue;
+        }
+        let (_, _, head) = item_after_cfg_test(&lines, i);
+        if let Some(name) = head
+            .strip_prefix("mod ")
+            .and_then(|rest| rest.strip_suffix(';'))
+        {
+            out.push(dir.join(format!("{name}.rs")));
+            out.push(dir.join(name).join("mod.rs"));
+        }
+    }
+    out
+}
+
+/// Paths that follow each occurrence of `prefix` in `line`, as far as they
+/// run through `ident::` segments: `crate::chain::funding::X` gives
+/// `chain::funding::X`.
+fn paths_after(line: &str, prefix: &str) -> Vec<String> {
+    let mut paths = Vec::new();
     let mut rest = line;
     while let Some(at) = rest.find(prefix) {
         let before = rest[..at].chars().next_back();
         let tail = &rest[at + prefix.len()..];
         if !before.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == ':') {
             let end = tail
-                .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':'))
                 .unwrap_or(tail.len());
-            names.push(&tail[..end]);
+            paths.push(tail[..end].trim_end_matches(':').to_owned());
         }
         rest = tail;
     }
-    names
+    paths
 }
 
-/// Production edges between top-level modules, with the files behind each.
-fn module_edges() -> BTreeMap<(String, String), BTreeSet<String>> {
+/// Production uses between top-level modules, by `(from, to)`.
+fn module_edges() -> BTreeMap<(String, String), BTreeSet<Use>> {
     let src = src_dir();
     let mut files = Vec::new();
     rust_files(&src, &mut files);
@@ -188,9 +210,23 @@ fn module_edges() -> BTreeMap<(String, String), BTreeSet<String>> {
         })
         .filter(|name| name != "lib" && name != "main")
         .collect();
+    let texts: BTreeMap<PathBuf, String> = files
+        .iter()
+        .map(|file| {
+            let text = std::fs::read_to_string(file).expect("read source");
+            (file.clone(), text)
+        })
+        .collect();
+    let test_files: BTreeSet<PathBuf> = texts
+        .iter()
+        .flat_map(|(file, text)| test_module_files(file, text))
+        .collect();
 
-    let mut edges: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
-    for file in files {
+    let mut edges: BTreeMap<(String, String), BTreeSet<Use>> = BTreeMap::new();
+    for (file, text) in &texts {
+        if test_files.contains(file) {
+            continue;
+        }
         let rel = file.strip_prefix(&src).expect("file under src");
         let parts: Vec<String> = rel
             .iter()
@@ -207,18 +243,19 @@ fn module_edges() -> BTreeMap<(String, String), BTreeSet<String>> {
         // `a/b.rs` is 2. That many `super::` segments reach the crate root.
         let depth = parts.len() - usize::from(parts.last().is_some_and(|p| p == "mod.rs"));
         let to_root = "super::".repeat(depth);
-        let text = std::fs::read_to_string(&file).expect("read source");
-        for line in production_lines(&text) {
-            let mut named = names_after(line, "crate::");
-            for name in names_after(line, &to_root) {
-                named.push(name);
-            }
-            for name in named {
+        for line in production_lines(text) {
+            let mut used = paths_after(line, "crate::");
+            used.extend(paths_after(line, &to_root));
+            for path in used {
+                let name = path.split("::").next().unwrap_or_default();
                 if name != top && tops.contains(name) {
                     let _ = edges
                         .entry((top.clone(), name.to_owned()))
                         .or_default()
-                        .insert(rel.display().to_string());
+                        .insert(Use {
+                            file: rel.display().to_string(),
+                            path,
+                        });
                 }
             }
         }
@@ -226,40 +263,33 @@ fn module_edges() -> BTreeMap<(String, String), BTreeSet<String>> {
     edges
 }
 
-fn layer(module: &str) -> &'static str {
-    LAYER_OF
+fn allowed(from: &str, to: &str) -> bool {
+    let may = MAY_IMPORT
         .iter()
-        .find(|(name, _)| *name == module)
+        .find(|(name, _)| *name == from)
         .map_or_else(
-            || panic!("top-level module {module} has no layer in LAYER_OF"),
-            |(_, layer)| *layer,
-        )
+            || panic!("top-level module {from} has no row in MAY_IMPORT"),
+            |(_, may)| *may,
+        );
+    may.contains(&to)
 }
 
-fn allowed(from: &str, to: &str) -> bool {
-    let (from_layer, to_layer) = (layer(from), layer(to));
-    from_layer == to_layer
-        || MAY_IMPORT
-            .iter()
-            .find(|(name, _)| *name == from_layer)
-            .is_some_and(|(_, may)| may.contains(&to_layer))
+fn excepted(from: &str, path: &str) -> bool {
+    EXCEPTIONS
+        .iter()
+        .any(|(f, prefix, _)| *f == from && path.starts_with(prefix))
 }
 
 #[test]
 fn every_module_edge_follows_the_layer_rules() {
     let edges = module_edges();
     let mut violations = Vec::new();
-    for ((from, to), files) in &edges {
-        let excepted = EXCEPTIONS.iter().any(|(f, t, _)| f == from && t == to);
-        let pending = PENDING.iter().any(|(f, t)| f == from && t == to);
-        if !allowed(from, to) && !excepted && !pending {
-            let files: Vec<&str> = files.iter().map(String::as_str).collect();
-            violations.push(format!(
-                "{from} ({}) -> {to} ({}) in {}",
-                layer(from),
-                layer(to),
-                files.join(", ")
-            ));
+    for ((from, to), uses) in &edges {
+        if allowed(from, to) {
+            continue;
+        }
+        for u in uses.iter().filter(|u| !excepted(from, &u.path)) {
+            violations.push(format!("{from} -> {} in {}", u.path, u.file));
         }
     }
     assert!(
@@ -270,19 +300,20 @@ fn every_module_edge_follows_the_layer_rules() {
 }
 
 #[test]
-fn every_listed_exception_and_pending_edge_still_exists() {
+fn every_listed_exception_is_still_used() {
     let edges = module_edges();
-    let listed = EXCEPTIONS
+    let stale: Vec<String> = EXCEPTIONS
         .iter()
-        .map(|(from, to, _)| (*from, *to))
-        .chain(PENDING.iter().copied());
-    let stale: Vec<String> = listed
-        .filter(|(from, to)| !edges.contains_key(&((*from).to_owned(), (*to).to_owned())))
-        .map(|(from, to)| format!("{from} -> {to}"))
+        .filter(|(from, prefix, _)| {
+            !edges
+                .iter()
+                .any(|((f, _), uses)| f == from && uses.iter().any(|u| u.path.starts_with(prefix)))
+        })
+        .map(|(from, prefix, _)| format!("{from} -> {prefix}"))
         .collect();
     assert!(
         stale.is_empty(),
-        "listed edges no longer exist; remove them from the list:\n{}",
+        "listed exceptions no longer occur; remove them from the list:\n{}",
         stale.join("\n")
     );
 }

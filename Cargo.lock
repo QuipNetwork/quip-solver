@@ -3198,6 +3198,7 @@ dependencies = [
  "parity-scale-codec",
  "prost",
  "quantum-validation",
+ "quip-coordinator",
  "quip-proto",
  "quip-protocol",
  "quip-solver-conformance",

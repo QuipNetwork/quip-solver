@@ -17,16 +17,17 @@
 mod common;
 
 use ising_generators::random::derive_nonce;
-use quip_coordinator::chain::FakeChain;
+use quip_coordinator::testing::fake_chain::FakeChain;
 use quip_coordinator::types::order::JobOrder;
 use quip_coordinator::types::snapshot::{MiningSnapshot, PendingProof};
 
 use quip_coordinator::app::chain_env::{ChainEnv, ChainEnvParams};
-use quip_coordinator::config::LaunchEntry;
-use quip_coordinator::router::MinerCaps;
-use quip_coordinator::runtime::{feeder_loop, run_runtime, FeederParams, RuntimeParams};
-use quip_coordinator::session::CoordinatorState;
-use quip_coordinator::supervisor::BackoffPolicy;
+use quip_coordinator::app::{run, RuntimeParams};
+use quip_coordinator::config::launch::LaunchEntry;
+use quip_coordinator::coordinator::feeder::{feeder_loop, FeederParams};
+use quip_coordinator::coordinator::router::MinerCaps;
+use quip_coordinator::coordinator::state::CoordinatorState;
+use quip_coordinator::miner::supervisor::BackoffPolicy;
 use quip_proto::v1::{coord_msg, Configure, CoordMsg, GeneratorAlgorithm, JobKind};
 use sp_core::crypto::{AccountId32, Ss58Codec};
 use std::sync::atomic::AtomicBool;
@@ -136,7 +137,7 @@ struct Params {
 fn chain_env_params() -> ChainEnvParams {
     ChainEnvParams {
         miner_account: [0u8; 32],
-        funding: quip_coordinator::funding::FundingParams::default(),
+        funding: quip_coordinator::chain::funding::FundingParams::default(),
         descriptor: quip_coordinator::config::DescriptorParams::default(),
         descriptor_filed: Arc::new(AtomicBool::new(false)),
         miner_registered: Arc::new(AtomicBool::new(false)),
@@ -152,7 +153,9 @@ fn feeder_params(buffer_depth: usize, poll_ms: u64) -> Params {
             miner_account: [0u8; 32],
             buffer_depth,
             poll_interval: Duration::from_millis(poll_ms),
-            metrics: Arc::new(quip_coordinator::metrics::CoordinatorMetrics::new(&[])),
+            metrics: Arc::new(quip_coordinator::observe::metrics::CoordinatorMetrics::new(
+                &[],
+            )),
         },
         chain: chain_env_params(),
     }
@@ -237,8 +240,8 @@ fn distant_rows() -> Vec<quip_coordinator::types::proof::SpinRow> {
 
 /// A stashed candidate whose viability projection has already arrived, so the
 /// only thing standing between it and a submission is the live difficulty.
-fn due_candidate() -> quip_coordinator::stash::Candidate {
-    quip_coordinator::stash::Candidate {
+fn due_candidate() -> quip_coordinator::coordinator::round::stash::Candidate {
+    quip_coordinator::coordinator::round::stash::Candidate {
         job_id: vec![0xaa],
         salt: Some([1u8; 32]),
         generation: 1,
@@ -453,7 +456,7 @@ async fn feeder_stages_per_salt_jobs_and_leases_from_the_identity() {
     const IDENTITY: [u8; 32] = [0x11; 32];
     const ACCOUNT: [u8; 32] = [0x22; 32];
     const HEAD: [u8; 32] = [0x33; 32];
-    let depth = quip_coordinator::lease::LEASE_STAGE_DEPTH;
+    let depth = quip_coordinator::coordinator::scoring::lease::LEASE_STAGE_DEPTH;
 
     let mut params = feeder_params(4, 30);
     params.feeder.miner_identity = IDENTITY;
@@ -1224,11 +1227,11 @@ async fn feeder_holds_a_stashed_candidate_until_the_live_difficulty_admits_it() 
         let generation = st.generation;
         st.stash.reset(
             generation,
-            Some(quip_coordinator::decay::DecayModel {
+            Some(quip_coordinator::coordinator::round::decay::DecayModel {
                 base_max_energy_milli: i64::MAX,
                 curve: None,
                 epoch_length: 1,
-                algorithm: quip_coordinator::decay::DecayAlgorithm::Stepwise,
+                algorithm: quip_coordinator::coordinator::round::decay::DecayAlgorithm::Stepwise,
                 target_proof_blocks: quip_coordinator::types::snapshot::TARGET_PROOF_BLOCKS,
             }),
             0,
@@ -1272,7 +1275,7 @@ async fn feeder_holds_a_stashed_candidate_until_the_live_difficulty_admits_it() 
 /// the gate follows the council's `TargetProofBlocksOverride`.
 #[tokio::test]
 async fn feeder_switches_the_decay_projection_when_the_runtime_upgrades() {
-    use quip_coordinator::decay::{DecayAlgorithm, DecayModel, EnergyCurve};
+    use quip_coordinator::coordinator::round::decay::{DecayAlgorithm, DecayModel, EnergyCurve};
 
     let f = Feeder::spawn(
         FakeChain::new(gated_snapshot(-1500), None),
@@ -1342,7 +1345,7 @@ async fn viability_after(
     f: &Feeder,
     spec_version: u32,
     target_proof_blocks: u64,
-    algorithm: quip_coordinator::decay::DecayAlgorithm,
+    algorithm: quip_coordinator::coordinator::round::decay::DecayAlgorithm,
     name: &str,
 ) -> u64 {
     let mut upgraded = gated_snapshot(-1500);
@@ -1392,8 +1395,8 @@ async fn runtime_submits_a_lease_winner_answers_an_order_and_shuts_down_clean() 
         buffer_depth: 1,
         poll_interval_ms: 50,
         dashboard: None,
-        log_level: quip_coordinator::logging::LogLevel::Info,
-        identity: quip_coordinator::metrics::Identity::default(),
+        log_level: quip_coordinator::types::log::LogLevel::Info,
+        identity: quip_coordinator::observe::metrics::Identity::default(),
     };
     let entry = LaunchEntry {
         miner_id: "cpu-0".into(),
@@ -1410,7 +1413,7 @@ async fn runtime_submits_a_lease_winner_answers_an_order_and_shuts_down_clean() 
         },
     };
     let (trigger_tx, trigger_rx) = oneshot::channel::<()>();
-    let run = tokio::spawn(run_runtime(
+    let run = tokio::spawn(run(
         vec![entry],
         Arc::new(ChainEnv::new(Arc::clone(&chain), chain_env_params())),
         Arc::new(Mutex::new(CoordinatorState::new())),

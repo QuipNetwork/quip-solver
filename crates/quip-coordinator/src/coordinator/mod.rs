@@ -1,7 +1,19 @@
 //! Solver logic: what work goes where. The coordinator reaches the outside
 //! world only through the two traits here, which the environment supplies.
 
+pub mod events;
+pub mod feeder;
 pub mod ledger;
+/// `PoW` and mempool job construction helpers.
+pub mod producer;
+pub mod round;
+pub mod router;
+pub mod scoring;
+pub mod settle;
+pub mod state;
+
+#[cfg(test)]
+mod session_tests;
 
 use crate::types::miner::MinerInfo;
 use crate::types::order::JobOrder;

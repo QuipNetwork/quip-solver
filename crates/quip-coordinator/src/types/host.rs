@@ -6,7 +6,7 @@ use parity_scale_codec::{Decode, Encode};
 // pinned in Cargo.toml (`runtime/src/configs/mod.rs`). Nothing links them at
 // compile time, so a runtime upgrade that moves a bound is a coordinator
 // change too. Over-length is a SCALE decode failure rather than a pallet
-// error, so it never reaches `DESCRIPTOR_REJECT`; see `crate::survey`.
+// error, so it never reaches `DESCRIPTOR_REJECT`; see `crate::host::survey`.
 
 /// Pallet `MaxOsStringBytes`. One bound for `os.system`, `os.release`, and
 /// `os.machine` alike.

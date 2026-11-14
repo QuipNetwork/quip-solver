@@ -60,7 +60,7 @@ use quip_coordinator::types::hex::{hex_decode, hex_encode};
 use quip_coordinator::types::proof::SubmitAction;
 use quip_coordinator::types::topology_spec::{parse_topology_spec, preset_spec};
 
-use quip_coordinator::validate::MAX_PROOF_SOLUTIONS;
+use quip_coordinator::types::proof::MAX_PROOF_SOLUTIONS;
 use quip_transaction_crypto::{account_id_from_public, HybridPair};
 use sp_core::Pair;
 
@@ -424,12 +424,12 @@ fn init_test_logging() {
     let level = std::env::var("QUIP_DEVNET_LOG")
         .ok()
         .and_then(|s| match s.as_str() {
-            "trace" => Some(quip_coordinator::logging::LogLevel::Trace),
-            "debug" => Some(quip_coordinator::logging::LogLevel::Debug),
+            "trace" => Some(quip_coordinator::types::log::LogLevel::Trace),
+            "debug" => Some(quip_coordinator::types::log::LogLevel::Debug),
             _ => None,
         })
-        .unwrap_or(quip_coordinator::logging::LogLevel::Info);
-    let _ = quip_coordinator::logging::init(Some(level));
+        .unwrap_or(quip_coordinator::types::log::LogLevel::Info);
+    let _ = quip_coordinator::observe::logging::init(Some(level));
 }
 
 #[tokio::test]

@@ -1,7 +1,7 @@
 //! Startup driver for the round state machine.
 //!
 //! Process start has no miners to stop and does not stage work. This module
-//! drives [`crate::round::RoundState`] through validator-synced, account-funded,
+//! drives [`crate::coordinator::round::RoundState`] through validator-synced, account-funded,
 //! miner-registered, requirements-downloaded, and descriptor-filed. The feeder
 //! drives the same machine, including stop-mining and start-mining, on every
 //! later round, and declares participation once a miner has mined the round.
@@ -21,11 +21,11 @@ use crate::chain::{
 use crate::types::hex::hex_encode;
 use crate::types::snapshot::MiningSnapshot;
 
-use crate::config::DescriptorParams;
-use crate::funding::{
+use crate::chain::funding::{
     ensure_funded, BalanceSource, Faucet, FundingError, FundingParams, HttpFaucet,
 };
-use crate::round::{RoundEvent, RoundState};
+use crate::config::DescriptorParams;
+use crate::coordinator::round::{RoundEvent, RoundState};
 use sp_core::crypto::{AccountId32, Ss58Codec};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -344,14 +344,14 @@ pub(crate) fn build_descriptor_payload(
     // for the rest of the process. Dropping the survey degrades to a
     // descriptor without hardware instead of to an invisible node.
     let system_info = params.system_info.clone().filter(|info| {
-        let fits = crate::survey::fits_pallet_bounds(info);
+        let fits = crate::host::survey::fits_pallet_bounds(info);
         if !fits {
             tracing::warn!("host survey exceeds a pallet bound; filing the descriptor without it");
         }
         fits
     });
     let runtime = params.runtime.clone().filter(|info| {
-        let fits = crate::survey::runtime_fits_pallet_bounds(info);
+        let fits = crate::host::survey::runtime_fits_pallet_bounds(info);
         if !fits {
             tracing::warn!(
                 "runtime block exceeds a pallet bound; filing the descriptor without it"
@@ -494,16 +494,15 @@ mod tests {
         file_round_descriptor, prepare_round, register_round_miner, HttpFaucet, ProcessLatches,
         SUBMIT_ATTEMPTS,
     };
-    use crate::chain::{
-        ChainError, DescriptorOutcome, FakeChain, ParticipationOutcome, RegistrationOutcome,
-    };
+    use crate::chain::{ChainError, DescriptorOutcome, ParticipationOutcome, RegistrationOutcome};
+    use crate::testing::fake_chain::FakeChain;
     use crate::types::miner::{MinerKind, MinerSpecScale};
     use crate::types::snapshot::MiningSnapshot;
 
+    use crate::chain::funding::FundingParams;
     use crate::config::DescriptorParams;
-    use crate::funding::FundingParams;
-    use crate::logging::test_support::{drain, init_capture, Capture};
-    use crate::survey::{sanitize, RawGpu, RawSurvey};
+    use crate::host::survey::{sanitize, RawGpu, RawSurvey};
+    use crate::observe::logging::test_support::{drain, init_capture, Capture};
     use sp_core::crypto::{AccountId32, Ss58Codec};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};

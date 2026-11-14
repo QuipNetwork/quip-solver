@@ -1213,7 +1213,7 @@ pub(crate) enum SignedCallOutcome {
 }
 
 #[async_trait]
-impl crate::funding::BalanceSource for RealChainClient {
+impl crate::chain::funding::BalanceSource for RealChainClient {
     async fn free_balance(&self, account: [u8; 32]) -> Result<u128, String> {
         let key = super::account::system_account_storage_key(&account);
         let head = self

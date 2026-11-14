@@ -4,6 +4,7 @@
 pub mod family;
 pub mod hex;
 pub mod host;
+pub mod log;
 pub mod miner;
 pub mod order;
 pub mod problem;

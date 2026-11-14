@@ -15,10 +15,10 @@
 mod common;
 
 use common::mock_miner;
-use quip_coordinator::config::LaunchEntry;
-use quip_coordinator::drive::{
+use quip_coordinator::app::local_env::{
     aggregate, drain_all, DriveManyParams, JobRow, LeaseSource, ListSource,
 };
+use quip_coordinator::config::launch::LaunchEntry;
 use quip_proto::v1::{ising_problem, Configure, EdgeList, Job, JobKind, SetTarget};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -56,19 +56,17 @@ async fn drives_two_entry_list_end_to_end() {
     };
 
     let sock = format!("/tmp/quip-drive-e2e-{}.sock", std::process::id());
-    let token = "drive-e2e-token";
-    let report = quip_coordinator::drive::run_drive(DriveManyParams {
+    let report = quip_coordinator::app::local_env::run_drive(DriveManyParams {
         miner_bin: &miner,
         sock_path: &sock,
         miner_id: "cpu-0",
-        token,
         entry: &entry,
         topology: None,
         target: None,
         jobs,
         utilization: None,
         yielding: false,
-        log_level: quip_coordinator::logging::LogLevel::Info,
+        log_level: quip_coordinator::types::log::LogLevel::Info,
     })
     .await;
 
@@ -128,18 +126,17 @@ async fn drives_leases_end_to_end() {
             backend_toml: String::new(),
         },
     };
-    let report = quip_coordinator::drive::run_drive(DriveManyParams {
+    let report = quip_coordinator::app::local_env::run_drive(DriveManyParams {
         miner_bin: &miner,
         sock_path: &format!("/tmp/quip-drive-lease-{}.sock", std::process::id()),
         miner_id: "cpu-0",
-        token: "tok",
         entry: &entry,
         topology: Some(spec.topology.clone()),
         target: Some(target),
         jobs,
         utilization: None,
         yielding: false,
-        log_level: quip_coordinator::logging::LogLevel::Info,
+        log_level: quip_coordinator::types::log::LogLevel::Info,
     })
     .await;
     assert!(report.handshake_ok);
@@ -229,18 +226,17 @@ async fn deep_credit_pool_does_not_deadlock_the_session() {
     };
 
     let sock = format!("/tmp/quip-flow-control-{}.sock", std::process::id());
-    let run = quip_coordinator::drive::run_drive(DriveManyParams {
+    let run = quip_coordinator::app::local_env::run_drive(DriveManyParams {
         miner_bin: &miner,
         sock_path: &sock,
         miner_id: "cpu-0",
-        token: "flow-control-token",
         entry: &entry,
         topology: None,
         target: None,
         jobs,
         utilization: None,
         yielding: false,
-        log_level: quip_coordinator::logging::LogLevel::Info,
+        log_level: quip_coordinator::types::log::LogLevel::Info,
     });
 
     // A generous bound: the mock miner answers instantly, so this only fires if

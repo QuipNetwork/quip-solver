@@ -490,10 +490,10 @@ pub struct NodeDescriptorV2Input {
     pub log_level: NodeLogLevel,
     /// Miners on this node.
     pub miners: Vec<MinerSpecScale>,
-    /// Optional hardware survey, from [`crate::survey::collect`]. `None` when
+    /// Optional hardware survey, from [`crate::host::survey::collect`]. `None` when
     /// the probe missed its budget or left a pallet bound violated.
     pub system_info: Option<SystemInfoScale>,
-    /// Optional node-software block, from [`crate::survey::collect`]. `None`
+    /// Optional node-software block, from [`crate::host::survey::collect`]. `None`
     /// when the probe missed its budget or left a pallet bound violated.
     pub runtime: Option<RuntimeInfoScale>,
 }
