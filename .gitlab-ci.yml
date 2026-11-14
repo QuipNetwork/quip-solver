@@ -18,7 +18,7 @@ variables:
   PKG: quip-solver
   # The toolchain image the Linux test jobs run on, by digest. The
   # build-toolchain-image job prints this line after a rebuild.
-  TOOLCHAIN_IMAGE: registry.gitlab.com/quip.network/quip-solver/ci-toolchain@sha256:d953b564d5eab1367040180c1db494b811f44035d321f1417251b691ba97f9a7
+  TOOLCHAIN_IMAGE: registry.gitlab.com/quip.network/quip-solver/ci-toolchain@sha256:4f3c676d2467a6c8f11cdb641e9f5065a4855a440eb016de50cbc156f27a527a
 
 # NOTE (v0.3 cutover): the v0.2 image/binary jobs were removed (they built the
 # deleted Python monolith). The v0.3 images below live under a SEPARATE
