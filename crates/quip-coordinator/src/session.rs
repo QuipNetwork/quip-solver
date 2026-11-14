@@ -32,38 +32,19 @@ const GRANT_CHANNEL_DEPTH: usize = 1024;
 
 /// Grant `credits` and send every job the miner is now entitled to.
 ///
-/// Jobs are collected under the state lock and sent after releasing it: the
-/// lock guards coordinator-wide state, so holding it across a `tx.send().await`
-/// blocks every *other* miner's session for as long as this one's outbound
-/// channel stays full.
+/// Jobs are collected first and sent after: the implementation takes its
+/// locks while collecting, and holding one across a `tx.send().await` blocks
+/// every *other* miner's session for as long as this one's outbound channel
+/// stays full.
 ///
 /// Returns `false` when the outbound channel is closed (session is over).
-async fn dispatch_granted(
-    state: &Arc<Mutex<CoordinatorState>>,
+async fn dispatch_granted<E: SessionEvents + ?Sized>(
+    events: &E,
     miner_id: &str,
     credits: u32,
     tx: &mpsc::Sender<Result<CoordMsg, Status>>,
 ) -> bool {
-    let jobs = {
-        let mut st = state.lock().await;
-        st.router.grant_credits(miner_id, credits);
-        let mut jobs = Vec::new();
-        while let Some(job) = st.router.next_job(miner_id) {
-            st.dispatch_inflight(miner_id, job.clone());
-            jobs.push(job);
-        }
-        tracing::debug!(
-            miner = %miner_id,
-            added = credits,
-            dispatched = jobs.len(),
-            staged = st.router.staged_len(miner_id),
-            "dispatch drain"
-        );
-        st.metrics
-            .record_contexts_dispatched(miner_id, jobs.len() as u64);
-        jobs
-    };
-    for job in jobs {
+    for job in events.job_request(miner_id, credits).await {
         if tx.send(Ok(coord(coord_msg::Msg::Job(job)))).await.is_err() {
             return false;
         }
@@ -520,6 +501,16 @@ pub struct CoordinatorService<C: ChainClient + 'static> {
     pub submit_notify: Arc<Mutex<Option<oneshot::Sender<()>>>>,
 }
 
+impl<C: ChainClient + 'static> Clone for CoordinatorService<C> {
+    fn clone(&self) -> Self {
+        Self {
+            state: Arc::clone(&self.state),
+            chain: Arc::clone(&self.chain),
+            submit_notify: Arc::clone(&self.submit_notify),
+        }
+    }
+}
+
 #[tonic::async_trait]
 impl<C: ChainClient + 'static> MinerService for CoordinatorService<C> {
     type SessionStream = OutboundStream;
@@ -528,28 +519,29 @@ impl<C: ChainClient + 'static> MinerService for CoordinatorService<C> {
         &self,
         request: Request<Streaming<MinerMsg>>,
     ) -> Result<Response<Self::SessionStream>, Status> {
-        let mut inbound = request.into_inner();
-        let (tx, rx) = mpsc::channel::<Result<CoordMsg, Status>>(64);
-        let state = Arc::clone(&self.state);
-        let chain = Arc::clone(&self.chain);
-        let submit_notify = Arc::clone(&self.submit_notify);
-        let cancel_timing = Arc::new(CancelTiming::default());
-        let outbound = outbound_stream(rx, Arc::clone(&cancel_timing));
-
-        drop(tokio::spawn(async move {
-            run_session(
-                &mut inbound,
-                &tx,
-                state,
-                chain,
-                submit_notify,
-                cancel_timing,
-            )
-            .await;
-        }));
-
-        Ok(Response::new(outbound))
+        let events = Arc::new(self.clone());
+        Ok(Response::new(start_session(
+            request.into_inner(),
+            Arc::clone(&self.state),
+            events,
+        )))
     }
+}
+
+/// Run one miner session on its own task and return the stream the transport
+/// reads the session's outbound messages from.
+pub fn start_session<E: SessionEvents>(
+    mut inbound: Streaming<MinerMsg>,
+    state: Arc<Mutex<CoordinatorState>>,
+    events: Arc<E>,
+) -> OutboundStream {
+    let (tx, rx) = mpsc::channel::<Result<CoordMsg, Status>>(64);
+    let cancel_timing = Arc::new(CancelTiming::default());
+    let outbound = outbound_stream(rx, Arc::clone(&cancel_timing));
+    drop(tokio::spawn(async move {
+        run_session(&mut inbound, &tx, state, events, cancel_timing).await;
+    }));
+    outbound
 }
 
 /// A session's outbound messages as the transport reads them.
@@ -939,16 +931,72 @@ pub(crate) fn handle_lease_done(
     }
 }
 
+/// Whether the session loop keeps reading after an event, or ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Flow {
+    /// Keep reading the miner's messages.
+    Continue,
+    /// End the session.
+    End,
+}
+
+/// A live session as an event handler sees it: the miner and the channel to it.
+#[derive(Clone, Debug)]
+pub struct SessionLink {
+    /// The miner on the other end.
+    pub miner_id: String,
+    tx: mpsc::Sender<Result<CoordMsg, Status>>,
+}
+
+impl SessionLink {
+    /// Send the miner an in-band `Shutdown` with `grace_ms`.
+    pub async fn shutdown(&self, grace_ms: u32) {
+        let _ = self.tx.send(Ok(shutdown_msg(grace_ms))).await;
+    }
+}
+
+/// What a miner session reports, and what the work behind it answers. One
+/// session loop, [`run_session`], drives every environment through this
+/// trait: the loop owns the handshake, the outbound channel, and the
+/// dispatcher task, and the implementation owns the work.
+#[async_trait::async_trait]
+pub trait SessionEvents: Send + Sync + 'static {
+    /// The miner passed the handshake with `caps`. Called before `Welcome`.
+    async fn joined(&self, miner_id: &str, caps: &Capabilities);
+    /// The miner sent `Ready`.
+    async fn ready(&self, miner_id: &str);
+    /// The miner granted `credits`. Returns the jobs to send it now.
+    async fn job_request(&self, miner_id: &str, credits: u32) -> Vec<quip_proto::v1::Job>;
+    /// The miner returned a `Result`.
+    async fn result(&self, link: &SessionLink, result: quip_proto::v1::Result) -> Flow;
+    /// The miner refused a job.
+    async fn reject(&self, link: &SessionLink, reject: quip_proto::v1::Reject) -> Flow;
+    /// The miner finished a lease.
+    async fn lease_done(&self, link: &SessionLink, done: quip_proto::v1::LeaseDone) -> Flow;
+    /// The miner sent a `Status`.
+    async fn status(&self, miner_id: &str, status: &quip_proto::v1::Status);
+    /// The miner sent a new capability snapshot.
+    async fn capabilities(&self, miner_id: &str, caps: &Capabilities);
+    /// The miner gave up.
+    async fn fatal(&self, link: &SessionLink, fatal: &quip_proto::v1::Fatal) -> Flow;
+    /// Called after the handshake and after every message: whether the
+    /// session has work left.
+    async fn settled(&self, link: &SessionLink) -> Flow;
+}
+
+/// The one session loop: handshake, dispatcher task, and message dispatch.
+///
+/// The token, `Configure`, topology, and target come from `state`; every
+/// message after the handshake goes to `events`.
 #[expect(
     clippy::too_many_lines,
     reason = "session loop is one cohesive handshake + message dispatch"
 )]
-async fn run_session<C: ChainClient>(
+pub async fn run_session<E: SessionEvents>(
     inbound: &mut (impl tokio_stream::Stream<Item = Result<MinerMsg, Status>> + Unpin),
     tx: &mpsc::Sender<Result<CoordMsg, Status>>,
     state: Arc<Mutex<CoordinatorState>>,
-    chain: Arc<C>,
-    submit_notify: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    events: Arc<E>,
     cancel_timing: Arc<CancelTiming>,
 ) {
     // 1. Hello
@@ -996,21 +1044,7 @@ async fn run_session<C: ChainClient>(
         return;
     }
 
-    let miner_caps = MinerCaps::from_capabilities(&caps);
-    {
-        let mut st = state.lock().await;
-        st.router
-            .register_miner(miner_id.clone(), miner_caps.clone());
-    }
-    tracing::info!(
-        miner = %miner_id,
-        backend = %miner_caps.backend,
-        algorithm = %miner_caps.algorithm,
-        max_nodes = miner_caps.max_nodes,
-        max_edges = miner_caps.max_edges,
-        stream_width = miner_caps.stream_width,
-        "miner registered"
-    );
+    events.joined(&miner_id, &caps).await;
 
     // 2. Welcome + Configure (+ Topology if cached)
     if tx
@@ -1053,6 +1087,15 @@ async fn run_session<C: ChainClient>(
             .insert(miner_id.clone(), Arc::clone(&cancel_timing));
     }
 
+    let link = SessionLink {
+        miner_id: miner_id.clone(),
+        tx: tx.clone(),
+    };
+    if events.settled(&link).await == Flow::End {
+        state.lock().await.deregister_outbound(&miner_id);
+        return;
+    }
+
     // Declared before the dispatcher so the wakeup sender can be registered
     // alongside it; see `wake_dispatcher`.
     // Dispatcher task: the only writer of `Job`s for this session.
@@ -1068,12 +1111,12 @@ async fn run_session<C: ChainClient>(
         .await
         .register_wakeup(&miner_id, grants.clone());
     let _dispatcher = {
-        let state = Arc::clone(&state);
+        let events = Arc::clone(&events);
         let tx = tx.clone();
         let miner_id = miner_id.clone();
         tokio::spawn(async move {
             while let Some(credits) = grant_rx.recv().await {
-                if !dispatch_granted(&state, &miner_id, credits, &tx).await {
+                if !dispatch_granted(events.as_ref(), &miner_id, credits, &tx).await {
                     return;
                 }
             }
@@ -1081,164 +1124,46 @@ async fn run_session<C: ChainClient>(
     };
 
     // 3. Message loop
-    'session: loop {
+    loop {
         let Some(Ok(msg)) = inbound.next().await else {
             break;
         };
-        match msg.msg {
-            // Ready says the session is established, not that the miner wants
-            // work. A miner that has nothing to spend, such as a QPU with an
-            // exhausted budget, sends no JobRequest, so it receives no jobs.
+        let flow = match msg.msg {
             Some(miner_msg::Msg::Ready(_)) => {
-                tracing::debug!(miner = %miner_id, "miner ready; dispatch waits for its JobRequest");
+                events.ready(&miner_id).await;
+                Flow::Continue
             }
             // The only source of dispatch credit. Routed through the dispatcher
             // so a job send never blocks the read path.
             Some(miner_msg::Msg::JobRequest(req)) => {
                 tracing::debug!(miner = %miner_id, credits = req.credits, "miner requested work");
                 if grants.send(req.credits).await.is_err() {
-                    break 'session;
+                    Flow::End
+                } else {
+                    Flow::Continue
                 }
             }
-            Some(miner_msg::Msg::Result(result)) => {
-                let is_lease = state
-                    .lock()
-                    .await
-                    .inflight
-                    .get(&result.job_id)
-                    .is_some_and(crate::lease::is_lease);
-                if is_lease {
-                    handle_lease_result(chain.as_ref(), &state, &submit_notify, &miner_id, result)
-                        .await;
-                    continue 'session;
-                }
-                let (job, salt, topo, best, gates, generation, round_log) = {
-                    let mut st = state.lock().await;
-                    st.metrics.record_result_received(&miner_id);
-                    let job = st.complete_inflight(&result.job_id);
-                    if let Some(job) = &job {
-                        st.router.record_completion(&miner_id);
-                        st.note_result(job.generation);
-                    } else {
-                        // The job id is unknown or already completed: either the
-                        // miner sent the same result twice, or the job was
-                        // cancelled when the round turned over.
-                        st.metrics.record_duplicate_result_drop(&miner_id);
-                    }
-                    let salt = st.take_salt(&result.job_id);
-                    let topo = Arc::clone(&st.resolved_topo);
-                    let best = st.current_best_milli;
-                    let gates = crate::validate::gates_from_target(st.target.as_ref());
-                    (
-                        job,
-                        salt,
-                        topo,
-                        best,
-                        gates,
-                        st.generation,
-                        st.round_log.clone(),
-                    )
-                };
-                let job = match job {
-                    // A mempool order is judged by its own gates and answered
-                    // with `submit_solution`. None of the `PoW` handling below
-                    // applies to it.
-                    Some(job) if job.provenance.as_ref().is_some_and(|p| !p.is_pow) => {
-                        submit_mempool_result(
-                            chain.as_ref(),
-                            &state,
-                            &job,
-                            &result.solutions,
-                            result.meta.as_ref().map_or(0, |m| m.device_access_time_us),
-                        )
-                        .await;
-                        None
-                    }
-                    other => other,
-                };
-                if let Some(job) = job {
-                    if job.generation < generation {
-                        st_metrics_stale(&state, &miner_id).await;
-                    }
-                    if let Some(ising) = job.ising.as_ref() {
-                        let started = tokio::time::Instant::now();
-                        let validated = validate_result(ising, &result.solutions, &gates, &topo);
-                        log_validation(&miner_id, &result.job_id, started.elapsed());
-                        settle_pow_result(
-                            chain.as_ref(),
-                            &state,
-                            &submit_notify,
-                            PowOutcome {
-                                miner_id: &miner_id,
-                                job: &job,
-                                job_id: &result.job_id,
-                                salt,
-                                validated,
-                                gates,
-                                current_best_milli: best,
-                                round_log,
-                                device_access_time_us: result
-                                    .meta
-                                    .as_ref()
-                                    .map_or(0, |m| m.device_access_time_us),
-                            },
-                        )
-                        .await;
-                    }
-                }
-            }
-            Some(miner_msg::Msg::Reject(rej)) => {
-                let mut st = state.lock().await;
-                // The rejecting miner grants its own replacement credit (see the
-                // miner's reject path), so the coordinator only re-routes the
-                // job to a capable miner; an unknown job_id needs nothing.
-                if let Some(job) = st.complete_inflight(&rej.job_id) {
-                    st.router.record_reject(&miner_id);
-                    st.router.on_reject(&miner_id, job, rej.reason);
-                }
-            }
+            Some(miner_msg::Msg::Result(result)) => events.result(&link, result).await,
+            Some(miner_msg::Msg::Reject(rej)) => events.reject(&link, rej).await,
             Some(miner_msg::Msg::Status(s)) => {
                 if let Some(latency) = cancel_timing.acknowledge(s.abandoned_generation) {
                     log_cancel_acknowledged(&miner_id, s.abandoned_generation, &latency);
                 }
-                let mut st = state.lock().await;
-                if s.abandoned_generation > 0 {
-                    st.last_abandoned_generation = s.abandoned_generation;
-                }
-                let generation = st.generation;
-                let events = st
-                    .miner_liveness
-                    .observe(&miner_id, &s.sampler_stats, generation);
-                let qblock = st.qblock_id;
-                drop(st);
-                for ev in &events {
-                    log_liveness(&miner_id, qblock, ev);
-                }
+                events.status(&miner_id, &s).await;
+                Flow::Continue
             }
-            // A miner that gives up says so here. Dropping this silently is how
-            // a backend failure reads as an idle miner: the process stays
-            // alive, the supervisor sees no exit, and the queue never drains.
-            Some(miner_msg::Msg::Fatal(f)) => {
-                tracing::error!(
-                    miner = %miner_id,
-                    exit_code = f.exit_code,
-                    restart_required = f.restart_required,
-                    reason = %f.reason,
-                    "miner reported a fatal error"
-                );
-            }
+            Some(miner_msg::Msg::Fatal(f)) => events.fatal(&link, &f).await,
             // The handshake already consumed one Hello. A second one means the
             // miner restarted its session without reconnecting.
             Some(miner_msg::Msg::Hello(_)) => {
                 tracing::warn!(miner = %miner_id, "miner sent Hello mid-session; ignoring");
+                Flow::Continue
             }
             Some(miner_msg::Msg::Capabilities(caps)) => {
-                let _ = state.lock().await.apply_capabilities(&miner_id, &caps);
+                events.capabilities(&miner_id, &caps).await;
+                Flow::Continue
             }
-            Some(miner_msg::Msg::LeaseDone(done)) => {
-                let mut st = state.lock().await;
-                handle_lease_done(&mut st, &miner_id, &done);
-            }
+            Some(miner_msg::Msg::LeaseDone(done)) => events.lease_done(&link, done).await,
             // An empty `msg` is a message this build cannot name: either a
             // field number the miner uses and this coordinator does not, or the
             // reverse. Version skew between the two arrives here and nowhere
@@ -1248,11 +1173,211 @@ async fn run_session<C: ChainClient>(
                     miner = %miner_id,
                     "unrecognized message from miner; check the miner and coordinator protocol versions"
                 );
+                Flow::Continue
             }
+        };
+        if flow == Flow::End || events.settled(&link).await == Flow::End {
+            break;
         }
     }
 
     state.lock().await.deregister_outbound(&miner_id);
+}
+
+/// The production work behind a session: route jobs, validate results, and
+/// settle proofs on the chain.
+#[async_trait::async_trait]
+impl<C: ChainClient + 'static> SessionEvents for CoordinatorService<C> {
+    async fn joined(&self, miner_id: &str, caps: &Capabilities) {
+        let miner_caps = MinerCaps::from_capabilities(caps);
+        {
+            let mut st = self.state.lock().await;
+            st.router
+                .register_miner(miner_id.to_owned(), miner_caps.clone());
+        }
+        tracing::info!(
+            miner = %miner_id,
+            backend = %miner_caps.backend,
+            algorithm = %miner_caps.algorithm,
+            max_nodes = miner_caps.max_nodes,
+            max_edges = miner_caps.max_edges,
+            stream_width = miner_caps.stream_width,
+            "miner registered"
+        );
+    }
+
+    // Ready says the session is established, not that the miner wants work. A
+    // miner that has nothing to spend, such as a QPU with an exhausted budget,
+    // sends no JobRequest, so it receives no jobs.
+    async fn ready(&self, miner_id: &str) {
+        tracing::debug!(miner = %miner_id, "miner ready; dispatch waits for its JobRequest");
+    }
+
+    async fn job_request(&self, miner_id: &str, credits: u32) -> Vec<quip_proto::v1::Job> {
+        let mut st = self.state.lock().await;
+        st.router.grant_credits(miner_id, credits);
+        let mut jobs = Vec::new();
+        while let Some(job) = st.router.next_job(miner_id) {
+            st.dispatch_inflight(miner_id, job.clone());
+            jobs.push(job);
+        }
+        tracing::debug!(
+            miner = %miner_id,
+            added = credits,
+            dispatched = jobs.len(),
+            staged = st.router.staged_len(miner_id),
+            "dispatch drain"
+        );
+        st.metrics
+            .record_contexts_dispatched(miner_id, jobs.len() as u64);
+        jobs
+    }
+
+    async fn result(&self, link: &SessionLink, result: quip_proto::v1::Result) -> Flow {
+        let (state, chain, submit_notify) = (&self.state, self.chain.as_ref(), &self.submit_notify);
+        let miner_id = link.miner_id.as_str();
+        let is_lease = state
+            .lock()
+            .await
+            .inflight
+            .get(&result.job_id)
+            .is_some_and(crate::lease::is_lease);
+        if is_lease {
+            handle_lease_result(chain, state, submit_notify, miner_id, result).await;
+            return Flow::Continue;
+        }
+        let (job, salt, topo, best, gates, generation, round_log) = {
+            let mut st = state.lock().await;
+            st.metrics.record_result_received(miner_id);
+            let job = st.complete_inflight(&result.job_id);
+            if let Some(job) = &job {
+                st.router.record_completion(miner_id);
+                st.note_result(job.generation);
+            } else {
+                // The job id is unknown or already completed: either the
+                // miner sent the same result twice, or the job was
+                // cancelled when the round turned over.
+                st.metrics.record_duplicate_result_drop(miner_id);
+            }
+            let salt = st.take_salt(&result.job_id);
+            let topo = Arc::clone(&st.resolved_topo);
+            let best = st.current_best_milli;
+            let gates = crate::validate::gates_from_target(st.target.as_ref());
+            (
+                job,
+                salt,
+                topo,
+                best,
+                gates,
+                st.generation,
+                st.round_log.clone(),
+            )
+        };
+        let job = match job {
+            // A mempool order is judged by its own gates and answered
+            // with `submit_solution`. None of the `PoW` handling below
+            // applies to it.
+            Some(job) if job.provenance.as_ref().is_some_and(|p| !p.is_pow) => {
+                submit_mempool_result(
+                    chain,
+                    state,
+                    &job,
+                    &result.solutions,
+                    result.meta.as_ref().map_or(0, |m| m.device_access_time_us),
+                )
+                .await;
+                None
+            }
+            other => other,
+        };
+        if let Some(job) = job {
+            if job.generation < generation {
+                st_metrics_stale(state, miner_id).await;
+            }
+            if let Some(ising) = job.ising.as_ref() {
+                let started = tokio::time::Instant::now();
+                let validated = validate_result(ising, &result.solutions, &gates, &topo);
+                log_validation(miner_id, &result.job_id, started.elapsed());
+                settle_pow_result(
+                    chain,
+                    state,
+                    submit_notify,
+                    PowOutcome {
+                        miner_id,
+                        job: &job,
+                        job_id: &result.job_id,
+                        salt,
+                        validated,
+                        gates,
+                        current_best_milli: best,
+                        round_log,
+                        device_access_time_us: result
+                            .meta
+                            .as_ref()
+                            .map_or(0, |m| m.device_access_time_us),
+                    },
+                )
+                .await;
+            }
+        }
+        Flow::Continue
+    }
+
+    async fn reject(&self, link: &SessionLink, rej: quip_proto::v1::Reject) -> Flow {
+        let mut st = self.state.lock().await;
+        // The rejecting miner grants its own replacement credit (see the
+        // miner's reject path), so the coordinator only re-routes the
+        // job to a capable miner; an unknown job_id needs nothing.
+        if let Some(job) = st.complete_inflight(&rej.job_id) {
+            st.router.record_reject(&link.miner_id);
+            st.router.on_reject(&link.miner_id, job, rej.reason);
+        }
+        Flow::Continue
+    }
+
+    async fn lease_done(&self, link: &SessionLink, done: quip_proto::v1::LeaseDone) -> Flow {
+        let mut st = self.state.lock().await;
+        handle_lease_done(&mut st, &link.miner_id, &done);
+        Flow::Continue
+    }
+
+    async fn status(&self, miner_id: &str, s: &quip_proto::v1::Status) {
+        let mut st = self.state.lock().await;
+        if s.abandoned_generation > 0 {
+            st.last_abandoned_generation = s.abandoned_generation;
+        }
+        let generation = st.generation;
+        let events = st
+            .miner_liveness
+            .observe(miner_id, &s.sampler_stats, generation);
+        let qblock = st.qblock_id;
+        drop(st);
+        for ev in &events {
+            log_liveness(miner_id, qblock, ev);
+        }
+    }
+
+    async fn capabilities(&self, miner_id: &str, caps: &Capabilities) {
+        let _ = self.state.lock().await.apply_capabilities(miner_id, caps);
+    }
+
+    // A miner that gives up says so here. Dropping this silently is how a
+    // backend failure reads as an idle miner: the process stays alive, the
+    // supervisor sees no exit, and the queue never drains.
+    async fn fatal(&self, link: &SessionLink, f: &quip_proto::v1::Fatal) -> Flow {
+        tracing::error!(
+            miner = %link.miner_id,
+            exit_code = f.exit_code,
+            restart_required = f.restart_required,
+            reason = %f.reason,
+            "miner reported a fatal error"
+        );
+        Flow::Continue
+    }
+
+    async fn settled(&self, _link: &SessionLink) -> Flow {
+        Flow::Continue
+    }
 }
 
 /// Push a cancel for generations `<= max_generation` to a live session
@@ -1629,6 +1754,18 @@ mod tests {
 
     fn notify() -> Arc<Mutex<Option<oneshot::Sender<()>>>> {
         Arc::new(Mutex::new(None))
+    }
+
+    /// The production session events over `state` and `chain`.
+    fn service(
+        state: &Arc<Mutex<CoordinatorState>>,
+        chain: Arc<FakeChain>,
+    ) -> Arc<CoordinatorService<FakeChain>> {
+        Arc::new(CoordinatorService {
+            state: Arc::clone(state),
+            chain,
+            submit_notify: notify(),
+        })
     }
 
     #[tokio::test]
@@ -2249,7 +2386,8 @@ mod tests {
         assert_eq!(dispatched(&*state.lock().await), 0);
 
         // The miner grants credits first. Nothing is staged, so nothing is sent.
-        assert!(dispatch_granted(&state, "cpu-0", 32, &tx).await);
+        let events = service(&state, Arc::new(FakeChain::new(lease_snapshot(), None)));
+        assert!(dispatch_granted(events.as_ref(), "cpu-0", 32, &tx).await);
         assert!(
             rx.try_recv().is_err(),
             "no job exists yet, so none can dispatch"
@@ -2266,7 +2404,7 @@ mod tests {
 
         // The wakeup carries no credits: the balance from the first grant stands.
         assert_eq!(grant_rx.try_recv().expect("wakeup was queued"), 0);
-        assert!(dispatch_granted(&state, "cpu-0", 0, &tx).await);
+        assert!(dispatch_granted(events.as_ref(), "cpu-0", 0, &tx).await);
         let sent = rx
             .try_recv()
             .expect("the staged job dispatches on the wakeup");
@@ -2330,8 +2468,7 @@ mod tests {
             &mut inbound,
             &tx,
             Arc::clone(&state),
-            Arc::new(FakeChain::new(lease_snapshot(), None)),
-            Arc::new(Mutex::new(None)),
+            service(&state, Arc::new(FakeChain::new(lease_snapshot(), None))),
             Arc::new(CancelTiming::default()),
         )
         .await;
@@ -2426,7 +2563,8 @@ mod tests {
             let tx = tx.clone();
             drop(tokio::spawn(async move {
                 let mut inbound = ReceiverStream::new(miner_rx).map(Ok);
-                run_session(&mut inbound, &tx, state, chain, notify(), timing).await;
+                let events = service(&state, chain);
+                run_session(&mut inbound, &tx, state, events, timing).await;
             }));
         }
         miner

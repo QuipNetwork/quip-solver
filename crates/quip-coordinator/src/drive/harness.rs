@@ -12,22 +12,21 @@
 use crate::config::LaunchEntry;
 use crate::drive::report::JobRow;
 use crate::router::{MinerCaps, Router};
-use crate::session::{coord, shutdown_msg, CoordinatorState};
+use crate::session::{
+    start_session, CoordinatorState, Flow, OutboundStream, SessionEvents, SessionLink,
+};
 use crate::types::topology::Topology;
 use crate::validate::validate_result;
 use quip_proto::v1::miner_service_server::{MinerService, MinerServiceServer};
-use quip_proto::v1::{
-    coord_msg, miner_msg, Configure, CoordMsg, Job, MinerMsg, Reject, Result as JobResult, Welcome,
-};
-use quip_protocol::session::PROTOCOL_VERSION;
+use quip_proto::v1::{Capabilities, Job, MinerMsg, Reject, Result as JobResult};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 use tokio::net::UnixListener;
 use tokio::process::Command;
-use tokio::sync::{mpsc, Mutex};
-use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
+use tokio::sync::Mutex;
+use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status, Streaming};
 
@@ -193,151 +192,34 @@ impl RunState {
     }
 }
 
-/// tonic service used by `run_drive`: stages every job in `jobs` on
-/// handshake, then drives the same Ready/JobRequest/Result/Reject flow as
-/// production, recording a `JobRow` per terminal outcome.
+/// The drive work behind a session: stage every job in `jobs` once the miner
+/// joins, then record a `JobRow` per terminal outcome. The session loop is
+/// production's [`run_session`](crate::session::run_session).
 struct DriveManyService {
     state: Arc<Mutex<CoordinatorState>>,
     jobs: Arc<Mutex<Vec<Job>>>,
     run: Arc<RunState>,
-    miner_id: String,
 }
 
 #[tonic::async_trait]
 impl MinerService for DriveManyService {
-    type SessionStream = ReceiverStream<Result<CoordMsg, Status>>;
+    type SessionStream = OutboundStream;
 
     async fn session(
         &self,
         request: Request<Streaming<MinerMsg>>,
     ) -> Result<Response<Self::SessionStream>, Status> {
-        let mut inbound = request.into_inner();
-        let (tx, rx) = mpsc::channel::<Result<CoordMsg, Status>>(64);
-        let state = Arc::clone(&self.state);
-        let jobs = Arc::clone(&self.jobs);
-        let run = Arc::clone(&self.run);
-        let miner_id = self.miner_id.clone();
-
-        drop(tokio::spawn(async move {
-            run_drive_session(&mut inbound, &tx, state, jobs, run, miner_id).await;
-        }));
-
-        Ok(Response::new(ReceiverStream::new(rx)))
+        let events = Arc::new(Self {
+            state: Arc::clone(&self.state),
+            jobs: Arc::clone(&self.jobs),
+            run: Arc::clone(&self.run),
+        });
+        Ok(Response::new(start_session(
+            request.into_inner(),
+            Arc::clone(&self.state),
+            events,
+        )))
     }
-}
-
-/// Hello -> token/version check -> register + stage every job -> Welcome/
-/// Configure/Topology. Returns `false` on a failed handshake (stream is
-/// dropped; a well-behaved miner exits 77).
-async fn handshake(
-    inbound: &mut Streaming<MinerMsg>,
-    tx: &mpsc::Sender<Result<CoordMsg, Status>>,
-    state: &Arc<Mutex<CoordinatorState>>,
-    jobs: &Arc<Mutex<Vec<Job>>>,
-    run: &Arc<RunState>,
-    miner_id: &str,
-) -> bool {
-    let Ok(Some(MinerMsg {
-        msg: Some(miner_msg::Msg::Hello(hello)),
-    })) = inbound.message().await
-    else {
-        return false;
-    };
-    let caps = hello.capabilities.clone().unwrap_or_default();
-    {
-        let st = state.lock().await;
-        let expected = st
-            .expected_tokens
-            .get(miner_id)
-            .cloned()
-            .unwrap_or_default();
-        // Mirror production `run_session`: an empty expected token must never
-        // authenticate an empty-token miner.
-        if expected.is_empty()
-            || hello.session_token != expected
-            || hello.capabilities.is_none()
-            || caps.protocol_version != PROTOCOL_VERSION
-        {
-            return false;
-        }
-    }
-    let configure = {
-        let mut st = state.lock().await;
-        st.router
-            .register_miner(miner_id.to_string(), MinerCaps::from_capabilities(&caps));
-        let staged = jobs.lock().await.drain(..).collect::<Vec<_>>();
-        for j in staged {
-            let _ = st.router.route(j);
-        }
-        // Reconcile jobs no registered miner can serve: record failing rows now
-        // so the completion gate accounts for them instead of stalling to the
-        // overall timeout.
-        run.record_unroutable(&mut st.router);
-        st.configure.get(miner_id).cloned().unwrap_or(Configure {
-            queue_depth: 0,
-            idle_timeout_s: 300,
-            heartbeat_s: 15,
-            reconnect_window_s: 60,
-            backend_toml: String::new(),
-        })
-    };
-    let _ = tx
-        .send(Ok(coord(coord_msg::Msg::Welcome(Welcome {
-            protocol_version: PROTOCOL_VERSION,
-        }))))
-        .await;
-    let _ = tx
-        .send(Ok(coord(coord_msg::Msg::Configure(configure))))
-        .await;
-    {
-        let st = state.lock().await;
-        if let Some(topo) = st.topology.as_ref() {
-            let _ = tx
-                .send(Ok(coord(coord_msg::Msg::Topology(topo.to_proto()))))
-                .await;
-        }
-        if let Some(target) = st.target.as_ref() {
-            let _ = tx.send(Ok(coord(coord_msg::Msg::SetTarget(*target)))).await;
-        }
-    }
-    true
-}
-
-/// Depth of the read loop's queue of credit grants to the dispatcher task.
-/// Grants are single `u32`s, so this only has to absorb a burst of
-/// `JobRequest`s arriving while the dispatcher is mid-send.
-const GRANT_CHANNEL_DEPTH: usize = 1024;
-
-/// Grant `credits` and dispatch every staged job the router allows.
-/// Returns `false` when the outbound channel is closed (session should end).
-async fn dispatch_jobs(
-    state: &Arc<Mutex<CoordinatorState>>,
-    miner_id: &str,
-    credits: u32,
-    tx: &mpsc::Sender<Result<CoordMsg, Status>>,
-    run: &Arc<RunState>,
-) -> bool {
-    // Collect everything to dispatch under the lock, then release it before
-    // sending. `tx.send().await` backpressures when the miner is busy, and
-    // holding `state` across it serializes result write-back — `handle_result`
-    // needs the same lock — which starves the miner's streaming pipeline.
-    let jobs: Vec<Job> = {
-        let mut st = state.lock().await;
-        st.router.grant_credits(miner_id, credits);
-        let mut jobs = Vec::new();
-        while let Some(job) = st.router.next_job(miner_id) {
-            run.note_dispatch(job.job_id.clone());
-            let _ = st.inflight.insert(job.job_id.clone(), job.clone());
-            jobs.push(job);
-        }
-        jobs
-    };
-    for job in jobs {
-        if tx.send(Ok(coord(coord_msg::Msg::Job(job)))).await.is_err() {
-            return false;
-        }
-    }
-    true
 }
 
 /// Validate a `Result` against its job's gates and record a `JobRow`. Drive
@@ -499,129 +381,101 @@ async fn handle_fatal(state: &Arc<Mutex<CoordinatorState>>, run: &Arc<RunState>)
     }
 }
 
-async fn handle_message(
-    msg: MinerMsg,
-    state: &Arc<Mutex<CoordinatorState>>,
-    miner_id: &str,
-    tx: &mpsc::Sender<Result<CoordMsg, Status>>,
-    run: &Arc<RunState>,
-    grants: &mpsc::Sender<u32>,
-) -> bool {
-    match msg.msg {
-        // The miner is the only source of credit, as in a production session:
-        // Ready grants nothing, and the miner's first JobRequest follows it.
-        // Hand the grant to the dispatcher task rather than dispatching here:
-        // sending jobs blocks once the outbound channel fills, and this is the
-        // only task reading results. Blocking here stops us reading the very
-        // results that would free credits — the deadlock this split fixes.
-        Some(miner_msg::Msg::JobRequest(req)) => grants.send(req.credits).await.is_ok(),
-        Some(miner_msg::Msg::Capabilities(caps)) => {
-            let mut st = state.lock().await;
-            if st.apply_capabilities(miner_id, &caps) {
-                run.record_unroutable(&mut st.router);
-            }
-            true
+#[tonic::async_trait]
+impl SessionEvents for DriveManyService {
+    async fn joined(&self, miner_id: &str, caps: &Capabilities) {
+        let mut st = self.state.lock().await;
+        st.router
+            .register_miner(miner_id.to_string(), MinerCaps::from_capabilities(caps));
+        let staged = self.jobs.lock().await.drain(..).collect::<Vec<_>>();
+        for j in staged {
+            let _ = st.router.route(j);
         }
-        Some(miner_msg::Msg::Result(result)) => {
-            let is_lease = {
-                let st = state.lock().await;
-                st.inflight
-                    .get(&result.job_id)
-                    .is_some_and(crate::lease::is_lease)
-            };
-            if is_lease {
-                handle_lease_result(state, &result, run).await;
-                return true;
-            }
-            // Validate concurrently so the session task keeps draining the
-            // stream and dispatching replacement jobs instead of blocking
-            // ~300ms per result. The final row can land after the loop's own
-            // completion check, so signal shutdown from whichever spawned task
-            // completes the run.
-            let state = Arc::clone(state);
-            let run = Arc::clone(run);
-            let tx = tx.clone();
-            drop(tokio::spawn(async move {
-                handle_result(&state, result, &run).await;
-                if run.is_complete() {
-                    let _ = tx.send(Ok(shutdown_msg(500))).await;
-                }
-            }));
-            true
-        }
-        Some(miner_msg::Msg::LeaseDone(done)) => {
-            handle_lease_done(state, done, run).await;
-            if run.is_complete() {
-                let _ = tx.send(Ok(shutdown_msg(500))).await;
-            }
-            true
-        }
-        Some(miner_msg::Msg::Reject(rej)) => {
-            handle_reject(state, rej, run).await;
-            true
-        }
-        Some(miner_msg::Msg::Fatal(_)) => {
-            handle_fatal(state, run).await;
-            false
-        }
-        _ => true,
+        // Reconcile jobs no registered miner can serve: record failing rows now
+        // so the completion gate accounts for them instead of stalling to the
+        // overall timeout.
+        self.run.record_unroutable(&mut st.router);
     }
-}
 
-async fn run_drive_session(
-    inbound: &mut Streaming<MinerMsg>,
-    tx: &mpsc::Sender<Result<CoordMsg, Status>>,
-    state: Arc<Mutex<CoordinatorState>>,
-    jobs: Arc<Mutex<Vec<Job>>>,
-    run: Arc<RunState>,
-    miner_id: String,
-) {
-    if !handshake(inbound, tx, &state, &jobs, &run, &miner_id).await {
-        return;
-    }
-    // Nothing left to run — either no jobs, or every job was unroutable and
-    // already reconciled during handshake. Shut down without waiting for Ready.
-    if run.total == 0 || run.is_complete() {
-        let _ = tx.send(Ok(shutdown_msg(500))).await;
-        return;
-    }
-    // Dispatcher task: the only place that writes `Job`s. Kept off the read
-    // path so a full outbound channel can never stop us draining results.
-    let (grants, mut grant_rx) = mpsc::channel::<u32>(GRANT_CHANNEL_DEPTH);
-    state
-        .lock()
-        .await
-        .register_wakeup(&miner_id, grants.clone());
-    let dispatcher = {
-        let state = Arc::clone(&state);
-        let run = Arc::clone(&run);
-        let tx = tx.clone();
-        let miner_id = miner_id.clone();
-        tokio::spawn(async move {
-            while let Some(credits) = grant_rx.recv().await {
-                if !dispatch_jobs(&state, &miner_id, credits, &tx, &run).await {
-                    return;
-                }
-            }
-        })
-    };
+    async fn ready(&self, _miner_id: &str) {}
 
-    loop {
-        let Ok(Some(msg)) = inbound.message().await else {
-            break;
+    async fn job_request(&self, miner_id: &str, credits: u32) -> Vec<Job> {
+        let mut st = self.state.lock().await;
+        st.router.grant_credits(miner_id, credits);
+        let mut jobs = Vec::new();
+        while let Some(job) = st.router.next_job(miner_id) {
+            self.run.note_dispatch(job.job_id.clone());
+            let _ = st.inflight.insert(job.job_id.clone(), job.clone());
+            jobs.push(job);
+        }
+        jobs
+    }
+
+    async fn result(&self, link: &SessionLink, result: JobResult) -> Flow {
+        let is_lease = {
+            let st = self.state.lock().await;
+            st.inflight
+                .get(&result.job_id)
+                .is_some_and(crate::lease::is_lease)
         };
-        let keep_going = handle_message(msg, &state, &miner_id, tx, &run, &grants).await;
-        if !keep_going {
-            break;
+        if is_lease {
+            handle_lease_result(&self.state, &result, &self.run).await;
+            return Flow::Continue;
         }
-        if run.is_complete() {
-            let _ = tx.send(Ok(shutdown_msg(500))).await;
-            break;
+        // Validate concurrently so the session task keeps draining the
+        // stream and dispatching replacement jobs instead of blocking
+        // ~300ms per result. The final row can land after the loop's own
+        // completion check, so signal shutdown from whichever spawned task
+        // completes the run.
+        let state = Arc::clone(&self.state);
+        let run = Arc::clone(&self.run);
+        let link = link.clone();
+        drop(tokio::spawn(async move {
+            handle_result(&state, result, &run).await;
+            if run.is_complete() {
+                link.shutdown(500).await;
+            }
+        }));
+        Flow::Continue
+    }
+
+    async fn reject(&self, _link: &SessionLink, rej: Reject) -> Flow {
+        handle_reject(&self.state, rej, &self.run).await;
+        Flow::Continue
+    }
+
+    async fn lease_done(&self, link: &SessionLink, done: quip_proto::v1::LeaseDone) -> Flow {
+        handle_lease_done(&self.state, done, &self.run).await;
+        if self.run.is_complete() {
+            link.shutdown(500).await;
+        }
+        Flow::Continue
+    }
+
+    async fn status(&self, _miner_id: &str, _status: &quip_proto::v1::Status) {}
+
+    async fn capabilities(&self, miner_id: &str, caps: &Capabilities) {
+        let mut st = self.state.lock().await;
+        if st.apply_capabilities(miner_id, caps) {
+            self.run.record_unroutable(&mut st.router);
         }
     }
-    state.lock().await.deregister_outbound(&miner_id);
-    drop(grants);
-    dispatcher.abort();
+
+    async fn fatal(&self, _link: &SessionLink, _fatal: &quip_proto::v1::Fatal) -> Flow {
+        handle_fatal(&self.state, &self.run).await;
+        Flow::End
+    }
+
+    // Nothing left to run — either no jobs, or every job reached a terminal
+    // outcome (unroutable jobs are reconciled when the miner joins).
+    async fn settled(&self, link: &SessionLink) -> Flow {
+        if self.run.is_complete() {
+            link.shutdown(500).await;
+            Flow::End
+        } else {
+            Flow::Continue
+        }
+    }
 }
 
 /// Full drive-many run: spawn the miner over UDS, stage every job, validate
@@ -666,7 +520,6 @@ pub async fn run_drive(p: DriveManyParams<'_>) -> DriveManyReport {
         state: Arc::clone(&state),
         jobs,
         run: Arc::clone(&run),
-        miner_id: miner_id.to_string(),
     };
 
     let server = tokio::spawn(async move {
@@ -738,12 +591,16 @@ mod tests {
 
     use crate::validate::MAX_PROOF_SOLUTIONS_WIRE;
     use quip_proto::v1::miner_service_client::MinerServiceClient;
+    use quip_proto::v1::{coord_msg, miner_msg, Configure, CoordMsg};
     use quip_proto::v1::{
         ising_problem, Capabilities, EdgeList, Hello, JobKind, JobRequest, LeaseDone, Provenance,
         Ready, SetTarget, Solution,
     };
     use quip_protocol::chacha8::draw_ising_milli;
+    use quip_protocol::session::PROTOCOL_VERSION;
     use quip_protocol::wire::encode_spins_packed;
+    use tokio::sync::mpsc;
+    use tokio_stream::wrappers::ReceiverStream;
 
     struct DriveTestSession {
         _directory: tempfile::TempDir,
@@ -778,7 +635,6 @@ mod tests {
                 state: Arc::clone(&state),
                 jobs: Arc::new(Mutex::new(jobs)),
                 run: Arc::clone(&run),
-                miner_id: "m".to_owned(),
             };
             let server = tokio::spawn(async move {
                 Server::builder()
