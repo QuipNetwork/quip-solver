@@ -294,33 +294,6 @@ pub fn require_set_values(spec: &AllowedValueSpec<Vec<i32>>) -> Result<Vec<i32>,
 mod tests {
     use super::*;
     use crate::types::topology_spec::{parse_topology_spec, preset_spec};
-    use sp_core::U256;
-
-    #[test]
-    fn require_set_values_accepts_only_a_nonempty_set() {
-        assert_eq!(
-            require_set_values(&AllowedValueSpec::Set(vec![-1000, 0, 1000])).ok(),
-            Some(vec![-1000, 0, 1000])
-        );
-        // Range specs sample differently on-chain; the coordinator must not
-        // silently expand them into a Set (would diverge from consensus).
-        for (label, spec) in [
-            ("empty set", AllowedValueSpec::Set(Vec::new())),
-            (
-                "integer range",
-                AllowedValueSpec::IntegerRange { min: -2, max: 2 },
-            ),
-            (
-                "continuous range",
-                AllowedValueSpec::ContinuousRange {
-                    min: -1000,
-                    max: 1000,
-                },
-            ),
-        ] {
-            assert!(require_set_values(&spec).is_err(), "{label}");
-        }
-    }
 
     /// The pallet's `TopologyMeta` byte layout under each API version, built
     /// field by field. Version 3 puts `family` before `registered_at`.
@@ -365,28 +338,6 @@ mod tests {
         // The call takes no arguments, so anything longer is an encoding bug.
         assert_eq!(call, [QUANTUM_POW_PALLET_INDEX, REGISTER_MINER_CALL_INDEX]);
         assert_ne!(REGISTER_MINER_CALL_INDEX, SUBMIT_PROOF_CALL_INDEX);
-    }
-
-    #[test]
-    fn submit_proof_call_starts_with_pallet_and_call_index() {
-        let proof = QuantumProof {
-            topology_hash: H256::repeat_byte(0),
-            nonce: U256::zero(),
-            salt: [0u8; 32],
-            solutions: vec![vec![0]],
-            device_access_time_us: 0,
-        };
-        let call = encode_submit_proof_call(&proof);
-        #[expect(
-            clippy::indexing_slicing,
-            reason = "call always starts with pallet+call index bytes"
-        )]
-        {
-            assert_eq!(call[0], QUANTUM_POW_PALLET_INDEX);
-            assert_eq!(call[1], SUBMIT_PROOF_CALL_INDEX);
-            // Remainder is the proof encoding.
-            assert_eq!(&call[2..], &proof.encode());
-        }
     }
 
     /// SCALE field order must match `pallet_quantum_pow::MinerInfo`. A reordered

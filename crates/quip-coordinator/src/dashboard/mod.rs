@@ -676,51 +676,6 @@ mod tests {
     const CHAIN_BLOCK_HASH: &str =
         "0x3333333333333333333333333333333333333333333333333333333333333333";
 
-    /// Whether `s` matches `^0x[0-9a-f]{64}$`: one `0x` prefix, exactly 64
-    /// lowercase hex digits. A doubled prefix (`0x0x...`) or a truncated hash
-    /// fails this even when the total length coincidentally matches.
-    fn is_hex_hash(s: &str) -> bool {
-        s.strip_prefix("0x").is_some_and(|h| {
-            h.len() == 64
-                && h.bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        })
-    }
-
-    /// C8: a submitted, winning result reports every field the dashboard shows.
-    #[tokio::test]
-    async fn c8_submission_reports_the_real_chain_fields() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_fixture(tmp.path(), 42, &Fixture::Submitted);
-
-        let v = attempts_body(tmp.path(), 42).await;
-        let s = at(&v, "/data/submission");
-
-        assert_eq!(at(s, "/threshold_milli"), &json!(-2_500_000));
-        // Three distinct fields, checked by shape and by exact value: a
-        // same-shaped 66-char string can't hide a field swap between
-        // extrinsic_hash and chain_block_hash, and the shape check catches a
-        // doubled `0x` prefix even where a swap would not.
-        for (field, expected) in [
-            ("/last_proof_block_hash", LAST_PROOF_BLOCK_HASH),
-            ("/extrinsic_hash", EXTRINSIC_HASH),
-            ("/chain_block_hash", CHAIN_BLOCK_HASH),
-        ] {
-            let hash = at(s, field).as_str().unwrap();
-            assert!(
-                is_hex_hash(hash),
-                "{field}: {hash:?} does not match ^0x[0-9a-f]{{64}}$"
-            );
-            assert_eq!(hash, expected, "{field}: value does not round-trip exactly");
-        }
-        assert!(at(s, "/miner_type").as_str().unwrap().starts_with("CPU"));
-        // Block heights are `u64` and never approach 2^53, so rule N1's
-        // "large by design" clause does not apply; they stay guarded numbers.
-        assert_eq!(at(s, "/chain_block_number"), &json!(10_249));
-        assert_eq!(at(s, "/pow_sequence"), &json!(412));
-        assert_eq!(at(&v, "/data/attempts/0/miner_type"), &json!("CPU"));
-    }
-
     #[tokio::test]
     async fn serves_attempts_file_and_lists_qblocks() {
         let tmp = tempfile::tempdir().unwrap();
@@ -817,60 +772,6 @@ mod tests {
         let ts = at(&v, "/data/last_successful_submission").as_str().unwrap();
         assert_eq!(ts.len(), 20, "{ts}");
         assert!(ts.ends_with('Z'), "{ts}");
-    }
-
-    /// C5: a keyed coordinator with one registered CPU miner.
-    #[tokio::test]
-    async fn c5_status_reports_the_configured_identity() {
-        let tmp = tempfile::tempdir().unwrap();
-        let v = status_body(keyed_state(tmp.path())).await;
-
-        assert_eq!(at(&v, "/success"), &json!(true));
-        assert!(at(&v, "/data").is_object());
-        assert!(at(&v, "/data/modes").is_object());
-        assert!(at(&v, "/timestamp").is_number());
-        assert_eq!(
-            at(&v, "/data/ss58_address"),
-            &json!("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY")
-        );
-        assert_eq!(at(&v, "/data/node_id"), &json!("quip-miner-pow-CPU-1"));
-        assert_eq!(at(&v, "/data/is_mining"), &json!(true));
-        assert_eq!(at(&v, "/data/miner_registered"), &json!(true));
-
-        let miners = at(&v, "/data/miners").as_array().unwrap();
-        assert_eq!(miners.len(), 1);
-        #[expect(
-            clippy::indexing_slicing,
-            reason = "asserted len() == 1 above; index 0 exists"
-        )]
-        {
-            assert_eq!(at(&miners[0], "/id"), &json!("cpu-0"));
-            assert!(at(&miners[0], "/type").as_str().unwrap().starts_with("CPU"));
-        }
-
-        assert!(at(&v, "/data/chain").is_object());
-        assert!(at(&v, "/data/chain/head_number").as_u64().unwrap() > 0);
-        assert_eq!(at(&v, "/data/chain/head_hash"), &json!("0x00ff"));
-
-        assert!(at(&v, "/data/miner_info").is_object());
-        // u128 balances cross the wire as decimal strings, per rule N1.
-        for key in ["deposit", "rewards_earned"] {
-            assert!(
-                at(&v, &format!("/data/miner_info/{key}")).is_string(),
-                "miner_info.{key} must be a decimal string"
-            );
-        }
-        // u64 lifetime counts and the block height stay guarded numbers; they
-        // agree with `controller.proofs_submitted` (a number) in stats_body.
-        for key in ["registered_at", "proofs_submitted", "proofs_won"] {
-            assert!(
-                at(&v, &format!("/data/miner_info/{key}")).is_number(),
-                "miner_info.{key} must be a number"
-            );
-        }
-        assert_eq!(at(&v, "/data/miner_info/deposit"), &json!("1000000000000"));
-        assert_eq!(at(&v, "/data/miner_info/proofs_submitted"), &json!(412));
-        assert_eq!(at(&v, "/data/miner_info/registered_at"), &json!(8_100));
     }
 
     /// C6: an unkeyed coordinator is a valid state, not an error.

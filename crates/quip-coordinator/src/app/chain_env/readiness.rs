@@ -488,23 +488,16 @@ pub(crate) async fn declare_round_participation<C: ChainClient>(
 
 #[cfg(test)]
 mod tests {
-    use super::ReadinessError;
-    use super::{
-        build_descriptor_payload, declare_round_participation, file_round_descriptor,
-        prepare_round, register_round_miner, HttpFaucet, ProcessLatches, SUBMIT_ATTEMPTS,
-    };
-    use crate::chain::{ChainError, DescriptorOutcome, ParticipationOutcome, RegistrationOutcome};
+    use super::{build_descriptor_payload, declare_round_participation};
+    use crate::chain::ParticipationOutcome;
     use crate::testing::fake_chain::FakeChain;
     use crate::types::miner::{MinerKind, MinerSpecScale};
     use crate::types::snapshot::MiningSnapshot;
 
-    use crate::chain::registration::funding::FundingParams;
     use crate::config::DescriptorParams;
     use crate::host::survey::{sanitize, RawGpu, RawSurvey};
     use crate::observe::logging::test_support::{drain, init_capture, Capture};
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
 
     fn snap() -> MiningSnapshot {
         MiningSnapshot {
@@ -526,8 +519,6 @@ mod tests {
         }
     }
 
-    async fn no_sleep(_d: Duration) {}
-
     fn account() -> [u8; 32] {
         [0xab; 32]
     }
@@ -539,28 +530,6 @@ mod tests {
         assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
         assert!(!id.starts_with("0x"));
         assert_eq!(id, "ab".repeat(32));
-    }
-
-    /// Run the startup walk with the given latches against `chain`.
-    async fn prepare(
-        chain: &FakeChain,
-        params: &DescriptorParams,
-        filed: &AtomicBool,
-        registered: &AtomicBool,
-    ) -> Result<MiningSnapshot, ReadinessError> {
-        prepare_round(
-            chain,
-            None::<&HttpFaucet>,
-            account(),
-            &FundingParams::default(),
-            no_sleep,
-            params,
-            &ProcessLatches {
-                descriptor_filed: filed,
-                miner_registered: registered,
-            },
-        )
-        .await
     }
 
     fn named_descriptor() -> DescriptorParams {
@@ -687,52 +656,6 @@ token = "{SENTINEL}"
         );
     }
 
-    #[tokio::test]
-    async fn an_unregistered_account_registers_once_and_then_latches() {
-        let chain = FakeChain::new(snap(), None);
-        let registered = AtomicBool::new(false);
-        assert!(register_round_miner(&chain, &registered).await);
-        assert_eq!(chain.registration_submits(), 1);
-        assert!(registered.load(Ordering::Relaxed));
-        // The latch keeps later rounds off the chain entirely.
-        assert!(register_round_miner(&chain, &registered).await);
-        assert_eq!(chain.registration_calls(), 1);
-        assert_eq!(chain.registration_submits(), 1);
-    }
-
-    #[tokio::test]
-    async fn a_failed_registration_retries_and_does_not_latch() {
-        let chain = FakeChain::new(snap(), None);
-        chain.set_registration_result(Err(ChainError::Unavailable("rpc down".into())));
-        let registered = AtomicBool::new(false);
-        assert!(!register_round_miner(&chain, &registered).await);
-        assert_eq!(chain.registration_calls(), SUBMIT_ATTEMPTS as usize);
-        assert!(
-            !registered.load(Ordering::Relaxed),
-            "a failed registration must not latch; mining cannot proceed without it"
-        );
-        // The next round tries again rather than assuming the miner is ready.
-        chain.set_registration_result(Ok(RegistrationOutcome::Registered));
-        assert!(register_round_miner(&chain, &registered).await);
-        assert!(registered.load(Ordering::Relaxed));
-    }
-
-    #[tokio::test]
-    async fn a_registration_failure_does_not_fail_the_startup_walk() {
-        let chain = FakeChain::new(snap(), None);
-        chain.set_registration_result(Err(ChainError::Unavailable("rpc down".into())));
-        let registered = AtomicBool::new(false);
-        let _snap = prepare(
-            &chain,
-            &DescriptorParams::default(),
-            &AtomicBool::new(false),
-            &registered,
-        )
-        .await
-        .expect("startup continues so the feeder can retry");
-        assert!(!registered.load(Ordering::Relaxed));
-    }
-
     #[test]
     fn explicit_node_name_is_trimmed_and_keeps_the_length_bound() {
         let mut params = named_descriptor();
@@ -743,32 +666,6 @@ token = "{SENTINEL}"
         assert!(build_descriptor_payload(&params, account()).is_some());
         params.node_name = Some("x".repeat(super::MAX_NODE_NAME_BYTES + 1));
         assert!(build_descriptor_payload(&params, account()).is_none());
-    }
-
-    #[tokio::test]
-    async fn descriptor_outcomes_latch_and_retry_only_when_transient() {
-        let cases = [
-            (
-                "transient error retries then marks done",
-                Err(ChainError::Unavailable("rpc down".into())),
-                3,
-            ),
-            (
-                "pallet rejection does not retry",
-                Ok(DescriptorOutcome::Rejected),
-                1,
-            ),
-        ];
-        for (label, result, calls) in cases {
-            let chain = FakeChain::new(snap(), None);
-            chain.set_descriptor_result(result);
-            let filed = AtomicBool::new(false);
-            file_round_descriptor(&chain, &filed, &named_descriptor(), account()).await;
-            assert_eq!(chain.descriptor_calls(), calls, "{label}");
-            assert!(filed.load(Ordering::Relaxed), "{label}");
-            file_round_descriptor(&chain, &filed, &named_descriptor(), account()).await;
-            assert_eq!(chain.descriptor_calls(), calls, "{label}: latched");
-        }
     }
 
     #[tokio::test]

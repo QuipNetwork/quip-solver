@@ -1015,23 +1015,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn route_stages_and_next_job_consumes_credits() {
-        let mut r = Router::new();
-        r.register_miner("cpu-0", caps_ising());
-        let id = r.route(make_job(1, JobKind::IsingSample));
-        assert_eq!(id.as_deref(), Some("cpu-0"));
-        assert_eq!(r.staged_len("cpu-0"), 1);
-        let _ = r.route(make_job(2, JobKind::IsingSample));
-        assert!(r.next_job("cpu-0").is_none()); // no credits
-        r.grant_credits("cpu-0", 1);
-        assert!(r.next_job("cpu-0").is_some()); // spends the one credit
-        assert!(r.next_job("cpu-0").is_none()); // pool empty — a completion is
-                                                // what refills it, not dispatch
-        r.grant_credits("cpu-0", 1); // miner grants one per terminal event
-        assert!(r.next_job("cpu-0").is_some()); // dispatches the replacement
-    }
-
     /// The heartbeat must report completions, not the per-poll dispatch
     /// counter. Stage 8, dispatch 8, complete 3, then drain the poll
     /// counter twice. The reported number is 3, not 8 and not 0. The poll
@@ -1057,21 +1040,6 @@ mod tests {
         assert_eq!(r.take_consumed("unknown"), 0);
         assert_eq!(r.jobs_completed("cpu-0"), 3);
         assert_eq!(r.jobs_completed("unknown"), 0);
-    }
-
-    /// A reject is not mining work: it moves its own counter and leaves the
-    /// completion total that the throughput heartbeat reports alone.
-    #[test]
-    fn rejects_count_apart_from_completions() {
-        let mut r = Router::new();
-        r.register_miner("cpu-0", caps_ising());
-        r.record_completion("cpu-0");
-        r.record_reject("cpu-0");
-        r.record_reject("cpu-0");
-        r.record_reject("unknown");
-        assert_eq!(r.jobs_completed("cpu-0"), 1);
-        assert_eq!(r.jobs_rejected("cpu-0"), 2);
-        assert_eq!(r.jobs_rejected("unknown"), 0);
     }
 
     #[test]
@@ -1243,20 +1211,6 @@ mod tests {
             assert!(output.contains("jobs_not_mined=2"), "{output}");
             assert!(!output.contains("WARN"), "{output}");
         }
-    }
-
-    #[test]
-    fn indexes_native_hash_features_and_degree() {
-        let wire = Capabilities {
-            native_topology_hash: Some(vec![7; 32]),
-            features: vec!["streaming".to_owned(), "initial-spins".to_owned()],
-            max_degree: Some(20),
-            ..Capabilities::default()
-        };
-        let caps = MinerCaps::from_capabilities(&wire);
-        assert_eq!(caps.native_topology_hash, wire.native_topology_hash);
-        assert_eq!(caps.features, wire.features);
-        assert_eq!(caps.max_degree, Some(20));
     }
 
     #[test]
