@@ -226,8 +226,9 @@ if [ "$want_metal" = true ]; then
   METAL_TAG="$(miner_tag metal)"
   fetch required "$METAL_TAG" "quip.network%2Fquip-solver-metal" "quip-metal-sa" "quip-metal-gibbs"
   # Optional for the same reason the experimental CPU kernels are: a Metal
-  # release that predates this kernel is skipped rather than failing the run.
-  fetch optional "$METAL_TAG" "quip.network%2Fquip-solver-metal" "quip-metal-msa"
+  # release that predates one of these kernels is skipped rather than failing
+  # the run. quip-metal-otsuka links the twisted-ice dimer family generator.
+  fetch optional "$METAL_TAG" "quip.network%2Fquip-solver-metal" "quip-metal-msa" "quip-metal-otsuka"
 fi
 if [ "$want_cpu" = true ]; then
   CPU_TAG="$(miner_tag cpu)"
