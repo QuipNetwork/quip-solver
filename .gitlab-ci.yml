@@ -164,7 +164,8 @@ verify-fetch-miners:
         echo "$out" | grep -q "would fetch (required): quip-cpu-${b}-" ||
           { echo "ERROR: quip-cpu-${b} is not required"; exit 1; }
       done
-      for b in bsb hdsb hbsb gbsb gdsb tedsb sbqa ggdsb fsa msa mps mfa flatiron; do
+      for b in bsb hdsb hbsb gbsb gdsb tedsb sbqa ggdsb fsa msa mps mfa flatiron greedy \
+        otsuka dimer ice-sat pairworm flow flow-loops tileworm gadget-repair routing dipolar; do
         echo "$out" | grep -q "would fetch (optional): quip-cpu-${b}-" ||
           { echo "ERROR: experimental quip-cpu-${b} not selected as optional"; exit 1; }
       done
@@ -187,6 +188,10 @@ verify-fetch-miners:
       echo "$out" | grep -q 'would fetch (optional): quip-metal-msa-darwin-arm64' ||
         { echo "ERROR: quip-metal-msa not selected as optional"; exit 1; }
       echo "$out" | grep -q 'quip-cpu-sa-darwin-arm64'
+      # The macOS bundle is built from this list, so the family kernels must be
+      # on it.
+      echo "$out" | grep -q 'would fetch (optional): quip-cpu-otsuka-darwin-arm64' ||
+        { echo "ERROR: darwin does not select quip-cpu-otsuka"; exit 1; }
       echo "$out" | grep -q 'quip-dwave-qa-darwin-arm64'
       if echo "$out" | grep -q 'pip install'; then
         echo "ERROR: darwin must fetch the dwave binary, not print a pip line"; exit 1
@@ -461,12 +466,13 @@ build-coordinator-darwin-arm64:
 # each stored under the bare name the config's `binary` key names. The
 # coordinator spawns miners with a PATH lookup, so an installer either puts
 # this directory on PATH or writes absolute paths into the config; quip-node-
-# manager does the latter. Miner versions resolve to each repo's own latest
-# release at bundle time; this tarball then pins them, and MANIFEST records
-# which release each binary came from.
+# manager does the latter. fetch-miners.sh picks the binaries, the same list
+# the images get, so a kernel added there reaches macOS too. Each miner repo
+# resolves to its own latest release at bundle time; the tags are resolved once
+# and pinned for the fetch, and MANIFEST records which release each repo gave.
 bundle-darwin-arm64:
   stage: build
-  image: curlimages/curl:latest
+  image: $TOOLCHAIN_IMAGE
   tags: [linux, amd64]
   rules:
     - if: $CI_COMMIT_TAG
@@ -475,55 +481,22 @@ bundle-darwin-arm64:
   script:
     - |
       set -eu
-      API="https://gitlab.com/api/v4"
+      S=crates/quip-coordinator/tools/fetch-miners.sh
       STAGE=bundle/quip-solver-darwin-arm64
       mkdir -p "$STAGE"
       cp dist/quip-coordinator-darwin-arm64 "$STAGE/quip-coordinator"
 
-      # repo:binary pairs pulled as <binary>-darwin-arm64. Each repo resolves
-      # to its own latest release, so dwave being ahead of the others is fine.
-      MINERS="quip-solver-cpu:quip-cpu-sa quip-solver-cpu:quip-cpu-gibbs quip-solver-metal:quip-metal-sa quip-solver-metal:quip-metal-gibbs quip-solver-dwave:quip-dwave-qa"
+      CPU_MINERS_TAG=$(bash "$S" --print-tag cpu)
+      METAL_MINERS_TAG=$(bash "$S" --print-tag metal)
+      DWAVE_MINERS_TAG=$(bash "$S" --print-tag dwave)
+      export CPU_MINERS_TAG METAL_MINERS_TAG DWAVE_MINERS_TAG
+      TARGETOS=darwin TARGETARCH=arm64 MINER_SET=auto bash "$S" "$STAGE"
+      {
+        echo "quip-solver-cpu ${CPU_MINERS_TAG}"
+        echo "quip-solver-metal ${METAL_MINERS_TAG}"
+        echo "quip-solver-dwave ${DWAVE_MINERS_TAG}"
+      } > "${STAGE}/MANIFEST"
 
-      # Kernels a release may not carry yet. Mirrors the optional tier in
-      # fetch-miners.sh: an absent asset is skipped, so a Metal release cut
-      # without this kernel cannot fail a whole tag pipeline.
-      OPTIONAL_MINERS="quip-solver-metal:quip-metal-msa"
-
-      for pair in $MINERS $OPTIONAL_MINERS; do
-        repo="${pair%%:*}"
-        name="${pair##*:}"
-        proj="quip.network%2F${repo}"
-        optional=0
-        case " $OPTIONAL_MINERS " in *" $pair "*) optional=1 ;; esac
-        tag=$(curl --fail --silent --show-error \
-          "${API}/projects/${proj}/releases?per_page=1" \
-          | sed -n 's/.*"tag_name":"\([^"]*\)".*/\1/p' | head -n 1)
-        if [ -z "$tag" ]; then
-          echo "no release found for ${repo}" >&2
-          exit 1
-        fi
-        echo "bundling ${repo} ${tag} ${name}-darwin-arm64"
-        URL="${API}/projects/${proj}/packages/generic/${repo}/${tag}/${name}-darwin-arm64"
-        if [ "$optional" = 1 ]; then
-          # curl creates the output file before it reads the status line, so a
-          # miss would otherwise leave a zero-byte file the coordinator execs.
-          if curl --fail --location --silent --output "${STAGE}/${name}" "$URL"; then
-            chmod +x "${STAGE}/${name}"
-          else
-            rm -f "${STAGE}/${name}"
-            echo "note: ${name}-darwin-arm64 not in ${repo} ${tag}; skipping" >&2
-            continue
-          fi
-        else
-          curl --fail --location --silent --show-error \
-            --output "${STAGE}/${name}" "$URL"
-          chmod +x "${STAGE}/${name}"
-        fi
-        echo "${repo} ${tag}" >> "${STAGE}/MANIFEST"
-      done
-
-      # One line per repo, not per binary.
-      sort -u "${STAGE}/MANIFEST" -o "${STAGE}/MANIFEST"
       echo "quip-solver ${CI_COMMIT_TAG}" >> "${STAGE}/MANIFEST"
       tar -czf quip-solver-darwin-arm64.tar.gz -C bundle quip-solver-darwin-arm64
       ls -l quip-solver-darwin-arm64.tar.gz
