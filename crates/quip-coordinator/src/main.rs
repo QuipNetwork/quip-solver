@@ -809,7 +809,9 @@ fn drive_entry(args: &DriveArgs) -> LaunchEntry {
         backend: "cpu".into(),
         device: args.device,
         configure: Configure {
-            queue_depth: 3,
+            // Unset, as in a launch entry without `queue_depth`: the miner
+            // picks its own depth.
+            queue_depth: 0,
             idle_timeout_s: 30,
             heartbeat_s: 15,
             reconnect_window_s: 60,

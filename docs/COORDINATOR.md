@@ -701,6 +701,14 @@ fields of the `Configure` message. Every other key passes through verbatim in
 `Configure.backend_toml`, which the coordinator forwards to the miner. This is
 how a backend receives its own settings without the coordinator knowing them.
 
+Leave `queue_depth` out of a section to let the miner choose its depth. The
+coordinator then sends `queue_depth = 0`, which means "not set" on the wire.
+The CPU, CUDA and Metal miners use a depth of 3. The D-Wave miner uses 96,
+so up to 96 QPU submissions are in flight at once. An explicit `queue_depth`
+goes to the miner unchanged. When the miner sends `Ready`, the coordinator
+grants credits equal to the depth the miner uses, which is 3 when the field
+is 0. The D-Wave miner grants the rest of its 96 credits itself.
+
 For D-Wave, set `budget` and `budget_reset_day` in `[dwave]`:
 
 ```toml

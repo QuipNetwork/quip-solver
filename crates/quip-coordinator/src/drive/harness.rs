@@ -12,7 +12,7 @@
 use crate::config::LaunchEntry;
 use crate::drive::report::JobRow;
 use crate::router::{MinerCaps, Router};
-use crate::session::{coord, shutdown_msg, CoordinatorState};
+use crate::session::{coord, seed_credits, shutdown_msg, CoordinatorState};
 use crate::topology::Topology;
 use crate::validate::validate_result;
 use quip_proto::v1::miner_service_server::{MinerService, MinerServiceServer};
@@ -274,7 +274,7 @@ async fn handshake(
         // overall timeout.
         run.record_unroutable(&mut st.router);
         st.configure.get(miner_id).cloned().unwrap_or(Configure {
-            queue_depth: 3,
+            queue_depth: 0,
             idle_timeout_s: 300,
             heartbeat_s: 15,
             reconnect_window_s: 60,
@@ -591,7 +591,7 @@ async fn run_drive_session(
         let _ = tx.send(Ok(shutdown_msg(500))).await;
         return;
     }
-    let seed_credits = configure.queue_depth.max(1);
+    let seed_credits = seed_credits(&configure);
     // Dispatcher task: the only place that writes `Job`s. Kept off the read
     // path so a full outbound channel can never stop us draining results.
     let (grants, mut grant_rx) = mpsc::channel::<u32>(GRANT_CHANNEL_DEPTH);
