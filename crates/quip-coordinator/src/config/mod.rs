@@ -376,17 +376,17 @@ pub fn parse_config(toml_text: &str) -> Result<CoordinatorConfig, ConfigError> {
     };
     let min_balance_plancks = plancks_of(
         "min_balance_plancks",
-        crate::chain::funding::DEFAULT_MIN_BALANCE_PLANCKS,
+        crate::chain::registration::funding::DEFAULT_MIN_BALANCE_PLANCKS,
     );
     let faucet_top_up_plancks = plancks_of(
         "faucet_top_up_plancks",
-        crate::chain::funding::DEFAULT_TOP_UP_PLANCKS,
+        crate::chain::registration::funding::DEFAULT_TOP_UP_PLANCKS,
     );
     let funding_timeout_s = miner
         .get("funding_timeout_s")
         .and_then(toml::Value::as_integer)
         .and_then(|i| u64::try_from(i).ok())
-        .unwrap_or(crate::chain::funding::DEFAULT_FUNDING_TIMEOUT.as_secs());
+        .unwrap_or(crate::chain::registration::funding::DEFAULT_FUNDING_TIMEOUT.as_secs());
     let max_submit_attempts = miner
         .get("max_submit_attempts")
         .and_then(toml::Value::as_integer)
@@ -920,11 +920,11 @@ rest_port = 8086
         assert_eq!(cfg.faucet_url, None);
         assert_eq!(
             cfg.min_balance_plancks,
-            crate::chain::funding::DEFAULT_MIN_BALANCE_PLANCKS
+            crate::chain::registration::funding::DEFAULT_MIN_BALANCE_PLANCKS
         );
         assert_eq!(
             cfg.faucet_top_up_plancks,
-            crate::chain::funding::DEFAULT_TOP_UP_PLANCKS
+            crate::chain::registration::funding::DEFAULT_TOP_UP_PLANCKS
         );
         assert_eq!(cfg.funding_timeout_s, 600);
         assert_eq!(cfg.max_submit_attempts, 5);

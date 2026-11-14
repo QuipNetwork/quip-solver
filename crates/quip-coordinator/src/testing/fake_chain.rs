@@ -1,6 +1,6 @@
 //! Scripted chain for tests: fixed snapshot, optional mempool order, captured submits.
 
-use crate::chain::sync::{SyncSource, SyncStatus};
+use crate::chain::startup::sync::{SyncSource, SyncStatus};
 use crate::chain::{
     ChainClient, ChainError, DescriptorOutcome, NodeDescriptorV2Input, ParticipationOutcome,
     RegistrationOutcome,
@@ -8,7 +8,7 @@ use crate::chain::{
 use crate::types::order::JobOrder;
 use crate::types::snapshot::PendingProof;
 
-use crate::chain::funding::BalanceSource;
+use crate::chain::registration::funding::BalanceSource;
 use crate::types::miner::MinerInfo;
 use crate::types::proof::{Proof, SubmitAction, SubmitReceipt};
 use crate::types::snapshot::{DecayParams, MiningSnapshot};

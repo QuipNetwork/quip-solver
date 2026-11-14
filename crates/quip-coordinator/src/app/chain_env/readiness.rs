@@ -9,11 +9,11 @@
 //! A funding failure at startup is fatal. A missing snapshot is not: the
 //! caller warns and the feeder retries after miners connect.
 
-use crate::chain::scale_types::{
+use crate::chain::codec::scale_types::{
     MAX_NODE_ID_BYTES, MAX_NODE_NAME_BYTES, MAX_PUBLIC_HOST_BYTES, MAX_RPC_ENDPOINTS,
     MAX_RPC_ENDPOINT_BYTES,
 };
-use crate::chain::sync::{wait_until_synced, SyncOutcome, SyncSource};
+use crate::chain::startup::sync::{wait_until_synced, SyncOutcome, SyncSource};
 use crate::chain::{
     ChainClient, DescriptorOutcome, NodeDescriptorV2Input, ParticipationOutcome,
     RegistrationOutcome,
@@ -21,7 +21,7 @@ use crate::chain::{
 use crate::types::hex::hex_encode;
 use crate::types::snapshot::MiningSnapshot;
 
-use crate::chain::funding::{
+use crate::chain::registration::funding::{
     ensure_funded, BalanceSource, Faucet, FundingError, FundingParams, HttpFaucet,
 };
 use crate::config::DescriptorParams;
@@ -499,7 +499,7 @@ mod tests {
     use crate::types::miner::{MinerKind, MinerSpecScale};
     use crate::types::snapshot::MiningSnapshot;
 
-    use crate::chain::funding::FundingParams;
+    use crate::chain::registration::funding::FundingParams;
     use crate::config::DescriptorParams;
     use crate::host::survey::{sanitize, RawGpu, RawSurvey};
     use crate::observe::logging::test_support::{drain, init_capture, Capture};
@@ -713,7 +713,7 @@ token = "{SENTINEL}"
             ..DescriptorParams::from_config(&cfg)
         };
         let payload = build_descriptor_payload(&params, account()).expect("payload");
-        let bytes = crate::chain::scale_types::encode_set_descriptor_call(&payload);
+        let bytes = crate::chain::codec::scale_types::encode_set_descriptor_call(&payload);
         assert!(
             !bytes
                 .windows(SENTINEL.len())

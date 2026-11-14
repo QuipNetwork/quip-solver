@@ -2,7 +2,7 @@
 //! hold the miners until the block that includes it.
 //!
 //! The judge that replays the pallet's checks is the caller's: the chain
-//! supplies it (`chain::pool::judge_pending_proof`). This module caches its
+//! supplies it (`chain::mining::pool::judge_pending_proof`). This module caches its
 //! verdicts per root and runs the wait for the qblock.
 
 use std::collections::{HashMap, HashSet};
@@ -174,8 +174,8 @@ impl PoolWatch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chain::extrinsic::account_identity_bytes;
-    use crate::chain::pool::judge_pending_proof;
+    use crate::chain::codec::extrinsic::account_identity_bytes;
+    use crate::chain::mining::pool::judge_pending_proof;
     use crate::types::proof::QuantumProof;
     use quantum_validation::derive_nonce;
     use quantum_validation::packed::pack_solution;
@@ -334,7 +334,7 @@ mod tests {
         let (snap, salt, spins) = family_case();
         let family = snap.family.clone().expect("a family snapshot");
         let mut pending = pending_with(&snap, &[], salt);
-        pending.proof.solutions = crate::chain::proof_encode::encode_family_witnesses(
+        pending.proof.solutions = crate::chain::codec::proof_encode::encode_family_witnesses(
             &family,
             &snap.nodes,
             &snap.edges,

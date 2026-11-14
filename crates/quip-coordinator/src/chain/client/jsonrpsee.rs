@@ -1,10 +1,10 @@
-//! Native jsonrpsee implementation of [`super::transport::RpcTransport`].
+//! Native jsonrpsee implementation of [`crate::chain::client::transport::RpcTransport`].
 //!
 //! Each request opens a fresh client. A dropped socket costs one call rather
 //! than wedging a long-lived connection.
 
-use super::transport::{BoxStream, RpcTransport};
-use super::ChainError;
+use crate::chain::client::transport::{BoxStream, RpcTransport};
+use crate::chain::ChainError;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::time::Duration;

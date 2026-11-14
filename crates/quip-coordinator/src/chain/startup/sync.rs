@@ -11,7 +11,7 @@
 //! [`wait_until_synced`] moves that discovery to startup and names it: the
 //! coordinator warns with the block it is syncing at and waits.
 
-use super::{ChainError, RealChainClient};
+use crate::chain::{ChainError, RealChainClient};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::time::Duration;

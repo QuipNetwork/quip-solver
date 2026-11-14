@@ -969,7 +969,7 @@ mod verification {
     #[test]
     fn an_accepted_family_witness_passes_the_validator_check() {
         use quantum_validation::families::{AdvertisedLimits, FamilyChallenge, CONTRACTS};
-        use quip_coordinator::chain::proof_encode::{
+        use quip_coordinator::chain::codec::proof_encode::{
             build_quantum_proof, ProofBuildContext, WitnessFormat,
         };
         use quip_coordinator::types::family::{ChallengeFamily, FAMILY_CONTRACTS};

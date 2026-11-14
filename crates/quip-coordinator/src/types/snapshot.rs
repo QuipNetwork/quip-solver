@@ -36,7 +36,7 @@ pub struct MiningSnapshot {
     pub head_hash: [u8; 32],
     /// Hash of the block that contained the last winning proof. At that block
     /// itself this is the head hash, one block before the pallet stores it.
-    /// See `chain::snapshot::round_root`.
+    /// See `chain::mining::snapshot::round_root`.
     pub last_proof_block_hash: [u8; 32],
     /// Topology identity bytes (32-byte hash when provided by the chain).
     pub topology_hash: Vec<u8>,

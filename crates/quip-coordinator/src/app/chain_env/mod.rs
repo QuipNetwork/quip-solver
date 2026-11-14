@@ -4,8 +4,10 @@
 pub mod readiness;
 pub mod run;
 
-use crate::chain::funding::{ensure_funded, BalanceSource, FundingParams, HttpFaucet};
-use crate::chain::sync::{wait_until_synced, SyncOutcome, SyncSource};
+use crate::chain::registration::funding::{
+    ensure_funded, BalanceSource, FundingParams, HttpFaucet,
+};
+use crate::chain::startup::sync::{wait_until_synced, SyncOutcome, SyncSource};
 use crate::chain::ChainClient;
 use crate::config::DescriptorParams;
 use crate::coordinator::{ResultSink, WorkSource};
@@ -82,7 +84,7 @@ impl<C: ChainClient + SyncSource + BalanceSource + 'static> WorkSource for Chain
     }
 
     fn judge(&self, pending: &PendingProof, snap: &MiningSnapshot) -> Verdict {
-        crate::chain::pool::judge_pending_proof(pending, snap)
+        crate::chain::mining::pool::judge_pending_proof(pending, snap)
     }
 
     async fn latest_qblock_id(&self) -> Result<Option<u64>, String> {

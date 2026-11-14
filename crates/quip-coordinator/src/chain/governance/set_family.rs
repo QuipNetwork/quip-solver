@@ -1,62 +1,38 @@
 //! Root-origin topology activation: the calls that make a family topology the
 //! mineable default, on a fresh chain or on one that already mines another.
-//!
-//! A chain with no `QuantumPow.DefaultTopology` accepts no proofs. `seed-chain`
-//! seeds a fresh chain with the dimer1200 family topology: solver-core's live
-//! recipe `x-w62-p1200` of `quip/twisted-ice-dimer` revision 1. `set-family`
-//! moves a seeded chain to another parameter set of the same family.
+//! `set-family` moves a seeded chain to another parameter set of the same
+//! family.
 //!
 //! `register_topology` does not make a family topology the default, so the
 //! activation is five Root calls, each checking the one before it: register,
 //! set the difficulty, set the energy band, whitelist, and set the default.
 //! On a seeded chain the batch also takes every other topology off the
 //! mineable whitelist (see [`family_root_calls`]).
-//!
-//! Runtime 120 has no `Sudo` pallet. The calls go in one `Utility::batch_all`
-//! that `ValidatorAdmission::dispatch_as_root` runs with the Root origin. That
-//! call needs two thirds of the Foundation, so it is proposed as a Foundation
-//! motion with threshold ⌈2N/3⌉ of N members. A threshold below 2, which is a
-//! one-member Foundation such as the `dev` preset (`//Alice`), executes at
-//! once. A larger Foundation votes: each member runs the same command, which
-//! finds the open motion by its hash, votes aye, and closes it once the ayes
-//! reach the threshold. Runtimes before 120 are refused.
 
-use super::real::{Confirmation, RealChainClient, SignedCallOutcome};
-use super::scale_types::{
-    DifficultyConfig, EnergyBandScale, FamilyDescriptorScale, WeightScale,
-    ADD_MINEABLE_TOPOLOGY_CALL_INDEX, BATCH_ALL_CALL_INDEX, CLOSE_CALL_INDEX,
-    DISPATCH_AS_ROOT_CALL_INDEX, FOUNDATION_PALLET_INDEX, PROPOSE_CALL_INDEX,
-    QUANTUM_POW_PALLET_INDEX, REGISTER_TOPOLOGY_CALL_INDEX, REMOVE_MINEABLE_TOPOLOGY_CALL_INDEX,
-    SET_DEFAULT_TOPOLOGY_CALL_INDEX, SET_DIFFICULTY_CALL_INDEX,
-    SET_TOPOLOGY_ENERGY_BAND_CALL_INDEX, UTILITY_PALLET_INDEX, VALIDATOR_ADMISSION_PALLET_INDEX,
-    VOTE_CALL_INDEX,
+use crate::chain::client::RealChainClient;
+use crate::chain::codec::scale_types::{
+    DifficultyConfig, EnergyBandScale, FamilyDescriptorScale, ADD_MINEABLE_TOPOLOGY_CALL_INDEX,
+    REMOVE_MINEABLE_TOPOLOGY_CALL_INDEX, SET_DEFAULT_TOPOLOGY_CALL_INDEX,
+    SET_DIFFICULTY_CALL_INDEX, SET_TOPOLOGY_ENERGY_BAND_CALL_INDEX,
 };
-use super::ChainError;
+use crate::chain::governance::foundation::{
+    applied, dispatch, foundation_close_call, foundation_propose_call, foundation_threshold,
+    foundation_vote_call, open_votes, proposal_hash, root_dispatch_call, RootCall,
+};
+use crate::chain::governance::seed::{
+    client_for, quantum_pow_hash_call, register_topology_call, ss58, SeedParams,
+    MIN_SEED_SPEC_VERSION,
+};
+use crate::chain::sign::submit::Confirmation;
+use crate::chain::ChainError;
 use crate::types::hex::hex_encode;
-use crate::types::miner::MinerKind;
-use crate::types::topology_spec::TopologySpec;
-
-use crate::types::topology::{family_topology_hash, topology_hash_sets, Topology};
-use parity_scale_codec::{Compact, Encode};
-use quantum_validation::families::{AdvertisedLimits, FamilyChallenge, CONTRACTS};
-use quantum_validation::AllowedValueSpec;
-use sp_core::crypto::{AccountId32, Ss58Codec};
-use sp_crypto_hashing::blake2_256;
-
-/// First runtime `spec_version` with the Foundation root path. quip-validator
-/// v0.4.1 and v0.5.0 both report 120, and only v0.5.0 has family topologies;
-/// on v0.4.1 the batch fails inside the motion and the default never moves.
-pub const MIN_SEED_SPEC_VERSION: u32 = 120;
-
-/// Node cap the runtime admits a family under (`QuantumPowMaxNodes`).
-pub const RUNTIME_MAX_NODES: u64 = 5_000;
-/// Edge cap the runtime admits a family under (`QuantumPowMaxEdges`).
-pub const RUNTIME_MAX_EDGES: u64 = 50_000;
 
 /// Family id of the twisted-ice dimer topologies.
 pub const TWISTED_DIMER_FAMILY_ID: &str = "quip/twisted-ice-dimer";
+
 /// Family revision of the twisted-ice dimer topologies.
 pub const TWISTED_DIMER_REVISION: u32 = 1;
+
 /// Canonical parameters of solver-core's live recipe `x-w62-p1200`, cell
 /// `ice-twisted-w62-dimer1200`: width 62 (`0x3e`) and 1200 pairs (`0x04b0`).
 pub const DIMER_1200_PARAMS: [u8; 34] = [
@@ -64,33 +40,6 @@ pub const DIMER_1200_PARAMS: [u8; 34] = [
     0x03, 0x00, 0x02, 0x00, 0x00, 0x00, 0x3e, 0x00, 0x04, 0x00, 0x04, 0x00, 0x00, 0x00, 0xb0, 0x04,
     0x00, 0x00,
 ];
-
-/// The energy band a fresh chain starts on. `quip-cpu-otsuka` reaches
-/// -4,917,712 to -4,946,962 milli on dimer1200 in about two seconds per
-/// four-salt lease, on both the live graph and the older Advantage2 graph. The
-/// easy end sits above that so the first proof lands, and the hard end below
-/// it so the controller has room to tighten.
-pub const DEFAULT_ENERGY_BAND: EnergyBandScale = EnergyBandScale {
-    hard_milli: -5_100_000,
-    easy_milli: -4_800_000,
-};
-
-/// The difficulty a fresh chain starts at: a ceiling inside the band about
-/// 80,000 milli above the measured solves, and one solution with no diversity
-/// gate so a single CPU miner lands the first qblock. Raise the gates with
-/// `set_difficulty` once more miners join.
-pub const DEFAULT_SEED_DIFFICULTY: DifficultyConfig = DifficultyConfig {
-    min_solutions: 1,
-    max_energy_milli: -4_850_000,
-    min_diversity_milli: 0,
-};
-
-// The band is ordered and the first ceiling sits inside it.
-const _: () = {
-    assert!(DEFAULT_ENERGY_BAND.hard_milli < DEFAULT_ENERGY_BAND.easy_milli);
-    assert!(DEFAULT_SEED_DIFFICULTY.max_energy_milli > DEFAULT_ENERGY_BAND.hard_milli);
-    assert!(DEFAULT_SEED_DIFFICULTY.max_energy_milli < DEFAULT_ENERGY_BAND.easy_milli);
-};
 
 /// Canonical `quip/twisted-ice-dimer` revision 1 parameters on Zephyr
 /// z(12, 4): `weak_milli` and `pairs` are the two values a recipe varies.
@@ -130,141 +79,6 @@ pub fn dimer_1200() -> FamilyDescriptorScale {
     twisted_dimer(DIMER_1200_PARAMS.to_vec())
 }
 
-/// The graph and allowed-value sets a `register_topology` call carries.
-///
-/// Every allowed-value argument uses the `Set` variant. The other variants
-/// (`IntegerRange`, `ContinuousRange`) describe sampling ranges that no
-/// hardware topology has needed, so the seed path does not offer them.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SeedTopology {
-    /// Graph node ids.
-    pub nodes: Vec<u32>,
-    /// Graph edges as endpoint pairs.
-    pub edges: Vec<(u32, u32)>,
-    /// Allowed per-node h field values, in milli units.
-    pub allowed_h_milli: Vec<i32>,
-    /// Allowed per-edge j coupling values, in milli units.
-    pub allowed_j_milli: Vec<i32>,
-    /// Allowed solution spin values, in milli units.
-    pub allowed_spin_milli: Vec<i32>,
-}
-
-impl SeedTopology {
-    /// Build a seed topology from a parsed topology spec.
-    #[must_use]
-    pub fn from_spec(spec: &TopologySpec) -> Self {
-        Self {
-            nodes: spec.topology.nodes.clone(),
-            edges: spec.topology.edge_pairs(),
-            allowed_h_milli: spec.allowed_h_milli.clone(),
-            allowed_j_milli: spec.allowed_j_milli.clone(),
-            allowed_spin_milli: spec.allowed_spin_milli.clone(),
-        }
-    }
-
-    /// The legacy topology hash of this graph and its value sets. A family
-    /// topology hash commits to it.
-    #[must_use]
-    pub fn legacy_hash(&self) -> [u8; 32] {
-        topology_hash_sets(
-            &self.nodes,
-            &self.edges,
-            &self.allowed_h_milli,
-            &self.allowed_j_milli,
-            &self.allowed_spin_milli,
-        )
-    }
-
-    /// The family topology hash the pallet stores for this graph under
-    /// `descriptor`.
-    ///
-    /// Computed locally so the caller can confirm what the chain stored
-    /// instead of trusting the submit to have encoded correctly. The
-    /// descriptor must pass two admissions on the graph: the runtime's
-    /// (`quantum_validation`'s allowlist under the runtime's size caps, which
-    /// is what `register_topology` runs) and the coordinator's lease library,
-    /// which is what lets the coordinator mine it. Both must derive the same
-    /// digests, or the coordinator would mine a topology the chain does not
-    /// hold.
-    ///
-    /// # Errors
-    /// Returns the refusal when either admission refuses the descriptor on the
-    /// graph, or when the two disagree on a digest.
-    pub fn family_hash(&self, descriptor: &FamilyDescriptorScale) -> Result<[u8; 32], String> {
-        let family_id = std::str::from_utf8(&descriptor.family_id)
-            .map_err(|_| "family id is not UTF-8".to_string())?;
-        let what = format!("family {family_id} r{}", descriptor.revision);
-        let runtime = FamilyChallenge::admit(
-            CONTRACTS,
-            &descriptor.family_id,
-            descriptor.revision,
-            &descriptor.params,
-            &self.nodes,
-            &self.edges,
-            &AdvertisedLimits {
-                max_nodes: RUNTIME_MAX_NODES,
-                max_edges: RUNTIME_MAX_EDGES,
-                max_degree: 0,
-            },
-        )
-        .map_err(|e| format!("the runtime refuses {what} on this graph: {e:?}"))?;
-        let ordered = Topology::from_nodes_edges(
-            self.nodes.clone(),
-            self.edges.clone(),
-            &self.allowed_h_milli,
-            &self.allowed_j_milli,
-            &self.allowed_spin_milli,
-        );
-        let admitted = crate::types::family::ChallengeFamily::admit(
-            crate::types::family::FAMILY_CONTRACTS,
-            family_id,
-            descriptor.revision,
-            descriptor.params.clone(),
-            &ordered,
-        )
-        .map_err(|code| format!("the coordinator refuses {what} on this graph: {code:?}"))?;
-        if runtime.descriptor_digest() != *admitted.descriptor_digest()
-            || runtime.topology_order_digest() != *admitted.topology_order_digest()
-        {
-            return Err(format!(
-                "the runtime and the coordinator derive different digests for {what}"
-            ));
-        }
-        Ok(family_topology_hash(
-            self.legacy_hash(),
-            *admitted.descriptor_digest(),
-            *admitted.topology_order_digest(),
-        ))
-    }
-}
-
-/// `QuantumPow.register_topology(nodes, edges, h, j, spin, Some(descriptor))`.
-#[must_use]
-pub fn register_topology_call(
-    topology: &SeedTopology,
-    descriptor: &FamilyDescriptorScale,
-) -> Vec<u8> {
-    let mut call = vec![QUANTUM_POW_PALLET_INDEX, REGISTER_TOPOLOGY_CALL_INDEX];
-    (
-        topology.nodes.clone(),
-        topology.edges.clone(),
-        AllowedValueSpec::Set(topology.allowed_h_milli.clone()),
-        AllowedValueSpec::Set(topology.allowed_j_milli.clone()),
-        AllowedValueSpec::Set(topology.allowed_spin_milli.clone()),
-        Some(descriptor.clone()),
-    )
-        .encode_to(&mut call);
-    call
-}
-
-/// A `QuantumPow` call that takes a topology hash and then `args`.
-fn quantum_pow_hash_call(call_index: u8, topology_hash: [u8; 32], args: &impl Encode) -> Vec<u8> {
-    let mut call = vec![QUANTUM_POW_PALLET_INDEX, call_index];
-    call.extend_from_slice(&topology_hash);
-    args.encode_to(&mut call);
-    call
-}
-
 /// The topology state of the chain that decides the batch.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ChainTopologies {
@@ -274,15 +88,6 @@ pub struct ChainTopologies {
     pub mineable: Vec<[u8; 32]>,
     /// Whether the new family topology is already registered.
     pub registered: bool,
-}
-
-/// One Root call of the batch, with a label for the dry run.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RootCall {
-    /// What the call does, as `Pallet.call(args)`.
-    pub label: String,
-    /// The SCALE-encoded `RuntimeCall`.
-    pub bytes: Vec<u8>,
 }
 
 /// The Root calls that make the family topology `hash` the only mineable
@@ -359,96 +164,6 @@ pub fn family_root_calls(
         calls.push(remove(old));
     }
     calls
-}
-
-/// Ayes a Foundation motion needs for `dispatch_as_root`: two thirds of the
-/// members, rounded up.
-#[must_use]
-pub fn foundation_threshold(members: usize) -> u32 {
-    let members = u32::try_from(members).unwrap_or(u32::MAX);
-    members.saturating_mul(2).saturating_add(2) / 3
-}
-
-/// `ValidatorAdmission.dispatch_as_root(Utility.batch_all(calls))`: the
-/// proposal a Foundation motion carries.
-///
-/// A `Box<RuntimeCall>` encodes as the call itself, and `Vec<RuntimeCall>` as
-/// a compact count followed by the calls.
-#[must_use]
-pub fn root_dispatch_call(calls: &[RootCall]) -> Vec<u8> {
-    let mut root = vec![
-        VALIDATOR_ADMISSION_PALLET_INDEX,
-        DISPATCH_AS_ROOT_CALL_INDEX,
-        UTILITY_PALLET_INDEX,
-        BATCH_ALL_CALL_INDEX,
-    ];
-    let count = u32::try_from(calls.len()).unwrap_or(u32::MAX);
-    Compact(count).encode_to(&mut root);
-    for call in calls {
-        root.extend_from_slice(&call.bytes);
-    }
-    root
-}
-
-/// The hash `Foundation.Voting` keys a proposal by: BLAKE2-256 of the call.
-#[must_use]
-pub fn proposal_hash(proposal: &[u8]) -> [u8; 32] {
-    blake2_256(proposal)
-}
-
-/// `Foundation.propose(threshold, proposal, length_bound)`.
-#[must_use]
-pub fn foundation_propose_call(threshold: u32, proposal: &[u8]) -> Vec<u8> {
-    let mut motion = vec![FOUNDATION_PALLET_INDEX, PROPOSE_CALL_INDEX];
-    Compact(threshold).encode_to(&mut motion);
-    motion.extend_from_slice(proposal);
-    let length_bound = u32::try_from(proposal.len()).unwrap_or(u32::MAX);
-    Compact(length_bound).encode_to(&mut motion);
-    motion
-}
-
-/// `Foundation.vote(proposal, index, approve)`.
-#[must_use]
-pub fn foundation_vote_call(proposal: [u8; 32], index: u32, approve: bool) -> Vec<u8> {
-    let mut call = vec![FOUNDATION_PALLET_INDEX, VOTE_CALL_INDEX];
-    call.extend_from_slice(&proposal);
-    Compact(index).encode_to(&mut call);
-    approve.encode_to(&mut call);
-    call
-}
-
-/// `Foundation.close(proposal, index, proposal_weight_bound, length_bound)`.
-#[must_use]
-pub fn foundation_close_call(
-    proposal: [u8; 32],
-    index: u32,
-    weight_bound: WeightScale,
-    length_bound: u32,
-) -> Vec<u8> {
-    let mut call = vec![FOUNDATION_PALLET_INDEX, CLOSE_CALL_INDEX];
-    call.extend_from_slice(&proposal);
-    Compact(index).encode_to(&mut call);
-    weight_bound.encode_to(&mut call);
-    Compact(length_bound).encode_to(&mut call);
-    call
-}
-
-/// Everything an activation needs.
-#[derive(Clone, Debug)]
-pub struct SeedParams {
-    /// Validator RPC endpoint.
-    pub validator: String,
-    /// Foundation member signer material, in any form `load_hybrid_pair`
-    /// accepts. Unused, and may be empty, for a plan.
-    pub sudo_key: String,
-    /// The graph to register the family topology on.
-    pub topology: SeedTopology,
-    /// The family descriptor.
-    pub descriptor: FamilyDescriptorScale,
-    /// The difficulty to set for that topology.
-    pub difficulty: DifficultyConfig,
-    /// The energy band, `hard_milli < easy_milli`.
-    pub band: EnergyBandScale,
 }
 
 /// What to do when the chain already has a default topology.
@@ -539,20 +254,6 @@ pub fn check_energies(difficulty: &DifficultyConfig, band: &EnergyBandScale) -> 
     Ok(())
 }
 
-/// SS58 text of an account, for messages.
-#[must_use]
-pub fn ss58(account: &[u8; 32]) -> String {
-    AccountId32::from(*account).to_ss58check()
-}
-
-fn client_for(params: &SeedParams) -> RealChainClient {
-    RealChainClient::new(
-        vec![params.validator.clone()],
-        params.sudo_key.clone(),
-        MinerKind::Cpu,
-    )
-}
-
 /// Work out the activation against the chain without signing anything.
 ///
 /// # Errors
@@ -579,7 +280,8 @@ async fn plan_with(
         .family_hash(&params.descriptor)
         .map_err(ChainError::Submit)?;
 
-    let spec_version = super::real::parse_spec_version(&client.runtime_version_raw().await?)?;
+    let spec_version =
+        crate::chain::client::storage::parse_spec_version(&client.runtime_version_raw().await?)?;
     if spec_version < MIN_SEED_SPEC_VERSION {
         return Err(ChainError::Submit(format!(
             "runtime {spec_version} has no family topologies; this needs runtime \
@@ -720,92 +422,18 @@ pub async fn apply_family(
     applied(&client, params, topology_hash, block).await
 }
 
-/// `seed-chain`: seed a fresh chain, refusing one that already has a default.
-///
-/// # Errors
-/// As [`apply_family`] with [`ExistingDefault::Refuse`].
-pub async fn seed_chain(params: SeedParams) -> Result<FamilyOutcome, ChainError> {
-    apply_family(&params, ExistingDefault::Refuse).await
-}
-
-/// The open vote on `proposal`, which must exist.
-async fn open_votes(
-    client: &RealChainClient,
-    proposal: &[u8; 32],
-) -> Result<super::scale_types::FoundationVotesScale, ChainError> {
-    client
-        .foundation_votes(proposal, &client.head_hex().await?)
-        .await?
-        .ok_or_else(|| {
-            ChainError::Submit(format!(
-                "the motion {} closed before this member could vote; run the command again \
-                 to see where the chain stands",
-                hex_encode(proposal)
-            ))
-        })
-}
-
-/// Read `DefaultTopology` back at the head and report the switch.
-///
-/// The motion and the Root dispatch both succeed as extrinsics even when the
-/// batch inside fails; only the events carry that result. The batch is
-/// all-or-nothing and sets the default, so the stored default equal to the
-/// local hash shows that every call landed.
-async fn applied(
-    client: &RealChainClient,
-    params: &SeedParams,
-    topology_hash: [u8; 32],
-    block: String,
-) -> Result<FamilyOutcome, ChainError> {
-    let stored = client.default_topology().await?;
-    if stored != Some(topology_hash) {
-        return Err(ChainError::Submit(format!(
-            "the motion executed in {block}, but DefaultTopology is {} instead of {}; read \
-             the Foundation.Executed and ValidatorAdmission.RootDispatched events of that \
-             block for the inner error",
-            stored.map_or_else(|| "unset".to_string(), |h| hex_encode(&h)),
-            hex_encode(&topology_hash)
-        )));
-    }
-    Ok(FamilyOutcome::Applied {
-        topology_hash,
-        nodes: params.topology.nodes.len(),
-        edges: params.topology.edges.len(),
-        block,
-    })
-}
-
-/// Submit `call` and return the block that included it once `confirmation`
-/// holds there.
-async fn dispatch(
-    client: &RealChainClient,
-    call: &[u8],
-    what: &str,
-    confirmation: Confirmation,
-) -> Result<String, ChainError> {
-    tracing::info!(call = what, "submitting Foundation call");
-    let (outcome, _) = client.submit_signed_call(call, confirmation).await?;
-    match outcome {
-        SignedCallOutcome::Success { block, .. } => {
-            tracing::info!(call = what, block = %block, "Foundation call included");
-            Ok(block)
-        }
-        SignedCallOutcome::DispatchFailed { error, .. } => Err(ChainError::Submit(format!(
-            "{what} was included but did not take effect: {error}; read the \
-             Foundation and ValidatorAdmission events of that block for the inner error"
-        ))),
-        SignedCallOutcome::Invalid { message } => Err(ChainError::Submit(format!(
-            "{what} was rejected by the transaction pool: {message}"
-        ))),
-        SignedCallOutcome::Dropped { message } => Err(ChainError::Submit(format!(
-            "{what} was dropped before inclusion: {message}"
-        ))),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chain::codec::scale_types::{
+        ADD_MINEABLE_TOPOLOGY_CALL_INDEX, QUANTUM_POW_PALLET_INDEX, REGISTER_TOPOLOGY_CALL_INDEX,
+        REMOVE_MINEABLE_TOPOLOGY_CALL_INDEX, SET_DEFAULT_TOPOLOGY_CALL_INDEX,
+        SET_DIFFICULTY_CALL_INDEX, SET_TOPOLOGY_ENERGY_BAND_CALL_INDEX,
+    };
+    use crate::chain::governance::seed::{
+        SeedTopology, DEFAULT_ENERGY_BAND, DEFAULT_SEED_DIFFICULTY,
+    };
+    use parity_scale_codec::Encode;
 
     fn spec_topology(preset: &str) -> SeedTopology {
         let text = crate::types::topology_spec::preset_spec(preset).unwrap();
@@ -973,66 +601,6 @@ mod tests {
         );
     }
 
-    /// Two thirds of the members, rounded up; one member executes at once.
-    #[test]
-    fn the_threshold_is_two_thirds_rounded_up() {
-        let got: Vec<u32> = (1..=7).map(foundation_threshold).collect();
-        assert_eq!(got, [1, 2, 2, 3, 4, 4, 5]);
-    }
-
-    /// The motion is `propose(Compact(threshold), dispatch_as_root(batch_all(
-    /// calls)), Compact(len))`, and the length bound is the inner call length.
-    #[test]
-    fn the_foundation_motion_wraps_the_batch_in_root_dispatch() {
-        let call = |bytes: Vec<u8>| RootCall {
-            label: String::new(),
-            bytes,
-        };
-        let calls = vec![call(vec![10, 3, 0xaa]), call(vec![10, 6, 0xbb, 0xcc])];
-        let root = root_dispatch_call(&calls);
-        assert_eq!(
-            root,
-            [
-                VALIDATOR_ADMISSION_PALLET_INDEX,
-                DISPATCH_AS_ROOT_CALL_INDEX,
-                UTILITY_PALLET_INDEX,
-                BATCH_ALL_CALL_INDEX,
-                0x08,
-                10,
-                3,
-                0xaa,
-                10,
-                6,
-                0xbb,
-                0xcc,
-            ]
-        );
-        let mut expected = vec![FOUNDATION_PALLET_INDEX, PROPOSE_CALL_INDEX, 0x0c];
-        expected.extend_from_slice(&root);
-        Compact(u32::try_from(root.len()).unwrap()).encode_to(&mut expected);
-        assert_eq!(foundation_propose_call(3, &root), expected);
-    }
-
-    /// `vote(hash, Compact(index), approve)` and `close(hash, Compact(index),
-    /// Weight { Compact, Compact }, Compact(len))`.
-    #[test]
-    fn vote_and_close_encode_the_collective_arguments() {
-        let hash = [7u8; 32];
-        let mut vote = vec![FOUNDATION_PALLET_INDEX, VOTE_CALL_INDEX];
-        vote.extend_from_slice(&hash);
-        vote.extend_from_slice(&[0x08, 0x01]);
-        assert_eq!(foundation_vote_call(hash, 2, true), vote);
-
-        let weight = WeightScale {
-            ref_time: 1,
-            proof_size: 2,
-        };
-        let mut close = vec![FOUNDATION_PALLET_INDEX, CLOSE_CALL_INDEX];
-        close.extend_from_slice(&hash);
-        close.extend_from_slice(&[0x08, 0x04, 0x08, 0x28]);
-        assert_eq!(foundation_close_call(hash, 2, weight, 10), close);
-    }
-
     /// The band is ordered and the ceiling sits strictly inside it.
     #[test]
     fn energies_must_nest() {
@@ -1052,30 +620,5 @@ mod tests {
             easy_milli: band.hard_milli,
         };
         assert!(check_energies(&ceiling(-4_886_000), &flipped).is_err());
-    }
-
-    /// `parse_topology_spec` builds `Topology::hash` through the same canonical
-    /// hash function as `legacy_hash`, and the hash ignores node and edge order.
-    #[test]
-    fn a_topology_spec_converts_to_a_seed_topology_with_the_same_hash() {
-        for preset in crate::types::topology_spec::PRESET_NAMES {
-            let text = crate::types::topology_spec::preset_spec(preset).unwrap();
-            let spec = crate::types::topology_spec::parse_topology_spec(text).unwrap();
-            let seed = SeedTopology::from_spec(&spec);
-            assert_eq!(seed.nodes, spec.topology.nodes, "{preset}");
-            assert_eq!(seed.edges, spec.topology.edge_pairs(), "{preset}");
-            assert_eq!(seed.legacy_hash().to_vec(), spec.topology.hash, "{preset}");
-        }
-        let tiny = SeedTopology {
-            nodes: vec![0, 1, 2],
-            edges: vec![(0, 1), (1, 2)],
-            allowed_h_milli: vec![0],
-            allowed_j_milli: vec![-1000, 1000],
-            allowed_spin_milli: vec![-1000, 1000],
-        };
-        let mut reordered = tiny.clone();
-        reordered.nodes = vec![2, 0, 1];
-        reordered.edges = vec![(1, 2), (0, 1)];
-        assert_eq!(tiny.legacy_hash(), reordered.legacy_hash());
     }
 }

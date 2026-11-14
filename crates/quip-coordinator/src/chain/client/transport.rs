@@ -5,7 +5,7 @@
 //! HTTP endpoint, or on a browser WebSocket under WebAssembly, where the
 //! native jsonrpsee client does not build.
 
-use super::ChainError;
+use crate::chain::ChainError;
 use async_trait::async_trait;
 
 /// A boxed stream, so the trait stays object safe.

@@ -5,7 +5,7 @@
 //! and the field offset are both stable, so this module builds the key and
 //! reads the field directly.
 
-use super::extrinsic::{blake2_128, twox128};
+use crate::chain::codec::extrinsic::{blake2_128, twox128};
 
 /// Byte offset of `data.free` inside a SCALE-encoded `AccountInfo`.
 ///

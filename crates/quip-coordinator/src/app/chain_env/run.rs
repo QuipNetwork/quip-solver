@@ -3,7 +3,9 @@
 
 use super::{ChainEnv, ChainEnvParams};
 use crate::app::RuntimeParams;
-use crate::chain::extrinsic::{load_hybrid_pair, miner_identity_bytes, signer_account_bytes};
+use crate::chain::codec::extrinsic::{
+    load_hybrid_pair, miner_identity_bytes, signer_account_bytes,
+};
 use crate::chain::RealChainClient;
 use crate::config::CoordinatorConfig;
 use crate::coordinator::state::CoordinatorState;
@@ -71,7 +73,7 @@ pub fn run(config_path: &Path, cfg: CoordinatorConfig, log_level: LogLevel) -> S
 
     let identity = identity_from_keys(miner_ss58, miner_account, cfg.node_id.as_deref());
 
-    let funding = crate::chain::funding::FundingParams {
+    let funding = crate::chain::registration::funding::FundingParams {
         faucet_url: cfg.faucet_url.clone(),
         min_balance: cfg.min_balance_plancks,
         top_up: cfg.faucet_top_up_plancks,
@@ -170,7 +172,7 @@ fn run_preflight_gate(
 ) -> Option<StdExitCode> {
     match rt.block_on(chain.preflight()) {
         Ok(_) => None,
-        Err(crate::chain::preflight::PreflightError::Unreachable(e)) => {
+        Err(crate::chain::startup::preflight::PreflightError::Unreachable(e)) => {
             tracing::warn!(
                 error = %e,
                 "cannot reach a validator to verify compatibility; starting anyway and \
@@ -249,7 +251,7 @@ fn run_startup_prepare(
     rt: &tokio::runtime::Runtime,
     chain: &RealChainClient,
     miner_account: [u8; 32],
-    funding: &crate::chain::funding::FundingParams,
+    funding: &crate::chain::registration::funding::FundingParams,
     descriptor: &crate::config::DescriptorParams,
     latches: &super::readiness::ProcessLatches<'_>,
 ) -> Option<StdExitCode> {

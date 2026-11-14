@@ -47,10 +47,10 @@ use quantum_validation::{
     calculate_diversity, derive_nonce, energy_of_solution, generate_ising_model, select_diverse,
     MilliValue,
 };
-use quip_coordinator::chain::extrinsic::{
+use quip_coordinator::chain::codec::extrinsic::{
     build_hybrid_signed_extrinsic, miner_identity_bytes, miners_storage_key, SignedExtensionContext,
 };
-use quip_coordinator::chain::scale_types::{
+use quip_coordinator::chain::codec::scale_types::{
     encode_register_miner_call, IsingParams, MiningSnapshotScale, ResultDelivery, RewardResolution,
 };
 use quip_coordinator::chain::{ChainClient, RealChainClient};

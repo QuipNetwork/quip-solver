@@ -1,7 +1,7 @@
 //! Startup compatibility check against the configured validator.
 //!
 //! The coordinator talks to the chain through hand-mirrored SCALE types
-//! (`scale_types.rs`), a hardcoded pallet/call index, and the `QuantumPowApi`
+//! (`codec::scale_types`), a hardcoded pallet/call index, and the `QuantumPowApi`
 //! runtime API. All three are pinned to a runtime version. Against a validator
 //! that predates them, every one of those reads fails — and the failure
 //! surfaces deep inside the feeder loop, one poll at a time, as an opaque
@@ -11,7 +11,7 @@
 //! sees "this validator does not expose `QuantumPowApi`" instead of a coordinator
 //! that runs forever and mines nothing.
 
-use super::{ChainError, RealChainClient};
+use crate::chain::{ChainError, RealChainClient};
 use serde_json::Value;
 
 /// Runtime API trait the coordinator mines against.

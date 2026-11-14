@@ -351,6 +351,41 @@ where
     }
 }
 
+use crate::chain::client::RealChainClient;
+use crate::types::hex::{hex_decode, hex_encode};
+use serde_json::Value;
+
+#[async_trait]
+impl BalanceSource for RealChainClient {
+    async fn free_balance(&self, account: [u8; 32]) -> Result<u128, String> {
+        let key = crate::chain::registration::account::system_account_storage_key(&account);
+        let head = self
+            .rpc_call("chain_getBlockHash", Value::Array(vec![]))
+            .await
+            .map_err(|e| e.to_string())?;
+        let at = head
+            .as_str()
+            .ok_or_else(|| "chain_getBlockHash did not return a string".to_string())?;
+        let raw = self
+            .rpc_call(
+                "state_getStorage",
+                Value::Array(vec![
+                    Value::String(hex_encode(&key)),
+                    Value::String(at.to_string()),
+                ]),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        // A null result means the account has never been touched on chain,
+        // which is a zero balance rather than a read failure.
+        let Some(hex) = raw.as_str() else {
+            return Ok(0);
+        };
+        let bytes = hex_decode(hex)?;
+        crate::chain::registration::account::free_from_account_bytes(&bytes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -147,7 +147,7 @@ async fn drive_resolves_default_presets_named_presets_and_files() {
 }
 
 fn resolved_chain_fixture() -> Result<TopologySpec, String> {
-    use crate::chain::scale_types::TopologyMetaScale;
+    use crate::chain::codec::scale_types::TopologyMetaScale;
     use quantum_validation::AllowedValueSpec;
     let spec = parse_topology_spec(
         r#"{"nodes":[30,10],"edges":[[30,10]],

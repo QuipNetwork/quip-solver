@@ -1018,7 +1018,7 @@ mod tests {
         assert_eq!(decoded.encode(), blob);
     }
 
-    // The JobProposed decode (real.rs) parses untrusted on-chain bytes; it must
+    // The JobProposed decode (`mining::mempool`) parses untrusted on-chain bytes; it must
     // reject malformed input with an error, never panic. Only a live #[ignore]
     // devnet test exercised this before — these are the offline guards.
 

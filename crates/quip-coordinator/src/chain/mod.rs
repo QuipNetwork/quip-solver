@@ -1,44 +1,37 @@
 //! Chain access behind `ChainClient`. Real impl talks Substrate JSON-RPC;
 //! tests use `FakeChain`.
 
-pub mod account;
-pub mod dryrun;
-pub mod extrinsic;
-pub mod funding;
-pub mod orders;
-pub mod pool;
-pub mod preflight;
-pub mod proof_encode;
-pub mod real;
-pub mod scale_types;
-pub mod seed;
-pub mod snapshot;
-pub mod submit;
-pub mod sync;
-pub mod transport;
-pub mod transport_jsonrpsee;
-pub mod watch;
+pub mod client;
+pub mod codec;
+pub mod governance;
+pub mod mining;
+pub mod registration;
+pub mod sign;
+pub mod startup;
 
-pub use account::{free_from_account_bytes, system_account_storage_key};
-pub use dryrun::{decode_dispatch_error, describe_module_error, ModuleError};
-pub use extrinsic::RuntimeTxContext;
-pub use orders::{job_orders_prefix, order_id_from_key};
-pub use pool::decode_pending_proof;
-pub use real::RealChainClient;
-pub use scale_types::{MinerInfoScale, NodeDescriptorV2Input};
-pub use seed::{
-    apply_family, dimer_1200, family_root_calls, plan_family, register_topology_call, seed_chain,
-    ss58, twisted_dimer, twisted_dimer_params, ExistingDefault, FamilyOutcome, FamilyPlan,
-    SeedParams, SeedTopology, DEFAULT_ENERGY_BAND, DEFAULT_SEED_DIFFICULTY, MIN_SEED_SPEC_VERSION,
+pub use client::dryrun::{decode_dispatch_error, describe_module_error, ModuleError};
+pub use client::jsonrpsee::JsonrpseeTransport;
+pub use client::transport::{BoxStream, RpcTransport};
+pub use client::watch::{parse_tx_status, TxStatus};
+pub use client::RealChainClient;
+pub use codec::extrinsic::RuntimeTxContext;
+pub use codec::scale_types::{MinerInfoScale, NodeDescriptorV2Input};
+pub use governance::seed::{
+    register_topology_call, seed_chain, ss58, SeedParams, SeedTopology, DEFAULT_ENERGY_BAND,
+    DEFAULT_SEED_DIFFICULTY, MIN_SEED_SPEC_VERSION,
 };
-pub use snapshot::round_root;
-pub use submit::{
+pub use governance::set_family::{
+    apply_family, dimer_1200, family_root_calls, plan_family, twisted_dimer, twisted_dimer_params,
+    ExistingDefault, FamilyOutcome, FamilyPlan,
+};
+pub use mining::mempool::{job_orders_prefix, order_id_from_key};
+pub use mining::pool::decode_pending_proof;
+pub use mining::snapshot::round_root;
+pub use registration::account::{free_from_account_bytes, system_account_storage_key};
+pub use sign::submit::{
     classify_descriptor, classify_participation, classify_receipt, classify_registration,
     DescriptorOutcome, ParticipationOutcome, RegistrationOutcome,
 };
-pub use transport::{BoxStream, RpcTransport};
-pub use transport_jsonrpsee::JsonrpseeTransport;
-pub use watch::{parse_tx_status, TxStatus};
 
 use crate::types::miner::MinerInfo;
 use crate::types::order::JobOrder;

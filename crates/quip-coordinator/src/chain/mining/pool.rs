@@ -13,10 +13,12 @@
 //! mining. Difficulty eases every block until a win, so a proof that clears
 //! now also clears at its inclusion block.
 
-use super::extrinsic::account_identity_bytes;
-use super::extrinsic::{encode_additional, extrinsic_hash, signing_payload, RuntimeTxContext};
-use super::proof_encode::decode_family_witnesses;
-use super::scale_types::{QUANTUM_POW_PALLET_INDEX, SUBMIT_PROOF_CALL_INDEX};
+use crate::chain::codec::extrinsic::account_identity_bytes;
+use crate::chain::codec::extrinsic::{
+    encode_additional, extrinsic_hash, signing_payload, RuntimeTxContext,
+};
+use crate::chain::codec::proof_encode::decode_family_witnesses;
+use crate::chain::codec::scale_types::{QUANTUM_POW_PALLET_INDEX, SUBMIT_PROOF_CALL_INDEX};
 use crate::types::family::ChallengeFamily;
 use crate::types::proof::QuantumProof;
 use crate::types::snapshot::{MiningSnapshot, PendingProof, Verdict};
@@ -256,13 +258,44 @@ fn unpack_rows(proof: &QuantumProof, snap: &MiningSnapshot) -> Result<Vec<Vec<i8
     Ok(rows)
 }
 
+use crate::chain::client::RealChainClient;
+use crate::chain::ChainError;
+use crate::types::hex::hex_decode;
+use serde_json::Value;
+
+impl RealChainClient {
+    /// Read the pending proofs; see `ChainClient::fetch_pending_proofs`.
+    pub(in crate::chain) async fn read_pending_proofs(
+        &self,
+    ) -> Result<Vec<PendingProof>, ChainError> {
+        let raw = self
+            .rpc_call("author_pendingExtrinsics", Value::Array(vec![]))
+            .await?;
+        let Some(entries) = raw.as_array() else {
+            return Err(ChainError::Decode(
+                "author_pendingExtrinsics did not return an array".into(),
+            ));
+        };
+        let ctx = self.runtime_tx_context().await?;
+        let mut proofs = Vec::new();
+        for entry in entries {
+            let Some(hex) = entry.as_str() else { continue };
+            let bytes = hex_decode(hex).map_err(ChainError::Decode)?;
+            if let Some(p) = decode_pending_proof(&bytes, &ctx) {
+                proofs.push(p);
+            }
+        }
+        Ok(proofs)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chain::extrinsic::{
+    use crate::chain::codec::extrinsic::{
         build_hybrid_signed_extrinsic, signer_account_bytes, SignedExtensionContext,
     };
-    use crate::chain::scale_types::{encode_register_miner_call, encode_submit_proof_call};
+    use crate::chain::codec::scale_types::{encode_register_miner_call, encode_submit_proof_call};
     use parity_scale_codec::Encode;
     use sp_core::{H256, U256};
     use sp_crypto_hashing::blake2_256;
@@ -290,7 +323,7 @@ mod tests {
         (pair, ext)
     }
 
-    use crate::chain::extrinsic::{
+    use crate::chain::codec::extrinsic::{
         assemble_signed_extrinsic, encode_additional, signing_payload, RuntimeTxContext,
     };
     use quip_transaction_crypto::HybridTxSignature;
@@ -449,5 +482,194 @@ mod tests {
         ] {
             assert!(decode_pending_proof(&entry, &ctx).is_none(), "{label}");
         }
+    }
+}
+
+#[cfg(test)]
+mod fetch_tests {
+    use super::*;
+    use crate::chain::client::transport::RpcTransport;
+    use crate::chain::{ChainError, MiningSnapshot};
+    use crate::types::hex::hex_encode;
+    use crate::types::miner::MinerKind;
+    use quip_transaction_crypto::HybridPair;
+    use serde_json::Value as JsonValue;
+
+    /// Answers the pool decoder's reads and counts the runtime-version calls.
+    struct PoolValidator {
+        pending: Vec<String>,
+        runtime_version_calls: std::sync::Mutex<u32>,
+        spec_version: std::sync::Mutex<u32>,
+        transaction_version: std::sync::Mutex<u32>,
+        fail_runtime_version: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl RpcTransport for PoolValidator {
+        async fn request(
+            &self,
+            _url: &str,
+            method: &str,
+            _params: JsonValue,
+        ) -> Result<JsonValue, ChainError> {
+            match method {
+                "chain_getBlockHash" => Ok(JsonValue::String(hex_encode(&[0x11; 32]))),
+                "state_getRuntimeVersion" => {
+                    *self.runtime_version_calls.lock().unwrap() += 1;
+                    if self.fail_runtime_version {
+                        return Err(ChainError::Unavailable("scripted outage".into()));
+                    }
+                    Ok(serde_json::json!({
+                        "specVersion": *self.spec_version.lock().unwrap(),
+                        "transactionVersion": *self.transaction_version.lock().unwrap(),
+                    }))
+                }
+                "author_pendingExtrinsics" => Ok(JsonValue::Array(
+                    self.pending
+                        .iter()
+                        .cloned()
+                        .map(JsonValue::String)
+                        .collect(),
+                )),
+                other => panic!("unexpected rpc method {other}"),
+            }
+        }
+
+        async fn subscribe(
+            &self,
+            _url: &str,
+            _sub: &str,
+            _params: JsonValue,
+            _unsub: &str,
+        ) -> Result<
+            crate::chain::client::transport::BoxStream<'static, Result<JsonValue, ChainError>>,
+            ChainError,
+        > {
+            Err(ChainError::Unavailable(
+                "no subscriptions in this test".into(),
+            ))
+        }
+    }
+
+    fn pool_snapshot(spec_version: u32) -> MiningSnapshot {
+        MiningSnapshot {
+            head_hash: [0u8; 32],
+            last_proof_block_hash: [0u8; 32],
+            topology_hash: vec![0u8; 32],
+            nodes: vec![0, 1],
+            edges: vec![(0, 1)],
+            allowed_h_milli: vec![0],
+            allowed_j_milli: vec![-1000, 1000],
+            allowed_spin_milli: vec![-1000, 1000],
+            min_solutions: 1,
+            max_energy_milli: 0,
+            min_diversity_milli: 0,
+            block_number: 1,
+            spec_version,
+            target_proof_blocks: crate::types::snapshot::TARGET_PROOF_BLOCKS,
+            family: None,
+        }
+    }
+
+    fn pool_entry(genesis_hash: [u8; 32], spec_version: u32, transaction_version: u32) -> String {
+        use crate::chain::codec::extrinsic::{
+            build_hybrid_signed_extrinsic, SignedExtensionContext,
+        };
+        use crate::chain::codec::scale_types::encode_submit_proof_call;
+        use crate::types::proof::QuantumProof;
+        let pair = HybridPair::from_string("//Alice", None).expect("alice");
+        let call = encode_submit_proof_call(&QuantumProof {
+            topology_hash: sp_core::H256::repeat_byte(1),
+            nonce: sp_core::U256::from(42u64),
+            salt: [7u8; 32],
+            solutions: vec![vec![0b01]],
+            device_access_time_us: 5,
+        });
+        let ctx = SignedExtensionContext {
+            account_nonce: 0,
+            genesis_hash,
+            spec_version,
+            transaction_version,
+            tip: 0,
+        };
+        hex_encode(&build_hybrid_signed_extrinsic(&pair, &call, &ctx))
+    }
+
+    #[tokio::test]
+    async fn pending_proofs_are_verified_and_the_context_is_cached_per_spec_version() {
+        use crate::chain::codec::extrinsic::extrinsic_hash;
+        use crate::chain::ChainClient as _;
+        use crate::types::hex::hex_decode;
+        let upgraded_entry = pool_entry([0x11; 32], 101, 2);
+        let upgraded_hash = extrinsic_hash(&hex_decode(&upgraded_entry).expect("upgraded hex"));
+        let validator = std::sync::Arc::new(PoolValidator {
+            pending: vec![
+                pool_entry([0x11; 32], 100, 1),
+                pool_entry([0x22; 32], 100, 1),
+                upgraded_entry,
+            ],
+            runtime_version_calls: std::sync::Mutex::new(0),
+            spec_version: std::sync::Mutex::new(100),
+            transaction_version: std::sync::Mutex::new(1),
+            fail_runtime_version: false,
+        });
+        let client = RealChainClient::with_transport(
+            vec!["ws://scripted".to_string()],
+            "//Alice".to_string(),
+            MinerKind::Cpu,
+            validator.clone(),
+        );
+        *client.last_snapshot.lock().unwrap() = Some(pool_snapshot(100));
+
+        let proofs = client.fetch_pending_proofs().await.expect("pool read");
+        assert_eq!(
+            proofs.len(),
+            1,
+            "entries signed for another genesis or runtime are dropped"
+        );
+        let _ = client.fetch_pending_proofs().await.expect("pool read");
+        assert_eq!(
+            *validator.runtime_version_calls.lock().unwrap(),
+            1,
+            "the second poll at the same spec_version reuses the context"
+        );
+
+        *validator.spec_version.lock().unwrap() = 101;
+        *validator.transaction_version.lock().unwrap() = 2;
+        *client.last_snapshot.lock().unwrap() = Some(pool_snapshot(101));
+        let after_upgrade = client.fetch_pending_proofs().await.expect("pool read");
+        assert_eq!(*validator.runtime_version_calls.lock().unwrap(), 2);
+        assert_eq!(
+            after_upgrade.len(),
+            1,
+            "only the entry signed for spec 101 / transaction version 2 is accepted"
+        );
+        assert_eq!(
+            after_upgrade
+                .first()
+                .expect("upgraded proof")
+                .extrinsic_hash,
+            upgraded_hash,
+            "entries signed for spec 100 / transaction version 1 are dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_runtime_version_outage_is_an_error_not_a_panic() {
+        use crate::chain::ChainClient as _;
+        let validator = std::sync::Arc::new(PoolValidator {
+            pending: vec![pool_entry([0x11; 32], 100, 1)],
+            runtime_version_calls: std::sync::Mutex::new(0),
+            spec_version: std::sync::Mutex::new(100),
+            transaction_version: std::sync::Mutex::new(1),
+            fail_runtime_version: true,
+        });
+        let client = RealChainClient::with_transport(
+            vec!["ws://scripted".to_string()],
+            "//Alice".to_string(),
+            MinerKind::Cpu,
+            validator,
+        );
+        assert!(client.fetch_pending_proofs().await.is_err());
     }
 }

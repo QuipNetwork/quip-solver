@@ -61,7 +61,7 @@ const MAY_IMPORT: &[(&str, &[&str])] = &[
 /// with the listed one.
 const EXCEPTIONS: &[(&str, &str, &str)] = &[(
     "config",
-    "chain::funding",
+    "chain::registration::funding",
     "the config parser reads its funding defaults from the module that uses them",
 )];
 
@@ -70,7 +70,7 @@ const EXCEPTIONS: &[(&str, &str, &str)] = &[(
 struct Use {
     /// The file, relative to `src/`.
     file: String,
-    /// The path used, from the top-level module on, such as `chain::funding`.
+    /// The path used, from the top-level module on, such as `chain::registration::funding`.
     path: String,
 }
 
@@ -173,8 +173,8 @@ fn test_module_files(file: &Path, text: &str) -> Vec<PathBuf> {
 }
 
 /// Paths that follow each occurrence of `prefix` in `line`, as far as they
-/// run through `ident::` segments: `crate::chain::funding::X` gives
-/// `chain::funding::X`.
+/// run through `ident::` segments: `crate::chain::registration::funding::X` gives
+/// `chain::registration::funding::X`.
 fn paths_after(line: &str, prefix: &str) -> Vec<String> {
     let mut paths = Vec::new();
     let mut rest = line;

@@ -1,6 +1,6 @@
 //! `quip-coordinator keygen` — create a signer keystore.
 //!
-//! The keystore holds a 32-byte master seed as hex. `chain::extrinsic::
+//! The keystore holds a 32-byte master seed as hex. `chain::codec::extrinsic::
 //! load_hybrid_pair` reads that seed and derives the hybrid sr25519 plus
 //! FN-DSA-512 pair from it, so the seed is the only secret on disk.
 
@@ -64,7 +64,7 @@ impl std::error::Error for KeygenError {}
 
 /// Lower-case hex, no `0x` prefix.
 ///
-/// `chain::extrinsic::hex_encode` prefixes `0x` for RPC parameters, which is
+/// `types::hex::hex_encode` prefixes `0x` for RPC parameters, which is
 /// the wrong shape for a keystore field. `hex_decode` accepts both spellings,
 /// so the unprefixed form stays loadable and matches what other tooling
 /// expects of a raw seed.
@@ -176,7 +176,7 @@ mod tests {
         }
 
         let path = a.to_string_lossy().to_string();
-        let _pair = crate::chain::extrinsic::load_hybrid_pair(&path)
+        let _pair = crate::chain::codec::extrinsic::load_hybrid_pair(&path)
             .expect("the coordinator must be able to load what keygen writes");
 
         let err = write_keystore(&a).expect_err("must refuse to overwrite");

@@ -137,7 +137,7 @@ struct Params {
 fn chain_env_params() -> ChainEnvParams {
     ChainEnvParams {
         miner_account: [0u8; 32],
-        funding: quip_coordinator::chain::funding::FundingParams::default(),
+        funding: quip_coordinator::chain::registration::funding::FundingParams::default(),
         descriptor: quip_coordinator::config::DescriptorParams::default(),
         descriptor_filed: Arc::new(AtomicBool::new(false)),
         miner_registered: Arc::new(AtomicBool::new(false)),
@@ -192,7 +192,7 @@ fn named_feeder_params(buffer_depth: usize, poll_ms: u64) -> Params {
 fn clearing_pending_proof(snap: &MiningSnapshot, account: [u8; 32]) -> PendingProof {
     use quantum_validation::packed::pack_solution;
     use quantum_validation::{derive_nonce, AllowedValueSpec};
-    use quip_coordinator::chain::extrinsic::account_identity_bytes;
+    use quip_coordinator::chain::codec::extrinsic::account_identity_bytes;
     use quip_coordinator::types::proof::QuantumProof;
 
     let salt = [3u8; 32];
