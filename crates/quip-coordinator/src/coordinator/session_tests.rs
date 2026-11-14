@@ -298,91 +298,6 @@ fn ease_stash(st: &mut CoordinatorState, generation: u64, energy: i64) {
 }
 
 #[tokio::test]
-async fn verified_lease_winner_is_submitted_with_its_salt() {
-    let (st, job) = lease_state();
-    let r = winner(&job, 2);
-    let (state, submitted) = settle(st, r.clone()).await;
-    assert_eq!(submitted.len(), 1);
-    assert_eq!(submitted.first().map(|proof| &proof.salt), Some(&r.salt));
-    assert_eq!(
-        submitted.first().map(|proof| &proof.job_id),
-        Some(&r.nonce),
-        "attempt id is the nonce"
-    );
-    assert!(
-        state.lock().await.inflight.contains_key(&job.job_id),
-        "a lease stays live until LeaseDone"
-    );
-    assert!(state.lock().await.round_mined());
-}
-
-/// None of these is submitted or marks the round. A report that fails
-/// authenticity verification is a bad miner, not participation. A result
-/// before the target cannot be judged. Reporting zero solutions is not
-/// participation.
-#[tokio::test]
-async fn rejected_lease_results_are_not_submitted_and_do_not_mark_the_round() {
-    type Mutate = fn(&mut CoordinatorState, &mut WireResult);
-    let cases: [(&str, Mutate); 3] = [
-        ("wrong energy", |_, r| {
-            r.solutions
-                .iter_mut()
-                .for_each(|solution| solution.energy_milli -= 1);
-        }),
-        ("no target", |st, _| st.target = None),
-        ("no solutions", |_, r| r.solutions.clear()),
-    ];
-    for (label, mutate) in cases {
-        let (mut st, job) = lease_state();
-        let mut r = winner(&job, 0);
-        mutate(&mut st, &mut r);
-        let (state, submitted) = settle(st, r).await;
-        assert!(submitted.is_empty(), "{label}: submitted");
-        assert!(!state.lock().await.round_mined(), "{label}: round mined");
-    }
-}
-
-/// A verified lease Result whose energy does not clear the live target is
-/// held in the decay-ratchet stash, not submitted, and still counts as
-/// participation for the round — the same as a plain `PoW` Result that
-/// misses the gate.
-#[tokio::test]
-async fn lease_result_above_target_is_stashed_and_marks_round_mined() {
-    let (mut st, job) = lease_state();
-    let r = winner(&job, 3);
-    let energy = r.solutions.first().unwrap().energy_milli;
-    // Ceiling set to exactly the reported energy: the gate is strict
-    // less-than, so this candidate does not clear it.
-    st.target = Some(target(energy));
-    ease_stash(&mut st, job.generation, energy);
-    let (expected_nonce, expected_salt) = (r.nonce.clone(), r.salt.clone());
-    let (state, submitted) = settle(st, r).await;
-    assert!(
-        submitted.is_empty(),
-        "energy equal to the ceiling does not clear it"
-    );
-    let st = state.lock().await;
-    assert!(!st.stash.is_empty(), "held in the decay-ratchet stash");
-    assert!(
-        st.round_mined(),
-        "a verified lease Result counts as participation whether or not it clears the target"
-    );
-    let candidate = st
-        .stash
-        .due_at(u64::MAX)
-        .expect("the single stashed candidate becomes due within the horizon");
-    assert_eq!(
-        candidate.job_id, expected_nonce,
-        "stashed candidate keeps the result's nonce as its attempt id"
-    );
-    assert_eq!(
-        candidate.salt.map(|s| s.to_vec()),
-        Some(expected_salt),
-        "stashed candidate keeps the result's salt for the later live submit"
-    );
-}
-
-#[tokio::test]
 async fn lease_result_with_more_reads_than_a_proof_holds_submits_a_capped_set() {
     let (st, job) = lease_state();
     let mut r = winner(&job, 1);
@@ -496,43 +411,133 @@ fn family_state() -> (CoordinatorState, Job, WireResult) {
     (st, job, report)
 }
 
-#[tokio::test]
-async fn an_honest_family_result_is_submitted() {
-    let (st, _, report) = family_state();
-    let salt = report.salt.clone();
-    let (state, submitted) = settle(st, report).await;
-    assert_eq!(submitted.len(), 1);
-    assert_eq!(submitted.first().map(|proof| &proof.salt), Some(&salt));
-    assert!(state.lock().await.round_mined());
+/// The two settlement fixtures: a legacy lease, and a real family lease.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fixture {
+    Lease,
+    Family,
 }
 
-#[tokio::test]
-async fn a_forged_family_result_never_reaches_submission_or_the_stash() {
-    let (mut st, job, mut report) = family_state();
-    let energy = report.solutions.first().unwrap().energy_milli;
-    ease_stash(&mut st, job.generation, energy);
-    report
-        .solutions
-        .iter_mut()
-        .for_each(|solution| solution.energy_milli -= 1);
-    let (state, submitted) = settle(st, report).await;
-    assert!(submitted.is_empty());
-    let st = state.lock().await;
-    assert!(st.stash.is_empty(), "a forgery is not a near miss");
-    assert!(!st.round_mined(), "a forgery is not participation");
+/// A state, its job and a winning report for `fixture`. `winner_index` picks
+/// the lease winner; the family report is fixed.
+fn settlement_fixture(fixture: Fixture, winner_index: u64) -> (CoordinatorState, Job, WireResult) {
+    match fixture {
+        Fixture::Lease => {
+            let (st, job) = lease_state();
+            let report = winner(&job, winner_index);
+            (st, job, report)
+        }
+        Fixture::Family => family_state(),
+    }
 }
 
+/// An authentic result that clears the target is submitted with its salt and
+/// marks the round mined.
 #[tokio::test]
-async fn an_authentic_family_miss_is_stashed_and_counts_as_participation() {
-    let (mut st, job, report) = family_state();
-    let energy = report.solutions.first().unwrap().energy_milli;
-    st.target = Some(target(energy));
-    ease_stash(&mut st, job.generation, energy);
-    let (state, submitted) = settle(st, report).await;
-    assert!(submitted.is_empty());
-    let st = state.lock().await;
-    assert!(!st.stash.is_empty(), "held for the decay schedule");
-    assert!(st.round_mined());
+async fn a_verified_winner_is_submitted_with_its_salt() {
+    for fixture in [Fixture::Lease, Fixture::Family] {
+        let (st, job, r) = settlement_fixture(fixture, 2);
+        let (state, submitted) = settle(st, r.clone()).await;
+        assert_eq!(submitted.len(), 1, "{fixture:?}");
+        assert_eq!(
+            submitted.first().map(|proof| &proof.salt),
+            Some(&r.salt),
+            "{fixture:?}"
+        );
+        assert!(state.lock().await.round_mined(), "{fixture:?}");
+        if fixture == Fixture::Lease {
+            assert_eq!(
+                submitted.first().map(|proof| &proof.job_id),
+                Some(&r.nonce),
+                "attempt id is the nonce"
+            );
+            assert!(
+                state.lock().await.inflight.contains_key(&job.job_id),
+                "a lease stays live until LeaseDone"
+            );
+        }
+    }
+}
+
+/// None of these is submitted, stashed or marks the round. A report that fails
+/// authenticity verification is a bad miner, not participation, and a forgery
+/// is not a near miss. A result before the target cannot be judged. Reporting
+/// zero solutions is not participation.
+#[tokio::test]
+async fn unauthentic_or_unjudgeable_results_are_not_submitted_stashed_or_counted() {
+    type Mutate = fn(&mut CoordinatorState, &mut WireResult);
+    let cases: [(&str, Fixture, Mutate); 4] = [
+        ("wrong energy", Fixture::Lease, |_, r| {
+            r.solutions
+                .iter_mut()
+                .for_each(|solution| solution.energy_milli -= 1);
+        }),
+        ("no target", Fixture::Lease, |st, _| st.target = None),
+        ("no solutions", Fixture::Lease, |_, r| r.solutions.clear()),
+        ("forged family result", Fixture::Family, |_, r| {
+            r.solutions
+                .iter_mut()
+                .for_each(|solution| solution.energy_milli -= 1);
+        }),
+    ];
+    for (label, fixture, mutate) in cases {
+        let (mut st, job, mut r) = settlement_fixture(fixture, 0);
+        // Arm the stash, so a result that wrongly counted as a near miss would
+        // show up in it.
+        let energy = r.solutions.first().unwrap().energy_milli;
+        ease_stash(&mut st, job.generation, energy);
+        mutate(&mut st, &mut r);
+        let (state, submitted) = settle(st, r).await;
+        assert!(submitted.is_empty(), "{label}: submitted");
+        let st = state.lock().await;
+        assert!(st.stash.is_empty(), "{label}: stashed");
+        assert!(!st.round_mined(), "{label}: round mined");
+    }
+}
+
+/// A verified Result whose energy does not clear the live target is held in the
+/// decay-ratchet stash, not submitted, and still counts as participation for
+/// the round: the same as a plain `PoW` Result that misses the gate.
+#[tokio::test]
+async fn an_authentic_near_miss_is_stashed_and_counts_as_participation() {
+    for fixture in [Fixture::Lease, Fixture::Family] {
+        let (mut st, job, r) = settlement_fixture(fixture, 3);
+        let energy = r.solutions.first().unwrap().energy_milli;
+        // Ceiling set to exactly the reported energy: the gate is strict
+        // less-than, so this candidate does not clear it.
+        st.target = Some(target(energy));
+        ease_stash(&mut st, job.generation, energy);
+        let (expected_nonce, expected_salt) = (r.nonce.clone(), r.salt.clone());
+        let (state, submitted) = settle(st, r).await;
+        assert!(
+            submitted.is_empty(),
+            "{fixture:?}: energy equal to the ceiling does not clear it"
+        );
+        let st = state.lock().await;
+        assert!(
+            !st.stash.is_empty(),
+            "{fixture:?}: held in the decay-ratchet stash"
+        );
+        assert!(
+            st.round_mined(),
+            "{fixture:?}: a verified Result counts as participation whether or not it clears the target"
+        );
+        if fixture == Fixture::Lease {
+            let candidate = st
+                .stash
+                .due_at(u64::MAX)
+                .expect("the single stashed candidate becomes due within the horizon");
+            assert_eq!(
+                candidate.job_id, expected_nonce,
+                "stashed candidate keeps the result's nonce as its attempt id"
+            );
+            assert_eq!(
+                candidate.salt.map(|s| s.to_vec()),
+                Some(expected_salt),
+                "stashed candidate keeps the result's salt for the later live submit"
+            );
+        }
+    }
 }
 
 #[tokio::test]

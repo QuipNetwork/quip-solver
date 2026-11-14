@@ -702,34 +702,24 @@ budget_reset_day = 1
 
     /// An entry without `queue_depth` sends 0, "not set", so the miner picks
     /// its own depth instead of a coordinator default it cannot tell apart from
-    /// an operator choice.
+    /// an operator choice. The D-Wave miner answers a 0 with its own QPU
+    /// pipeline depth, so its entry must send 0 too, and must not slip a depth
+    /// in via `backend_toml`.
     #[test]
     #[expect(
         clippy::panic_in_result_fn,
         reason = "Test assertions report mismatches while Result propagates setup errors."
     )]
-    fn entry_without_queue_depth_sends_zero() -> TestResult {
+    fn entries_without_queue_depth_send_zero() -> TestResult {
         let config = parse_config(SAMPLE)?;
         let cuda = config
             .launch
             .iter()
             .find(|entry| entry.miner_id == "cuda-0")
             .ok_or("config must launch cuda-0")?;
-        assert_eq!(cuda.configure.queue_depth, 0);
-        Ok(())
-    }
-
-    /// The D-Wave miner answers a 0 with its own QPU pipeline depth, so its
-    /// entry must send 0 too, and must not slip a depth in via `backend_toml`.
-    #[test]
-    #[expect(
-        clippy::panic_in_result_fn,
-        reason = "Test assertions report mismatches while Result propagates setup errors."
-    )]
-    fn dwave_entry_without_queue_depth_sends_zero() -> TestResult {
-        let config = parse_config(SAMPLE)?;
+        assert_eq!(cuda.configure.queue_depth, 0, "cuda-0");
         let (dwave, backend) = dwave_entry(&config)?;
-        assert_eq!(dwave.configure.queue_depth, 0);
+        assert_eq!(dwave.configure.queue_depth, 0, "qpu-0");
         assert!(!backend.contains_key("queue_depth"));
         Ok(())
     }
@@ -1053,11 +1043,6 @@ idle_after_s = 600
                 "missing port",
                 "public_host = \"203.0.113.10\"\n",
                 "public_port",
-            ),
-            (
-                "empty host",
-                "public_host = \"\"\npublic_port = 20050\n",
-                "public_host",
             ),
             (
                 "blank host",

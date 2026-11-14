@@ -121,33 +121,35 @@ mod tests {
 
     /// Mapping is one-for-one: no endpoint is dropped or reordered, so the
     /// consensus `j`-zip invariant (one coupling per edge, in edge order)
-    /// survives it.
+    /// survives it. Labels map to dense positions, in two shapes:
+    ///
+    /// - A gapped node list: the labels an order places on are whatever the
+    ///   topology calls them, and only `nodes: [0, 1]` makes labels and
+    ///   positions coincide. This is the order shape that was silently never
+    ///   answered.
+    /// - The quiet case: every label is a valid index into `h`, so nothing
+    ///   downstream refuses the job -- it just describes a different graph.
+    ///   Forwarding verbatim would emit `(0, 1)` here, which the miner samples
+    ///   and this coordinator scores without complaint, and only the chain
+    ///   disagrees.
     #[test]
     fn maps_edge_labels_to_dense_positions() {
-        let order = gapped_order();
-        let edges = edges_of(&job_order_to_job(&order).unwrap());
-        assert_eq!(edges.u, vec![0, 1]);
-        assert_eq!(edges.v, vec![1, 2]);
-        assert_eq!(edges.u.len(), order.j_milli.len());
-    }
-
-    /// The quiet case: every label is a valid index into `h`, so nothing
-    /// downstream refuses the job -- it just describes a different graph.
-    /// Forwarding verbatim would emit `(0, 1)` here, which the miner samples
-    /// and this coordinator scores without complaint, and only the chain
-    /// disagrees.
-    #[test]
-    fn maps_an_in_range_permutation_that_nothing_downstream_would_catch() {
-        let order = JobOrder {
+        let permuted = JobOrder {
             nodes: vec![2, 0, 1],
             edges: vec![(0, 1)],
             h_milli: vec![1000, -1000, 250],
             j_milli: vec![500],
             ..sample_order()
         };
-        let edges = edges_of(&job_order_to_job(&order).unwrap());
-        assert_eq!(edges.u, vec![1]);
-        assert_eq!(edges.v, vec![2]);
+        for (label, order, u, v) in [
+            ("gapped node list", gapped_order(), vec![0, 1], vec![1, 2]),
+            ("in-range permutation", permuted, vec![1], vec![2]),
+        ] {
+            let edges = edges_of(&job_order_to_job(&order).unwrap());
+            assert_eq!(edges.u, u, "{label}");
+            assert_eq!(edges.v, v, "{label}");
+            assert_eq!(edges.u.len(), order.j_milli.len(), "{label}");
+        }
     }
 
     #[test]

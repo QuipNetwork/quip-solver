@@ -1185,71 +1185,70 @@ async fn feeder_reaches_mining_when_node_name_is_missing_empty_or_blank() {
     }
 }
 
-/// Transient descriptor or participation errors must not hold off mining.
+/// A transient descriptor error is retried and a pallet rejection is not, and
+/// neither holds off mining or participation. While a participation error
+/// persists it is retried on later polls against the same qblock, and mining
+/// carries on around it.
 #[tokio::test]
-async fn feeder_keeps_mining_when_descriptor_or_participation_is_transient() {
-    let chain = FakeChain::new(snapshot_with_head([1u8; 32]), None);
-    chain.set_qblock_id(Some(10));
-    chain.set_descriptor_result(Err(quip_coordinator::chain::ChainError::Unavailable(
-        "rpc down".into(),
-    )));
-    chain.set_participation_result(Err(quip_coordinator::chain::ChainError::Unavailable(
-        "rpc down".into(),
-    )));
-    let f = Feeder::spawn(
-        chain,
-        named_feeder_params(1, 40),
-        vec![("cpu-0", ising_caps())],
-    )
-    .await;
+async fn feeder_keeps_mining_when_the_descriptor_or_participation_fails() {
+    use quip_coordinator::chain::{ChainError, DescriptorOutcome};
+    // The descriptor is attempted three times on a transient error and once
+    // when the pallet rejects it.
+    for (label, descriptor, participation_fails, descriptor_calls) in [
+        (
+            "transient errors",
+            Err(ChainError::Unavailable("rpc down".into())),
+            true,
+            3,
+        ),
+        (
+            "pallet rejection",
+            Ok(DescriptorOutcome::Rejected),
+            false,
+            1,
+        ),
+    ] {
+        let chain = FakeChain::new(snapshot_with_head([1u8; 32]), None);
+        chain.set_qblock_id(Some(10));
+        chain.set_descriptor_result(descriptor);
+        if participation_fails {
+            chain.set_participation_result(Err(ChainError::Unavailable("rpc down".into())));
+        }
+        let f = Feeder::spawn(
+            chain,
+            named_feeder_params(1, 40),
+            vec![("cpu-0", ising_caps())],
+        )
+        .await;
 
-    assert!(
-        f.wait_generation(1).await,
-        "transient errors must not block mining"
-    );
-    assert_eq!(f.chain.descriptor_calls(), 3);
-    // Participation retries on later polls while the error persists, and
-    // mining carries on around it.
-    assert!(f.return_one_result(1).await, "first round never mined");
-    assert!(
-        f.wait_participations(2).await,
-        "a transient participation error must be retried"
-    );
-    // The failed declaration is not recorded: the retry names the same qblock.
-    let declared = f.chain.take_participations();
-    assert_eq!(declared.first(), Some(&11));
-    assert_eq!(declared.get(1), Some(&11));
-    assert!(
-        f.staged().await >= 1,
-        "participation retries must not stop staging"
-    );
-    f.stop().await;
-}
-
-/// Pallet rejection of the descriptor must not hold off mining.
-#[tokio::test]
-async fn feeder_keeps_mining_when_descriptor_is_rejected() {
-    let chain = FakeChain::new(snapshot_with_head([1u8; 32]), None);
-    chain.set_qblock_id(Some(10));
-    chain.set_descriptor_result(Ok(quip_coordinator::chain::DescriptorOutcome::Rejected));
-    let f = Feeder::spawn(
-        chain,
-        named_feeder_params(1, 40),
-        vec![("cpu-0", ising_caps())],
-    )
-    .await;
-
-    assert!(
-        f.wait_generation(1).await,
-        "descriptor rejection must not block mining"
-    );
-    assert_eq!(f.chain.descriptor_calls(), 1);
-    assert!(f.return_one_result(1).await, "first round never mined");
-    assert!(
-        f.wait_participations(1).await,
-        "a rejected descriptor must not stop participation"
-    );
-    f.stop().await;
+        assert!(f.wait_generation(1).await, "{label} must not block mining");
+        assert_eq!(f.chain.descriptor_calls(), descriptor_calls, "{label}");
+        assert!(
+            f.return_one_result(1).await,
+            "{label}: first round never mined"
+        );
+        if participation_fails {
+            assert!(
+                f.wait_participations(2).await,
+                "a transient participation error must be retried"
+            );
+            // The failed declaration is not recorded: the retry names the same
+            // qblock.
+            let declared = f.chain.take_participations();
+            assert_eq!(declared.first(), Some(&11));
+            assert_eq!(declared.get(1), Some(&11));
+            assert!(
+                f.staged().await >= 1,
+                "participation retries must not stop staging"
+            );
+        } else {
+            assert!(
+                f.wait_participations(1).await,
+                "a rejected descriptor must not stop participation"
+            );
+        }
+        f.stop().await;
+    }
 }
 
 // ---------------------------------------------------------------------------

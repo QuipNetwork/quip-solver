@@ -264,9 +264,10 @@ mod tests {
     }
 
     /// The deployed v0.2.2-rc4 validator: spec 114, `QuantumPowApi` v2. This is
-    /// the pairing the coordinator must accept.
+    /// the pairing the coordinator must accept. A response without a spec or
+    /// transaction version is malformed.
     #[test]
-    fn v0_2_2_rc4_runtime_parses_and_is_accepted() {
+    fn runtime_versions_parse_or_are_malformed() {
         let info = parse_runtime_version(&rv_with(Some(2))).unwrap();
         assert_eq!(info.spec_name, "quip-runtime");
         assert_eq!(info.spec_version, 114);
@@ -275,15 +276,25 @@ mod tests {
         assert!(info
             .quantum_pow_api
             .is_some_and(|v| v >= MIN_QUANTUM_POW_API));
-    }
 
-    #[test]
-    fn missing_spec_version_is_malformed() {
-        let rv = json!({ "specName": "x", "transactionVersion": 6, "apis": [] });
-        assert!(matches!(
-            parse_runtime_version(&rv),
-            Err(PreflightError::Malformed(_))
-        ));
+        for (label, rv) in [
+            (
+                "missing specVersion",
+                json!({ "specName": "x", "transactionVersion": 6, "apis": [] }),
+            ),
+            (
+                "missing transactionVersion",
+                json!({ "specName": "x", "specVersion": 114, "apis": [] }),
+            ),
+        ] {
+            assert!(
+                matches!(
+                    parse_runtime_version(&rv),
+                    Err(PreflightError::Malformed(_))
+                ),
+                "{label}"
+            );
+        }
     }
 
     #[test]

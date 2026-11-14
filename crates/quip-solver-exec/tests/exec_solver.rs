@@ -64,42 +64,51 @@ fn stdin_mode_delivers_model_on_stdin() {
     assert_eq!(out.len(), 1);
 }
 
+/// Every way the solver process can fail maps to its own error class.
 #[test]
-fn nonzero_exit_is_a_device_fault() {
-    let sampler = ExecSampler::new("sh -c 'exit 1' _ {model}", 5_000, false).expect("valid cmd");
-    match sampler.sample(&graph(), &SampleParams::default()) {
-        Err(SampleError::DeviceFault(detail)) => assert!(detail.contains("exited")),
-        other => panic!("expected DeviceFault, got {other:?}"),
-    }
-}
-
-#[test]
-fn timeout_is_device_busy() {
-    let sampler = ExecSampler::new("sh -c 'sleep 10' _ {model}", 150, false).expect("valid cmd");
-    assert_eq!(
-        sampler.sample(&graph(), &SampleParams::default()),
-        Err(SampleError::DeviceBusy)
-    );
-}
-
-#[test]
-fn signal_killed_solver_is_device_busy() {
-    // The shell kills itself with SIGKILL — indistinguishable from an external
-    // OOM kill. A transient host condition must not end the session.
-    let sampler =
-        ExecSampler::new("sh -c 'kill -9 $$' _ {model}", 5_000, false).expect("valid cmd");
-    assert_eq!(
-        sampler.sample(&graph(), &SampleParams::default()),
-        Err(SampleError::DeviceBusy)
-    );
-}
-
-#[test]
-fn missing_solver_binary_is_a_device_fault() {
-    let sampler =
-        ExecSampler::new("quip-no-such-solver-xyz {model}", 5_000, false).expect("valid cmd");
-    match sampler.sample(&graph(), &SampleParams::default()) {
-        Err(SampleError::DeviceFault(detail)) => assert!(detail.contains("spawn")),
-        other => panic!("expected DeviceFault, got {other:?}"),
+fn solver_failures_map_to_their_error_class() {
+    // (label, command, timeout in ms, expected error, detail fragment)
+    let cases = [
+        (
+            "nonzero exit",
+            "sh -c 'exit 1' _ {model}",
+            5_000,
+            SampleError::DeviceFault(String::new()),
+            "exited",
+        ),
+        (
+            // The shell kills itself with SIGKILL, which is indistinguishable
+            // from an external OOM kill. A transient host condition must not
+            // end the session.
+            "killed by a signal",
+            "sh -c 'kill -9 $$' _ {model}",
+            5_000,
+            SampleError::DeviceBusy,
+            "",
+        ),
+        (
+            "timeout",
+            "sh -c 'sleep 10' _ {model}",
+            150,
+            SampleError::DeviceBusy,
+            "",
+        ),
+        (
+            "missing binary",
+            "quip-no-such-solver-xyz {model}",
+            5_000,
+            SampleError::DeviceFault(String::new()),
+            "spawn",
+        ),
+    ];
+    for (label, cmd, timeout_ms, expected, fragment) in cases {
+        let sampler = ExecSampler::new(cmd, timeout_ms, false).expect("valid cmd");
+        match (sampler.sample(&graph(), &SampleParams::default()), expected) {
+            (Err(SampleError::DeviceFault(detail)), SampleError::DeviceFault(_)) => {
+                assert!(detail.contains(fragment), "{label}: {detail}");
+            }
+            (Err(SampleError::DeviceBusy), SampleError::DeviceBusy) => {}
+            (other, expected) => panic!("{label}: expected {expected:?}, got {other:?}"),
+        }
     }
 }

@@ -66,57 +66,51 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// Every node status shape maps to its own variant. An unknown status must
+    /// not be read as success: it is reported verbatim so an operator can see
+    /// what the node actually said.
     #[test]
-    fn progress_statuses_are_recognised() {
-        for (label, input, expected) in [
-            ("ready", json!("ready"), TxStatus::Ready),
-            ("broadcast", json!("broadcast"), TxStatus::Broadcast),
-            ("future", json!("future"), TxStatus::Future),
+    fn node_status_shapes_map_to_their_variants() {
+        type Check = fn(&TxStatus) -> bool;
+        let cases: [(&str, serde_json::Value, Check); 10] = [
+            ("ready", json!("ready"), |s| *s == TxStatus::Ready),
+            ("broadcast", json!("broadcast"), |s| {
+                *s == TxStatus::Broadcast
+            }),
+            ("future", json!("future"), |s| *s == TxStatus::Future),
             // Substrate has used both camelCase and lowercase over time. Accept
             // both so a node upgrade does not silently stop reporting inclusion.
-            (
-                "inBlock camelCase",
-                json!({"inBlock": "0xabc"}),
-                TxStatus::InBlock("0xabc".into()),
-            ),
-            (
-                "inblock lowercase",
-                json!({"inblock": "0xabc"}),
-                TxStatus::InBlock("0xabc".into()),
-            ),
+            ("inBlock camelCase", json!({"inBlock": "0xabc"}), |s| {
+                *s == TxStatus::InBlock("0xabc".into())
+            }),
+            ("inblock lowercase", json!({"inblock": "0xabc"}), |s| {
+                *s == TxStatus::InBlock("0xabc".into())
+            }),
             (
                 "finalized carries its block hash",
                 json!({"finalized": "0xdef"}),
-                TxStatus::Finalized("0xdef".into()),
+                |s| *s == TxStatus::Finalized("0xdef".into()),
             ),
-        ] {
-            assert_eq!(parse_tx_status(&input), expected, "{label}");
-        }
-    }
-
-    #[test]
-    fn terminal_rejections_are_distinguished_from_inclusion() {
-        assert!(matches!(
-            parse_tx_status(&json!({"dropped": null})),
-            TxStatus::Dropped(_)
-        ));
-        assert!(matches!(
-            parse_tx_status(&json!({"invalid": null})),
-            TxStatus::Invalid(_)
-        ));
-        assert!(matches!(
-            parse_tx_status(&json!({"usurped": "0x01"})),
-            TxStatus::Dropped(_)
-        ));
-    }
-
-    /// An unknown status must not be read as success. It is reported verbatim
-    /// so an operator can see what the node actually said.
-    #[test]
-    fn an_unknown_status_is_reported_verbatim() {
-        match parse_tx_status(&json!({"somethingNew": "0x02"})) {
-            TxStatus::Other(s) => assert!(s.contains("somethingNew"), "{s}"),
-            other => panic!("expected Other, got {other:?}"),
+            ("dropped", json!({"dropped": null}), |s| {
+                matches!(s, TxStatus::Dropped(_))
+            }),
+            ("invalid", json!({"invalid": null}), |s| {
+                matches!(s, TxStatus::Invalid(_))
+            }),
+            (
+                "usurped counts as dropped",
+                json!({"usurped": "0x01"}),
+                |s| matches!(s, TxStatus::Dropped(_)),
+            ),
+            (
+                "unknown status",
+                json!({"somethingNew": "0x02"}),
+                |s| matches!(s, TxStatus::Other(t) if t.contains("somethingNew")),
+            ),
+        ];
+        for (label, input, check) in cases {
+            let status = parse_tx_status(&input);
+            assert!(check(&status), "{label}: got {status:?}");
         }
     }
 }

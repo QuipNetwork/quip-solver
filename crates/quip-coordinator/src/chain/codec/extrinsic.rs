@@ -533,13 +533,6 @@ mod tests {
     }
 
     #[test]
-    fn job_orders_key_is_stable() {
-        assert_ne!(job_orders_storage_key(7), job_orders_storage_key(8));
-        // prefix (32) + blake2_128 (16) + u64 (8) = 56
-        assert_eq!(job_orders_storage_key(7).len(), 56);
-    }
-
-    #[test]
     fn the_signing_account_is_never_the_miner_identity() {
         let pair = HybridPair::from_string("//Alice", None).expect("alice");
         let account = signer_account_bytes(&pair);
@@ -595,32 +588,6 @@ mod tests {
         assert_ne!(coordinator, from_account);
     }
 
-    #[test]
-    fn the_miners_key_ends_with_the_account() {
-        let account = [5u8; 32];
-        let key = miners_storage_key(&account);
-        assert_eq!(key.len(), 16 + 16 + 16 + 32);
-        assert_eq!(key.get(key.len() - 32..), Some(account.as_slice()));
-        #[expect(
-            clippy::indexing_slicing,
-            reason = "length is asserted to 80 bytes above"
-        )]
-        {
-            assert_eq!(&key[..16], &twox128(b"QuantumPow")[..]);
-            assert_eq!(&key[16..32], &twox128(b"Miners")[..]);
-            assert_eq!(&key[32..48], &blake2_128(&account)[..]);
-        }
-        assert_ne!(
-            miners_storage_key(&[1u8; 32]),
-            miners_storage_key(&[2u8; 32])
-        );
-        // Same hasher shape, different item: the two must not collide.
-        assert_ne!(
-            miners_storage_key(&account),
-            difficulties_storage_key(&account)
-        );
-    }
-
     fn compact_len_bytes(first: u8) -> usize {
         match first & 0b11 {
             0b00 => 1,
@@ -628,28 +595,6 @@ mod tests {
             0b10 => 4,
             _ => 1 + ((first >> 2) as usize + 4),
         }
-    }
-
-    #[test]
-    fn dev_phrase_with_a_derivation_path_matches_the_bare_dev_uri() {
-        // sp_core substitutes DEV_PHRASE for an empty phrase, so the full
-        // phrase plus //Alice must derive the same pair as //Alice alone.
-        // This exercises the mnemonic branch against a value we can check.
-        let uri = format!("{}//Alice", sp_core::crypto::DEV_PHRASE);
-        let from_phrase = load_hybrid_pair(&uri).expect("mnemonic URI derives");
-        let from_dev_uri = load_hybrid_pair("//Alice").expect("dev URI derives");
-        assert_eq!(
-            from_phrase.public().encode(),
-            from_dev_uri.public().encode()
-        );
-    }
-
-    #[test]
-    fn bare_dev_phrase_derives_a_pair() {
-        let pair = load_hybrid_pair(sp_core::crypto::DEV_PHRASE).expect("bare phrase derives");
-        // The root account differs from //Alice; only assert it is not that.
-        let alice = load_hybrid_pair("//Alice").expect("dev URI derives");
-        assert_ne!(pair.public().encode(), alice.public().encode());
     }
 
     #[test]
@@ -713,41 +658,87 @@ mod tests {
         }
     }
 
+    /// Each storage key is the pallet and item hashes, the map hasher's output,
+    /// and the SCALE key as a tail. A different key changes the result.
     #[test]
-    fn the_qblocks_key_is_a_blake2_128_concat_map_key() {
-        let key = qblocks_storage_key(1_121_300);
-        assert_eq!(key.len(), 16 + 16 + 16 + 4);
-        // Blake2_128Concat appends the SCALE-encoded key after its hash.
-        assert_eq!(
-            key.get(key.len() - 4..),
-            Some(1_121_300u32.encode().as_slice())
-        );
-        assert_ne!(qblocks_storage_key(1), qblocks_storage_key(2));
+    fn storage_keys_have_the_pallet_layout() {
+        let account = [5u8; 32];
+        let other_account = [6u8; 32];
+        let cases = [
+            (
+                "job order (Blake2_128Concat u64)",
+                job_orders_storage_key(7),
+                job_orders_storage_key(8),
+                16 + 16 + 16 + 8,
+                7u64.encode(),
+            ),
+            (
+                "miners (Blake2_128Concat account)",
+                miners_storage_key(&account),
+                miners_storage_key(&other_account),
+                16 + 16 + 16 + 32,
+                account.to_vec(),
+            ),
+            (
+                "qblocks (Blake2_128Concat u32)",
+                qblocks_storage_key(1_121_300),
+                qblocks_storage_key(1_121_301),
+                16 + 16 + 16 + 4,
+                1_121_300u32.encode(),
+            ),
+            (
+                "node descriptors (Blake2_128Concat account)",
+                node_descriptors_storage_key(&account),
+                node_descriptors_storage_key(&other_account),
+                16 + 16 + 16 + 32,
+                account.to_vec(),
+            ),
+            (
+                "participants (double map)",
+                participants_by_qblock_storage_key(42, &account),
+                participants_by_qblock_storage_key(43, &account),
+                16 + 16 + 16 + 8 + 16 + 32,
+                account.to_vec(),
+            ),
+        ];
+        for (label, key, other, len, tail) in cases {
+            assert_eq!(key.len(), len, "{label}: length");
+            assert!(key.ends_with(&tail), "{label}: tail is the SCALE key");
+            assert_ne!(key, other, "{label}: distinct keys");
+        }
+
+        // The miners key names its pallet and item and hashes the account.
+        let miners = miners_storage_key(&account);
+        assert_eq!(miners.get(..16), Some(&twox128(b"QuantumPow")[..]));
+        assert_eq!(miners.get(16..32), Some(&twox128(b"Miners")[..]));
+        assert_eq!(miners.get(32..48), Some(&blake2_128(&account)[..]));
+        // Same hasher shape, different item: the two must not collide.
+        assert_ne!(miners, difficulties_storage_key(&account));
+        // The double map carries the qblock between the two hashes.
+        let participants = participants_by_qblock_storage_key(42, &account);
+        assert_eq!(participants.get(48..56), Some(42u64.encode().as_slice()));
     }
 
     #[test]
-    fn the_node_descriptors_key_ends_with_the_account() {
-        let account = [7u8; 32];
-        let key = node_descriptors_storage_key(&account);
-        assert_eq!(key.len(), 16 + 16 + 16 + 32);
-        assert_eq!(key.get(key.len() - 32..), Some(account.as_slice()));
-        assert_ne!(
-            node_descriptors_storage_key(&[1u8; 32]),
-            node_descriptors_storage_key(&[2u8; 32])
-        );
-    }
-
-    #[test]
-    fn the_participants_key_is_a_blake2_128_concat_double_map() {
-        let account = [9u8; 32];
-        let key = participants_by_qblock_storage_key(42, &account);
-        assert_eq!(key.len(), 16 + 16 + 16 + 8 + 16 + 32);
-        assert_eq!(key.get(key.len() - 32..), Some(account.as_slice()));
-        let encoded = 42u64.encode();
-        assert_eq!(key.get(32 + 16..32 + 16 + 8), Some(encoded.as_slice()));
-        assert_ne!(
-            participants_by_qblock_storage_key(1, &account),
-            participants_by_qblock_storage_key(2, &account)
-        );
+    fn dev_phrases_derive_the_expected_pairs() {
+        // sp_core substitutes DEV_PHRASE for an empty phrase, so the full
+        // phrase plus //Alice must derive the same pair as //Alice alone, while
+        // the bare phrase is the root account, which is not //Alice.
+        let alice = load_hybrid_pair("//Alice").expect("dev URI derives");
+        for (label, uri, is_alice) in [
+            (
+                "phrase with //Alice",
+                format!("{}//Alice", sp_core::crypto::DEV_PHRASE),
+                true,
+            ),
+            ("bare phrase", sp_core::crypto::DEV_PHRASE.to_owned(), false),
+        ] {
+            let pair = load_hybrid_pair(&uri).expect("URI derives");
+            assert_eq!(
+                pair.public().encode() == alice.public().encode(),
+                is_alice,
+                "{label}"
+            );
+        }
     }
 }

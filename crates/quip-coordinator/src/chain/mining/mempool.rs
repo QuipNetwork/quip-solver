@@ -229,15 +229,11 @@ mod tests {
     /// `Blake2_128Concat` appends the SCALE-encoded key, so the order id is
     /// recoverable from the key alone. That is what makes enumeration work.
     #[test]
-    fn an_order_id_round_trips_through_its_storage_key() {
+    fn order_ids_come_back_from_order_keys_and_nothing_else() {
         for id in [0u64, 1, 42, u64::MAX] {
             let key = job_orders_storage_key(id);
             assert_eq!(order_id_from_key(&key), Some(id), "id {id}");
         }
-    }
-
-    #[test]
-    fn a_key_that_is_not_an_order_key_yields_none() {
         // A key whose prefix does not match must not be misread as an order.
         let mut foreign = vec![0xAAu8; 32];
         foreign.extend_from_slice(&[0u8; 16]);

@@ -826,24 +826,28 @@ mod verification {
     }
 
     #[test]
-    fn a_verifier_on_another_edge_order_rejects_the_lease() {
+    fn a_verifier_that_cannot_judge_the_lease_rejects_it() {
         let lease = lease();
         let (result, _) = honest(&lease);
         let mut reversed = topology();
         reversed.edges.0.reverse();
         reversed.edges.1.reverse();
-        let other = LeaseTopology::from_topology(&reversed, &CONTRACTS).unwrap();
-        let err = verify_and_select(&lease, &other, &open_target(), &result).unwrap_err();
-        assert!(err.contains("TopologyOrderMismatch"));
-    }
-
-    #[test]
-    fn an_empty_contract_table_verifies_nothing() {
-        let lease = lease();
-        let (result, _) = honest(&lease);
-        let empty = LeaseTopology::from_topology(&topology(), &[]).unwrap();
-        let err = verify_and_select(&lease, &empty, &open_target(), &result).unwrap_err();
-        assert!(err.contains("FamilyUnsupported"));
+        // A verifier on another edge order, and one with no contracts at all.
+        for (label, other, needle) in [
+            (
+                "another edge order",
+                LeaseTopology::from_topology(&reversed, &CONTRACTS).unwrap(),
+                "TopologyOrderMismatch",
+            ),
+            (
+                "an empty contract table",
+                LeaseTopology::from_topology(&topology(), &[]).unwrap(),
+                "FamilyUnsupported",
+            ),
+        ] {
+            let err = verify_and_select(&lease, &other, &open_target(), &result).unwrap_err();
+            assert!(err.contains(needle), "{label}: {err}");
+        }
     }
 
     #[test]
@@ -954,13 +958,6 @@ mod verification {
         (lease, verifier, result)
     }
 
-    #[test]
-    fn a_feasible_hard_family_witness_verifies() {
-        let (lease, verifier, result) = polariton_report(true);
-        let (_, validated) = verify_and_select(&lease, &verifier, &open_target(), &result).unwrap();
-        assert!(validated.accepted);
-    }
-
     /// CO-4: a family witness this coordinator accepts reaches the chain as a
     /// witness the validator accepts. The proof is encoded the way
     /// `submit_proof` encodes it, with the family's compact codec, and the
@@ -979,6 +976,10 @@ mod verification {
 
         let (lease, verifier, result) = polariton_report(true);
         let (_, validated) = verify_and_select(&lease, &verifier, &open_target(), &result).unwrap();
+        assert!(
+            validated.accepted,
+            "a feasible hard-family witness verifies"
+        );
         let salt: [u8; 32] = result.salt.as_slice().try_into().unwrap();
         let rows = validated.selected_solutions;
         let blob = quip_solver_conformance::topology(ROUTING_TOPOLOGY).unwrap();

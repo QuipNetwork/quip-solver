@@ -153,22 +153,6 @@ mod tests {
     }
 
     #[test]
-    fn open_order_accepts_each_registered_solver_type() {
-        let open = order(JobMode::Open);
-        for solver_type in [
-            SolverType::Cpu,
-            SolverType::Gpu,
-            SolverType::QpuDwave,
-            SolverType::QpuIbm,
-            SolverType::QpuIonq,
-            SolverType::QpuPasqal,
-            SolverType::Asic,
-        ] {
-            assert!(open.is_eligible_for(&[1; 32], solver_type));
-        }
-    }
-
-    #[test]
     fn each_bid_type_tag_matches_only_its_registered_type() {
         let types = [
             (0, SolverType::Cpu),
@@ -179,6 +163,11 @@ mod tests {
             (5, SolverType::QpuPasqal),
             (6, SolverType::Asic),
         ];
+        // An open order accepts every registered solver type.
+        let open = order(JobMode::Open);
+        for (_, solver_type) in types {
+            assert!(open.is_eligible_for(&[1; 32], solver_type));
+        }
         for (allowed_tag, allowed_type) in types {
             let bid = order(JobMode::Bid {
                 miners: None,

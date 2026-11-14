@@ -195,72 +195,45 @@ mod tests {
         assert_eq!(seen, WALK);
     }
 
+    /// Every event against every state. A failed step stays and retries; a new
+    /// head (a win during mining included) returns to `StopMining`; shutdown
+    /// stops the machine; `WinPending` moves only `StartMining` to
+    /// `AwaitingQBlock`; `Resume` moves only `AwaitingQBlock` back to
+    /// `StopMining`; and `Succeeded` holds in the two mining states.
     #[test]
-    fn win_pending_moves_only_start_mining_to_awaiting_qblock() {
-        assert_eq!(
-            RoundState::StartMining.transition(RoundEvent::WinPending),
-            Some(RoundState::AwaitingQBlock)
-        );
+    fn every_event_against_every_state() {
         for state in ALL {
-            if state == RoundState::StartMining {
-                continue;
+            for (event, expected) in [
+                (RoundEvent::Failed, Some(state)),
+                (RoundEvent::NewHead, Some(RoundState::StopMining)),
+                (RoundEvent::Shutdown, None),
+                (
+                    RoundEvent::WinPending,
+                    Some(if state == RoundState::StartMining {
+                        RoundState::AwaitingQBlock
+                    } else {
+                        state
+                    }),
+                ),
+                (
+                    RoundEvent::Resume,
+                    Some(if state == RoundState::AwaitingQBlock {
+                        RoundState::StopMining
+                    } else {
+                        state
+                    }),
+                ),
+            ] {
+                assert_eq!(state.transition(event), expected, "{state:?} on {event:?}");
             }
-            assert_eq!(
-                state.transition(RoundEvent::WinPending),
-                Some(state),
-                "{state:?} must ignore WinPending"
-            );
         }
-    }
-
-    #[test]
-    fn resume_moves_only_awaiting_qblock_to_stop_mining() {
-        assert_eq!(
-            RoundState::AwaitingQBlock.transition(RoundEvent::Resume),
-            Some(RoundState::StopMining)
-        );
-        for state in WALK {
-            assert_eq!(
-                state.transition(RoundEvent::Resume),
-                Some(state),
-                "{state:?} must ignore Resume"
-            );
-        }
-    }
-
-    /// `StartMining` keeps mining until a new head, and `AwaitingQBlock`
-    /// holds until `Resume`.
-    #[test]
-    fn mining_states_hold_on_succeeded() {
+        // `StartMining` keeps mining until a new head, and `AwaitingQBlock`
+        // holds until `Resume`.
         for state in [RoundState::StartMining, RoundState::AwaitingQBlock] {
             assert_eq!(
                 state.transition(RoundEvent::Succeeded),
                 Some(state),
                 "{state:?}"
-            );
-        }
-    }
-
-    /// From every state: a failed step stays and retries, a new head (a win
-    /// during mining included) returns to `StopMining`, and shutdown stops
-    /// the machine.
-    #[test]
-    fn every_state_retries_on_failure_restarts_on_new_head_and_stops_on_shutdown() {
-        for state in ALL {
-            assert_eq!(
-                state.transition(RoundEvent::Failed),
-                Some(state),
-                "{state:?} must stay and retry"
-            );
-            assert_eq!(
-                state.transition(RoundEvent::NewHead),
-                Some(RoundState::StopMining),
-                "{state:?} on NewHead"
-            );
-            assert_eq!(
-                state.transition(RoundEvent::Shutdown),
-                None,
-                "{state:?} on Shutdown"
             );
         }
     }

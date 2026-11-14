@@ -552,24 +552,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn lease_without_target_is_rejected_target_missing() {
-        let msgs = handle_lease(lease(3), Some(&lease_topology()), None);
-        assert_eq!(
-            first_reject_reason(&msgs),
-            Some(RejectReason::TargetMissing as i32)
-        );
-    }
-
-    #[test]
-    fn lease_with_zero_salts_is_malformed() {
-        let msgs = handle_lease(lease(0), Some(&lease_topology()), Some(&open_target()));
-        assert_eq!(
-            first_reject_reason(&msgs),
-            Some(RejectReason::Malformed as i32)
-        );
-    }
-
     fn sample_job(job_id: &[u8], kind: JobKind, j_bytes: Vec<u8>) -> Job {
         Job {
             job_id: job_id.to_vec(),
@@ -612,51 +594,56 @@ mod tests {
     }
 
     #[test]
-    fn gate_circuit_rejects_unsupported_kind() {
-        let msgs = handle_job(
-            sample_job(b"gate", JobKind::GateCircuit, encode_i32_le(&[500])),
-            None,
-        );
-        assert_eq!(
-            first_reject_reason(&msgs),
-            Some(RejectReason::UnsupportedKind as i32)
-        );
-        assert_eq!(first_msg_job_id(&msgs), b"gate");
-    }
-
-    #[test]
-    fn malformed_j_rejects_malformed() {
-        let msgs = handle_job(
-            sample_job(
-                b"bad-j",
-                JobKind::IsingSample,
-                vec![0x01, 0x02, 0x03], // len 3, not a multiple of 4
+    fn bad_leases_are_rejected_with_their_reason() {
+        for (label, salts, target, reason) in [
+            ("no target", 3, None, RejectReason::TargetMissing),
+            (
+                "zero salts",
+                0,
+                Some(open_target()),
+                RejectReason::Malformed,
             ),
-            None,
-        );
-        assert_eq!(
-            first_reject_reason(&msgs),
-            Some(RejectReason::Malformed as i32)
-        );
-        assert_eq!(first_msg_job_id(&msgs), b"bad-j");
+        ] {
+            let msgs = handle_lease(lease(salts), Some(&lease_topology()), target.as_ref());
+            assert_eq!(first_reject_reason(&msgs), Some(reason as i32), "{label}");
+        }
     }
 
     #[test]
-    fn out_of_bounds_edge_rejects_malformed() {
-        // h has 2 nodes (indices 0, 1); the inline edge references node 2,
-        // which is out of bounds and must be rejected rather than silently
-        // skipped during scoring.
-        let mut job = sample_job(b"oob-edge", JobKind::IsingSample, encode_i32_le(&[500]));
-        job.ising.as_mut().unwrap().graph =
+    fn bad_jobs_are_rejected_with_their_reason() {
+        // h has 2 nodes (indices 0, 1); the inline edge in `oob-edge`
+        // references node 2, which is out of bounds and must be rejected
+        // rather than silently skipped during scoring.
+        let mut oob = sample_job(b"oob-edge", JobKind::IsingSample, encode_i32_le(&[500]));
+        oob.ising.as_mut().unwrap().graph =
             Some(ising_problem::Graph::Edges(quip_proto::v1::EdgeList {
                 u: vec![0],
                 v: vec![2],
             }));
-        let msgs = handle_job(job, None);
-        assert_eq!(
-            first_reject_reason(&msgs),
-            Some(RejectReason::Malformed as i32)
-        );
-        assert_eq!(first_msg_job_id(&msgs), b"oob-edge");
+        for (label, job, id, reason) in [
+            (
+                "gate circuit",
+                sample_job(b"gate", JobKind::GateCircuit, encode_i32_le(&[500])),
+                b"gate".as_slice(),
+                RejectReason::UnsupportedKind,
+            ),
+            (
+                // len 3, not a multiple of 4
+                "bad j length",
+                sample_job(b"bad-j", JobKind::IsingSample, vec![0x01, 0x02, 0x03]),
+                b"bad-j".as_slice(),
+                RejectReason::Malformed,
+            ),
+            (
+                "out-of-bounds edge",
+                oob,
+                b"oob-edge".as_slice(),
+                RejectReason::Malformed,
+            ),
+        ] {
+            let msgs = handle_job(job, None);
+            assert_eq!(first_reject_reason(&msgs), Some(reason as i32), "{label}");
+            assert_eq!(first_msg_job_id(&msgs), id, "{label}");
+        }
     }
 }

@@ -480,45 +480,43 @@ mod tests {
     const ADD: [u8; 2] = [QUANTUM_POW_PALLET_INDEX, ADD_MINEABLE_TOPOLOGY_CALL_INDEX];
     const DEFAULT: [u8; 2] = [QUANTUM_POW_PALLET_INDEX, SET_DEFAULT_TOPOLOGY_CALL_INDEX];
 
-    /// The built-in parameters are the recipe bytes solver-core freezes.
-    #[test]
-    fn the_dimer_1200_params_are_the_solver_core_recipe() {
-        assert_eq!(
-            hex_encode(&DIMER_1200_PARAMS),
-            "0x010100020000000c00020001000000040300020000003e00040004000000b0040000"
-        );
-    }
-
-    /// The encoder lays out the recipe bytes for both the built-in recipe and
-    /// weak 45, 1350 pairs.
+    /// The encoder lays out solver-core's frozen recipe bytes, for the built-in
+    /// recipe (62, 1200) and for weak 45 with 1350 pairs.
     #[test]
     fn twisted_dimer_params_match_the_canonical_bytes() {
-        assert_eq!(twisted_dimer_params(62, 1200), DIMER_1200_PARAMS.to_vec());
-        assert_eq!(
-            hex_encode(&twisted_dimer_params(45, 1350)),
-            "0x010100020000000c00020001000000040300020000002d0004000400000046050000"
-        );
+        for (label, params, expected) in [
+            (
+                "built-in dimer1200 constant",
+                DIMER_1200_PARAMS.to_vec(),
+                "0x010100020000000c00020001000000040300020000003e00040004000000b0040000",
+            ),
+            (
+                "encoder at (62, 1200)",
+                twisted_dimer_params(62, 1200),
+                "0x010100020000000c00020001000000040300020000003e00040004000000b0040000",
+            ),
+            (
+                "encoder at (45, 1350)",
+                twisted_dimer_params(45, 1350),
+                "0x010100020000000c00020001000000040300020000002d0004000400000046050000",
+            ),
+        ] {
+            assert_eq!(hex_encode(&params), expected, "{label}");
+        }
     }
 
-    /// dimer1200 admits on the live preset, and its family hash differs from
-    /// the legacy hash of the same graph.
+    /// Both families admit on the live preset. Each family hash differs from
+    /// the legacy hash of the same graph, and the two differ from each other.
     #[test]
-    fn dimer_1200_admits_on_the_live_preset() {
+    fn dimer_families_admit_on_the_live_preset() {
         let topology = live();
-        let hash = topology.family_hash(&dimer_1200()).unwrap();
-        assert_ne!(hash, topology.legacy_hash());
-    }
-
-    /// The runtime's admission and the coordinator's both take weak 45 with
-    /// 1350 pairs on the live preset, and it is a different topology from
-    /// dimer1200 on the same graph.
-    #[test]
-    fn weak_45_pairs_1350_admits_on_the_live_preset() {
-        let topology = live();
-        let hash = topology
+        let dimer = topology.family_hash(&dimer_1200()).unwrap();
+        let weak = topology
             .family_hash(&twisted_dimer(twisted_dimer_params(45, 1350)))
             .unwrap();
-        assert_ne!(hash, topology.family_hash(&dimer_1200()).unwrap());
+        assert_ne!(dimer, topology.legacy_hash());
+        assert_ne!(weak, topology.legacy_hash());
+        assert_ne!(dimer, weak);
     }
 
     /// A weak magnitude outside 1..=999 is refused before anything is sent.

@@ -1375,20 +1375,76 @@ mod tests {
     }
 
     #[test]
-    fn degree_boundary_routes_and_stages_before_dispatch() {
-        let mut r = Router::new();
-        r.register_miner(
-            "a-msa",
-            MinerCaps {
-                max_degree: Some(20),
-                ..caps_ising()
-            },
-        );
-        r.register_miner("z-cpu", caps_ising());
-        assert_eq!(r.route(degree_job(20)).as_deref(), Some("a-msa"));
-        assert_eq!(r.route(degree_job(21)).as_deref(), Some("z-cpu"));
-        assert!(!r.stage_on("a-msa", degree_job(21)));
-        assert!(r.stage_on("a-msa", degree_job(20)));
+    fn max_degree_gates_routing_and_staging() {
+        // The boundary routes to the capable miner and stages before dispatch.
+        {
+            let mut r = Router::new();
+            r.register_miner(
+                "a-msa",
+                MinerCaps {
+                    max_degree: Some(20),
+                    ..caps_ising()
+                },
+            );
+            r.register_miner("z-cpu", caps_ising());
+            assert_eq!(r.route(degree_job(20)).as_deref(), Some("a-msa"));
+            assert_eq!(r.route(degree_job(21)).as_deref(), Some("z-cpu"));
+            assert!(!r.stage_on("a-msa", degree_job(21)));
+            assert!(r.stage_on("a-msa", degree_job(20)));
+        }
+        // Unspecified and zero degree keep the fallback.
+        {
+            let mut r = Router::new();
+            r.register_miner("m", caps_ising());
+            assert!(r.stage_on("m", degree_job(21)));
+            assert!(r.update_capabilities(
+                "m",
+                MinerCaps {
+                    max_degree: Some(0),
+                    ..caps_ising()
+                }
+            ));
+            assert!(r.stage_on("m", degree_job(21)));
+            assert!(r.update_capabilities(
+                "m",
+                MinerCaps {
+                    max_degree: Some(20),
+                    ..caps_ising()
+                }
+            ));
+            let topology = topo(vec![0, 1], vec![(0, 1)]);
+            assert!(r.stage_on("m", hash_job(&topology)));
+            r.set_topology(Some(&topology));
+            assert!(r.stage_on("m", hash_job(&topology)));
+            r.set_topology(None);
+            assert!(r.stage_on("m", hash_job(&topology)));
+        }
+        // Duplicate and zero-coupling edges count toward the degree.
+        {
+            let mut r = Router::new();
+            r.register_miner(
+                "m",
+                MinerCaps {
+                    max_degree: Some(1),
+                    ..caps_ising()
+                },
+            );
+            let duplicate = Job {
+                kind: JobKind::IsingSample as i32,
+                ising: Some(crate::types::problem::milli_problem(
+                    Some(ising_problem::Graph::Edges(quip_proto::v1::EdgeList {
+                        u: vec![0, 0],
+                        v: vec![1, 1],
+                    })),
+                    &[0, 0],
+                    &[0, 0],
+                )),
+                ..Job::default()
+            };
+            assert!(!r.stage_on("m", duplicate));
+            assert!(r.stage_on("m", degree_job(1)));
+            assert!(r.stage_on("m", degree_job(0)));
+        }
     }
 
     #[test]
@@ -1477,61 +1533,6 @@ mod tests {
             r.next_job("a").map(|j| j.job_id),
             Some(20_u32.to_le_bytes().to_vec())
         );
-    }
-
-    #[test]
-    fn unspecified_and_zero_degree_keep_the_fallback() {
-        let mut r = Router::new();
-        r.register_miner("m", caps_ising());
-        assert!(r.stage_on("m", degree_job(21)));
-        assert!(r.update_capabilities(
-            "m",
-            MinerCaps {
-                max_degree: Some(0),
-                ..caps_ising()
-            }
-        ));
-        assert!(r.stage_on("m", degree_job(21)));
-        assert!(r.update_capabilities(
-            "m",
-            MinerCaps {
-                max_degree: Some(20),
-                ..caps_ising()
-            }
-        ));
-        let topology = topo(vec![0, 1], vec![(0, 1)]);
-        assert!(r.stage_on("m", hash_job(&topology)));
-        r.set_topology(Some(&topology));
-        assert!(r.stage_on("m", hash_job(&topology)));
-        r.set_topology(None);
-        assert!(r.stage_on("m", hash_job(&topology)));
-    }
-
-    #[test]
-    fn degree_counts_duplicate_and_zero_coupling_edges() {
-        let mut r = Router::new();
-        r.register_miner(
-            "m",
-            MinerCaps {
-                max_degree: Some(1),
-                ..caps_ising()
-            },
-        );
-        let duplicate = Job {
-            kind: JobKind::IsingSample as i32,
-            ising: Some(crate::types::problem::milli_problem(
-                Some(ising_problem::Graph::Edges(quip_proto::v1::EdgeList {
-                    u: vec![0, 0],
-                    v: vec![1, 1],
-                })),
-                &[0, 0],
-                &[0, 0],
-            )),
-            ..Job::default()
-        };
-        assert!(!r.stage_on("m", duplicate));
-        assert!(r.stage_on("m", degree_job(1)));
-        assert!(r.stage_on("m", degree_job(0)));
     }
 
     fn assert_graph_job_staging(r: &mut Router, topology: &Topology, expected: bool, label: &str) {

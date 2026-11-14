@@ -80,33 +80,48 @@ mod tests {
         );
     }
 
+    /// Every child carries the coordinator address, its miner id and the log
+    /// level, and the device flag pairs with the id. The first entry is built
+    /// through the real config path, because the invariant the bug broke is
+    /// that `[cuda.N]` produces both `cuda-N` and `--device N`.
     #[test]
-    fn child_argv_pairs_miner_id_with_device() {
-        // Built through the real config path, because the invariant the bug
-        // broke is that `[cuda.N]` produces both `cuda-N` and `--device N`.
+    fn child_argv_carries_coordinator_miner_id_log_level_and_device() {
         let cfg = crate::config::parse_config(
             "\n[miner]\npublic_host = \"h\"\npublic_port = 1\n\n[cuda.1]\n",
         )
         .expect("config parses");
-        let entry = cfg.launch.first().expect("one launch entry");
-        let args = child_args(entry, "unix:///s.sock", LogLevel::Info);
-        assert_eq!(value_after(&args, "--miner-id"), Some("cuda-1"));
-        assert_eq!(value_after(&args, "--device"), Some("1"));
-    }
-
-    #[test]
-    fn child_argv_always_carries_coordinator_id_and_log_level() {
-        let args = child_args(
-            &cuda_entry("cuda-0", Some(0)),
-            "unix:///s.sock",
-            LogLevel::Debug,
-        );
-        assert_eq!(
-            value_after(&args, "--quip-coordinator"),
-            Some("unix:///s.sock")
-        );
-        assert_eq!(value_after(&args, "--miner-id"), Some("cuda-0"));
-        assert_eq!(value_after(&args, "--log-level"), Some("debug"));
-        assert_eq!(value_after(&args, "--device"), Some("0"));
+        let from_config = cfg.launch.first().expect("one launch entry");
+        for (label, entry, level, miner_id, device, log_level) in [
+            (
+                "from config [cuda.1]",
+                from_config,
+                LogLevel::Info,
+                "cuda-1",
+                "1",
+                "info",
+            ),
+            (
+                "constructed cuda-0",
+                &cuda_entry("cuda-0", Some(0)),
+                LogLevel::Debug,
+                "cuda-0",
+                "0",
+                "debug",
+            ),
+        ] {
+            let args = child_args(entry, "unix:///s.sock", level);
+            assert_eq!(
+                value_after(&args, "--quip-coordinator"),
+                Some("unix:///s.sock"),
+                "{label}"
+            );
+            assert_eq!(value_after(&args, "--miner-id"), Some(miner_id), "{label}");
+            assert_eq!(value_after(&args, "--device"), Some(device), "{label}");
+            assert_eq!(
+                value_after(&args, "--log-level"),
+                Some(log_level),
+                "{label}"
+            );
+        }
     }
 }

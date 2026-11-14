@@ -34,34 +34,32 @@ fn check_exits_zero_on_this_host() {
 }
 
 #[test]
-fn missing_coordinator_exits_64_not_panic() {
-    let out = Command::new(bin())
-        .env("QUIP_SESSION_TOKEN", "tok")
-        .output()
-        .unwrap();
-    // No --quip-coordinator and no --capabilities/--check → ConfigInvalid (64).
-    assert_eq!(
-        out.status.code(),
-        Some(64),
-        "missing --quip-coordinator must exit 64 (got {:?}, stderr={})",
-        out.status.code(),
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-
-#[test]
-fn missing_session_token_exits_77() {
-    let out = Command::new(bin())
-        .arg("--quip-coordinator")
-        .arg("unix:///tmp/quip-no-such-socket.sock")
-        .env_remove("QUIP_SESSION_TOKEN")
-        .output()
-        .unwrap();
-    assert_eq!(
-        out.status.code(),
-        Some(77),
-        "missing QUIP_SESSION_TOKEN must exit 77 (got {:?}, stderr={})",
-        out.status.code(),
-        String::from_utf8_lossy(&out.stderr)
-    );
+fn missing_configuration_exits_with_its_own_code() {
+    // No --quip-coordinator and no --capabilities/--check is ConfigInvalid
+    // (64); a coordinator without QUIP_SESSION_TOKEN is 77.
+    for (label, expected, coordinator) in [
+        ("no coordinator", 64, None),
+        (
+            "no session token",
+            77,
+            Some("unix:///tmp/quip-no-such-socket.sock"),
+        ),
+    ] {
+        let mut command = Command::new(bin());
+        let _ = match coordinator {
+            Some(coordinator) => command
+                .arg("--quip-coordinator")
+                .arg(coordinator)
+                .env_remove("QUIP_SESSION_TOKEN"),
+            None => command.env("QUIP_SESSION_TOKEN", "tok"),
+        };
+        let out = command.output().unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(expected),
+            "{label} (got {:?}, stderr={})",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 }
