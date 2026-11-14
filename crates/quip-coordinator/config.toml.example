@@ -55,7 +55,7 @@ binary = "quip-cuda-sa"       # or "quip-cuda-gibbs", "quip-cuda-msa"
 
 # Apple Silicon Metal miner. Default binary: quip-metal-sa.
 # [metal]
-# binary = "quip-metal-sa"    # or "quip-metal-gibbs", "quip-metal-msa"
+# binary = "quip-metal-sa"    # or "quip-metal-gibbs", "quip-metal-msa", "quip-metal-otsuka"
 #
 # Engine selection. Both keys default to true, so quip-metal-msa already uses
 # the Apple Neural Engine and Metal without either key. Set a key only to turn

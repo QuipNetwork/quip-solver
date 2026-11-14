@@ -192,6 +192,8 @@ verify-fetch-miners:
       # on it.
       echo "$out" | grep -q 'would fetch (optional): quip-cpu-otsuka-darwin-arm64' ||
         { echo "ERROR: darwin does not select quip-cpu-otsuka"; exit 1; }
+      echo "$out" | grep -q 'would fetch (optional): quip-metal-otsuka-darwin-arm64' ||
+        { echo "ERROR: darwin does not select quip-metal-otsuka"; exit 1; }
       echo "$out" | grep -q 'quip-dwave-qa-darwin-arm64'
       if echo "$out" | grep -q 'pip install'; then
         echo "ERROR: darwin must fetch the dwave binary, not print a pip line"; exit 1
