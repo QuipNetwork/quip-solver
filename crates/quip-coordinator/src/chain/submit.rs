@@ -1,49 +1,6 @@
 //! Extrinsic submit + hybrid sign (CONFIRM) and groundable receipt classification.
 
-/// Action the fire-loop should take after a submit attempt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SubmitAction {
-    /// Extrinsic accepted (or no error string to classify).
-    Success,
-    /// Transient / retriable pallet rejection (energy, proof limit).
-    Retry,
-    /// Round-stale rejection; abandon the current generation.
-    StopRoundStale,
-    /// Fatal rejection or unknown error; stop submitting this proof.
-    StopFatal,
-}
-
-/// What a submit attempt produced: the action the fire-loop takes, plus the
-/// chain detail the dashboard reports on the submission row.
-///
-/// `extrinsic_hash` is known as soon as the extrinsic is signed, so it is set on
-/// every path that reached the node. `block_hash` and `block_number` are set only
-/// on [`SubmitAction::Success`], which the pallet confirmation defines as a win:
-/// `QuantumPow.QBlocks[block_number].miner` equals the signing account.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SubmitReceipt {
-    /// Action the fire-loop should take.
-    pub action: SubmitAction,
-    /// Hash of the signed extrinsic, once it is signed.
-    pub extrinsic_hash: Option<[u8; 32]>,
-    /// Hash of the winning block. `None` when the submission did not win.
-    pub block_hash: Option<[u8; 32]>,
-    /// Height of the winning block. `None` when the submission did not win.
-    pub block_number: Option<u64>,
-}
-
-impl SubmitReceipt {
-    /// A receipt that carries an action and no chain detail.
-    #[must_use]
-    pub const fn action_only(action: SubmitAction) -> Self {
-        Self {
-            action,
-            extrinsic_hash: None,
-            block_hash: None,
-            block_number: None,
-        }
-    }
-}
+use crate::types::proof::SubmitAction;
 
 /// Outcome of a `MinerRegistry.set_descriptor` submission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

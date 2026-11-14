@@ -2,12 +2,26 @@
 
 use crate::config::LaunchEntry;
 use crate::logging::LogLevel;
-use crate::session::{gen_session_token, shutdown_msg, CoordinatorState};
+use async_trait::async_trait;
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::{Child, Command};
-use tokio::sync::{watch, Mutex};
+use tokio::sync::watch;
+
+/// The session server as the supervisor sees it: who may connect, how to stop
+/// a live session, and where an exited miner's work goes.
+#[async_trait]
+pub trait SessionGate: Send + Sync {
+    /// Issue a fresh session token for `miner_id`. The next handshake from
+    /// that miner must present it.
+    async fn expect(&self, miner_id: &str) -> String;
+    /// Send an in-band `Shutdown` with `grace_ms` to the live session of
+    /// `miner_id`, if it has one.
+    async fn request_shutdown(&self, miner_id: &str, grace_ms: u32);
+    /// Return the in-flight and staged jobs of an exited miner for routing to
+    /// the others.
+    async fn reclaim(&self, miner_id: &str);
+}
 
 /// Restart decision for a miner child exit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,10 +187,10 @@ fn spawn_supervised_child(
 /// backoff + failure budget, re-queue its in-flight + staged jobs to the router
 /// on a crash, and send an in-band `Shutdown` (then kill after grace) once
 /// `stop` flips true.
-pub async fn supervise_miner(
+pub async fn supervise_miner<G: SessionGate>(
     entry: LaunchEntry,
     sock_uri: String,
-    state: Arc<Mutex<CoordinatorState>>,
+    gate: G,
     policy: BackoffPolicy,
     grace_ms: u32,
     log_level: LogLevel,
@@ -187,13 +201,7 @@ pub async fn supervise_miner(
 
     loop {
         // A fresh token per spawn; the session server must expect it.
-        let token = gen_session_token();
-        {
-            let mut st = state.lock().await;
-            let _ = st
-                .expected_tokens
-                .insert(entry.miner_id.clone(), token.clone());
-        }
+        let token = gate.expect(&entry.miner_id).await;
 
         let mut child = match spawn_supervised_child(&entry, &token, &sock_uri, log_level) {
             Ok(c) => c,
@@ -217,10 +225,7 @@ pub async fn supervise_miner(
 
         let Some(status) = exited else {
             // Graceful shutdown: in-band Shutdown, wait grace, then ensure dead.
-            let tx = state.lock().await.outbound.get(&entry.miner_id).cloned();
-            if let Some(tx) = tx {
-                let _ = tx.send(Ok(shutdown_msg(grace_ms))).await;
-            }
+            gate.request_shutdown(&entry.miner_id, grace_ms).await;
             let _ = tokio::time::timeout(
                 Duration::from_millis(u64::from(grace_ms) + 500),
                 child.wait(),
@@ -244,13 +249,7 @@ pub async fn supervise_miner(
         // jobs to the router. A clean exit (code 0) can still leave in-flight
         // jobs — the Shutdown drain has a grace timeout — so reclaim regardless
         // of code, or `inflight` leaks and any mempool order is silently lost.
-        {
-            let mut st = state.lock().await;
-            let jobs = st.reclaim_miner(&entry.miner_id);
-            for job in jobs {
-                let _ = st.router.route(job);
-            }
-        }
+        gate.reclaim(&entry.miner_id).await;
 
         #[expect(
             clippy::cast_possible_truncation,

@@ -55,7 +55,9 @@ impl JobSource for LeaseSource {
         }
         let count = self.lease_size.min(self.salts - self.next_start);
         let job = crate::lease::build_lease_job(
-            &self.snapshot,
+            crate::lease::lease_generator(self.snapshot.family.as_ref()),
+            &self.snapshot.topology_hash,
+            self.snapshot.last_proof_block_hash,
             self.miner_account,
             self.next_start,
             count,

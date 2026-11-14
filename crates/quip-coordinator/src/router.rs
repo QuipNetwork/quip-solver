@@ -992,7 +992,15 @@ mod tests {
             target_proof_blocks: crate::types::snapshot::TARGET_PROOF_BLOCKS,
             family: None,
         };
-        crate::lease::build_lease_job(&snap, [0; 32], start, 4, 1)
+        crate::lease::build_lease_job(
+            crate::lease::lease_generator(snap.family.as_ref()),
+            &snap.topology_hash,
+            snap.last_proof_block_hash,
+            [0; 32],
+            start,
+            4,
+            1,
+        )
     }
 
     /// A lease needs both the generate kind and the generator: neither a

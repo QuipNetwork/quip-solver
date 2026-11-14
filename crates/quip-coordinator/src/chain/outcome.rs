@@ -9,7 +9,8 @@
 //! The ledger restores a loud stop: after `max_attempts` consecutive failures
 //! for one job inside one quantum block, the caller is told to stop.
 
-use super::SubmitAction;
+use crate::types::proof::SubmitAction;
+
 use std::collections::BTreeMap;
 
 /// How many quantum blocks of history the ledger keeps.
@@ -93,7 +94,7 @@ impl SubmitLedger {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chain::SubmitAction;
+    use crate::types::proof::SubmitAction;
 
     const JOB: &[u8] = b"job-1";
 

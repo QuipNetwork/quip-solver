@@ -3,6 +3,8 @@
 //! The feeder and startup drive this machine and perform the I/O. Transitions
 //! are a pure function of the current [`RoundState`] and a [`RoundEvent`].
 
+pub mod log;
+
 use std::fmt;
 
 /// Where the coordinator is in the round lifecycle.

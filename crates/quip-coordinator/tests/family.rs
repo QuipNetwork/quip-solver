@@ -358,7 +358,7 @@ mod drive {
     use ising_generators::Code;
     use quip_coordinator::drive::drain_all;
     use quip_coordinator::drive::lease_source::LeaseSource;
-    use quip_coordinator::lease::build_lease_job;
+    use quip_coordinator::lease::{build_lease_job, lease_generator};
     use quip_coordinator::types::family::ChallengeFamily;
     use quip_coordinator::types::snapshot::head_state_key;
     use quip_coordinator::types::topology::Topology;
@@ -413,7 +413,16 @@ mod drive {
     #[test]
     fn snapshot_without_a_family_stays_on_the_legacy_generator() {
         let spec = spec();
-        let job = build_lease_job(&spec.to_snapshot(), [1; 32], 0, 4, 1);
+        let snap = spec.to_snapshot();
+        let job = build_lease_job(
+            lease_generator(snap.family.as_ref()),
+            &snap.topology_hash,
+            snap.last_proof_block_hash,
+            [1; 32],
+            0,
+            4,
+            1,
+        );
         let g = generator(&job);
         assert_eq!(g.algorithm, GeneratorAlgorithm::Blake3Chacha8V1 as i32);
         assert_eq!(g.family, None);
@@ -524,7 +533,10 @@ mod verification {
     use ising_generators::polariton::POLARITON_V1;
     use ising_generators::random::derive_nonce;
     use ising_generators::registry::CONTRACTS as REGISTRY;
-    use quip_coordinator::lease::{build_lease_job, verify_and_select, LeaseTopology};
+    use quip_coordinator::lease::{
+        build_lease_job, lease_generator, verify_and_select, LeaseTopology,
+    };
+
     use quip_coordinator::types::family::ChallengeFamily;
     use quip_coordinator::types::topology::Topology;
     use quip_coordinator::types::topology_spec::TopologySpec;
@@ -575,7 +587,17 @@ mod verification {
         snap.last_proof_block_hash = root;
         snap.family =
             Some(ChallengeFamily::admit(&CONTRACTS, family, 1, params.to_vec(), topo).unwrap());
-        build_lease_job(&snap, MINER, 0, 32, 1).generator.unwrap()
+        build_lease_job(
+            lease_generator(snap.family.as_ref()),
+            &snap.topology_hash,
+            snap.last_proof_block_hash,
+            MINER,
+            0,
+            32,
+            1,
+        )
+        .generator
+        .unwrap()
     }
 
     fn lease() -> IsingProblemGenerator {
@@ -830,7 +852,15 @@ mod verification {
         let spec = spec_of(&topo);
         let mut snap = spec.to_snapshot();
         snap.last_proof_block_hash = LAST_PROOF;
-        let job = build_lease_job(&snap, MINER, 0, 4, 1);
+        let job = build_lease_job(
+            lease_generator(snap.family.as_ref()),
+            &snap.topology_hash,
+            snap.last_proof_block_hash,
+            MINER,
+            0,
+            4,
+            1,
+        );
         let lease = job.generator.unwrap();
         let parsed = LeaseSpec::from_proto(&lease).unwrap();
         let salt = parsed.salt(0).unwrap();
@@ -870,7 +900,17 @@ mod verification {
             )
             .unwrap(),
         );
-        let lease = build_lease_job(&snap, MINER, 0, 32, 1).generator.unwrap();
+        let lease = build_lease_job(
+            lease_generator(snap.family.as_ref()),
+            &snap.topology_hash,
+            snap.last_proof_block_hash,
+            MINER,
+            0,
+            32,
+            1,
+        )
+        .generator
+        .unwrap();
         let verifier = LeaseTopology::from_topology(&topo, REGISTRY).unwrap();
         (topo, lease, verifier)
     }

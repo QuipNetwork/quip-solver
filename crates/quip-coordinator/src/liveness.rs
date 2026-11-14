@@ -7,13 +7,20 @@
 //! [`liveness_loop`] pings live miners; each `Status` reply carries the miner's
 //! `state`/`reason`/`generation` in `sampler_stats`, which [`evaluate_status`]
 //! folds into per-miner [`MinerLiveness`] and the transitions worth logging.
+//! The session owns the [`LivenessTable`] and lends it to each `Status`.
 
-use crate::session::{coord, CoordinatorState};
+use async_trait::async_trait;
 use quip_proto::v1::{coord_msg, Ping};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{watch, Mutex};
+use tokio::sync::watch;
+
+/// Sends one coordinator message to every live miner session.
+#[async_trait]
+pub trait MinerBroadcast: Send + Sync {
+    /// Send `msg` to every live miner. Returns the number of miners sent to.
+    async fn broadcast(&self, msg: coord_msg::Msg) -> usize;
+}
 
 /// Last-known self-reported liveness for one miner.
 #[derive(Clone, Default, PartialEq, Debug)]
@@ -43,6 +50,26 @@ pub enum LivenessEvent {
         /// Feeder's current generation.
         current: u64,
     },
+}
+
+/// Last-known self-reported liveness of every miner, by `miner_id`.
+#[derive(Debug, Default)]
+pub struct LivenessTable(HashMap<String, MinerLiveness>);
+
+impl LivenessTable {
+    /// Fold one `Status` from `miner_id` into the table and return the
+    /// transitions to log. `current_generation` is the feeder's live round.
+    pub fn observe(
+        &mut self,
+        miner_id: &str,
+        stats: &HashMap<String, String>,
+        current_generation: u64,
+    ) -> Vec<LivenessEvent> {
+        let prev = self.0.get(miner_id).cloned().unwrap_or_default();
+        let (next, events) = evaluate_status(&prev, stats, current_generation);
+        let _ = self.0.insert(miner_id.to_owned(), next);
+        events
+    }
 }
 
 /// Fold a `Status`'s `sampler_stats` into the prior liveness, returning the new
@@ -92,32 +119,22 @@ pub fn evaluate_status(
     )
 }
 
-/// Send a `Ping` to every live miner. Clones the outbound senders under the
-/// lock, drops it, then awaits the sends so the fan-out never holds the state
-/// lock across I/O. Returns the number of miners pinged.
-pub async fn ping_once(state: &Arc<Mutex<CoordinatorState>>) -> usize {
-    let senders: Vec<_> = {
-        let st = state.lock().await;
-        st.outbound.values().cloned().collect()
-    };
-    let n = senders.len();
-    for tx in senders {
-        let _ = tx.send(Ok(coord(coord_msg::Msg::Ping(Ping {})))).await;
-    }
-    n
+/// Send a `Ping` to every live miner. Returns the number of miners pinged.
+pub async fn ping_once<B: MinerBroadcast + ?Sized>(miners: &B) -> usize {
+    miners.broadcast(coord_msg::Msg::Ping(Ping {})).await
 }
 
 /// Periodically ping live miners until `stop` flips, so their `Status` replies
 /// surface paused/stale transitions (logged by the session `Status` handler).
-pub async fn liveness_loop(
-    state: Arc<Mutex<CoordinatorState>>,
+pub async fn liveness_loop<B: MinerBroadcast>(
+    miners: B,
     interval: Duration,
     mut stop: watch::Receiver<bool>,
 ) {
     let mut ticker = tokio::time::interval(interval);
     loop {
         tokio::select! {
-            _ = ticker.tick() => { let _ = ping_once(&state).await; }
+            _ = ticker.tick() => { let _ = ping_once(&miners).await; }
             _ = stop.changed() => { if *stop.borrow() { break; } }
         }
     }
@@ -126,6 +143,9 @@ pub async fn liveness_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::CoordinatorState;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
 
     fn stats(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs

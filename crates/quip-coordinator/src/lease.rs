@@ -1,14 +1,16 @@
 //! Salt leases: `ISING_GENERATE` jobs that let a miner draw its own
 //! proof-of-work problems, and how many salts each lease names.
 
-use crate::types::snapshot::MiningSnapshot;
+use crate::types::family::ChallengeFamily;
 use crate::types::topology::Topology;
 use ising_generators::descriptor::{admit, AdvertisedLimits, Contract};
 use ising_generators::family::{admit_topology, feasible, generate_instance, BaseTopology};
 
 use ising_generators::random::derive_nonce;
 use ising_generators::Code;
-use quip_proto::v1::{GeneratorAlgorithm, IsingProblemGenerator, Job, JobKind, Provenance};
+use quip_proto::v1::{
+    FamilyDescriptor, GeneratorAlgorithm, IsingProblemGenerator, Job, JobKind, Provenance,
+};
 use quip_protocol::lease::{LeaseSpec, TopologyView, Verified, VerifyError};
 use quip_protocol::scoring::energy_from_milli;
 use quip_protocol::wire::decode_spins_packed;
@@ -86,27 +88,77 @@ pub fn is_lease(job: &Job) -> bool {
     job.kind == JobKind::IsingGenerate as i32
 }
 
+/// The problem draw a lease names: what a miner runs for each salt.
+pub trait LeaseGenerator {
+    /// The generator algorithm the miner runs.
+    fn algorithm(&self) -> GeneratorAlgorithm;
+    /// The family descriptor, for a family draw.
+    fn family(&self) -> Option<FamilyDescriptor>;
+    /// Digest of the node and edge order the family was admitted on. Empty
+    /// for the legacy draw.
+    fn topology_order_digest(&self) -> Vec<u8>;
+}
+
+/// The legacy draw: each salt's problem comes from the topology's value sets.
+#[derive(Debug, Clone, Copy)]
+pub struct LegacyDraw;
+
+impl LeaseGenerator for LegacyDraw {
+    fn algorithm(&self) -> GeneratorAlgorithm {
+        GeneratorAlgorithm::Blake3Chacha8V1
+    }
+
+    fn family(&self) -> Option<FamilyDescriptor> {
+        None
+    }
+
+    fn topology_order_digest(&self) -> Vec<u8> {
+        Vec::new()
+    }
+}
+
+/// A family draw: each salt's problem is an instance of the admitted family.
+impl LeaseGenerator for ChallengeFamily {
+    fn algorithm(&self) -> GeneratorAlgorithm {
+        GeneratorAlgorithm::FamilyChacha8V1
+    }
+
+    fn family(&self) -> Option<FamilyDescriptor> {
+        Some(self.descriptor().clone())
+    }
+
+    fn topology_order_digest(&self) -> Vec<u8> {
+        // The inherent accessor, which path resolution prefers over this method.
+        Self::topology_order_digest(self).to_vec()
+    }
+}
+
+/// The draw for a challenge: its family when the chain bound one, otherwise
+/// the legacy draw. A challenge with a family has no fallback to the legacy
+/// draw.
+#[must_use]
+pub fn lease_generator(family: Option<&ChallengeFamily>) -> &dyn LeaseGenerator {
+    match family {
+        Some(family) => family,
+        None => &LegacyDraw,
+    }
+}
+
 /// An `ISING_GENERATE` job naming counters `salt_start..salt_start + salt_count`
-/// over `snap`'s topology and round. `base_salt` is all zeros, so salt `i`
-/// equals the counter salt of `salt_start + i`, the salt a plain proof-of-work
-/// job would use. A snapshot with a family issues a family lease and has no
-/// fallback to the legacy draw.
+/// over the topology `topology_hash` names and the round `last_proof_block_hash`
+/// names, drawn by `generator`. `base_salt` is all zeros, so salt `i` equals
+/// the counter salt of `salt_start + i`, the salt a plain proof-of-work job
+/// would use.
 #[must_use]
 pub fn build_lease_job(
-    snap: &MiningSnapshot,
+    generator: &dyn LeaseGenerator,
+    topology_hash: &[u8],
+    last_proof_block_hash: [u8; 32],
     miner_identity: [u8; 32],
     salt_start: u64,
     salt_count: u64,
     generation: u64,
 ) -> Job {
-    let (algorithm, family, topology_order_digest) = match &snap.family {
-        Some(family) => (
-            GeneratorAlgorithm::FamilyChacha8V1,
-            Some(family.descriptor().clone()),
-            family.topology_order_digest().to_vec(),
-        ),
-        None => (GeneratorAlgorithm::Blake3Chacha8V1, None, vec![]),
-    };
     Job {
         job_id: lease_job_id(salt_start),
         kind: JobKind::IsingGenerate as i32,
@@ -118,15 +170,15 @@ pub fn build_lease_job(
             order_id: vec![],
         }),
         generator: Some(IsingProblemGenerator {
-            algorithm: algorithm as i32,
-            topology_hash: snap.topology_hash.clone(),
-            last_proof_block_hash: snap.last_proof_block_hash.to_vec(),
+            algorithm: generator.algorithm() as i32,
+            topology_hash: topology_hash.to_vec(),
+            last_proof_block_hash: last_proof_block_hash.to_vec(),
             miner_account: miner_identity.to_vec(),
             base_salt: vec![0u8; 32],
             salt_start,
             salt_count,
-            family,
-            topology_order_digest,
+            family: generator.family(),
+            topology_order_digest: generator.topology_order_digest(),
         }),
     }
 }
@@ -350,7 +402,16 @@ mod tests {
 
     #[test]
     fn lease_job_names_a_valid_contiguous_range() {
-        let job = build_lease_job(&snap(), [1u8; 32], 11, 5, 3);
+        let snap = snap();
+        let job = build_lease_job(
+            lease_generator(snap.family.as_ref()),
+            &snap.topology_hash,
+            snap.last_proof_block_hash,
+            [1u8; 32],
+            11,
+            5,
+            3,
+        );
         assert_eq!(job.kind, JobKind::IsingGenerate as i32);
         assert_eq!(job.generation, 3);
         assert!(job.ising.is_none());
@@ -375,7 +436,16 @@ mod tests {
         assert!(id.starts_with(LEASE_JOB_ID_PREFIX));
         assert_ne!(id.len(), 32);
         assert_ne!(lease_job_id(11), lease_job_id(12));
-        assert!(is_lease(&build_lease_job(&snap(), [0; 32], 11, 1, 1)));
+        let snap = snap();
+        assert!(is_lease(&build_lease_job(
+            lease_generator(snap.family.as_ref()),
+            &snap.topology_hash,
+            snap.last_proof_block_hash,
+            [0; 32],
+            11,
+            1,
+            1
+        )));
     }
 
     #[test]

@@ -1,8 +1,8 @@
 //! tonic `MinerService` server: token verify, handshake, job dispatch, results.
 
 use crate::cancel_timing::{CancelLatency, CancelTiming};
-use crate::chain::{ChainClient, ChainError, SubmitAction, SubmitReceipt, MAX_ORDER_SOLUTIONS};
-use crate::types::proof::Proof;
+use crate::chain::{ChainClient, ChainError, MAX_ORDER_SOLUTIONS};
+use crate::types::proof::{Proof, SubmitAction, SubmitReceipt};
 
 use crate::router::{MinerCaps, Router};
 use crate::types::topology::Topology;
@@ -204,7 +204,7 @@ pub struct CoordinatorState {
     /// the per-qblock attempt logs.
     pub qblock_id: Option<u64>,
     /// Logging context retained across pauses and outstanding submit receipts.
-    pub(crate) round_log: Option<Arc<Mutex<crate::runtime::RoundLog>>>,
+    pub(crate) round_log: Option<Arc<Mutex<crate::round::log::RoundLog>>>,
     /// Win-time stash of the most-viable sub-threshold candidates for the
     /// current generation, armed with the decay projection on reseed.
     pub stash: crate::stash::WinStash,
@@ -219,7 +219,7 @@ pub struct CoordinatorState {
     mined_generation: Option<u64>,
     /// Per-miner last-known self-reported liveness (mining/paused + round),
     /// updated from ping-reply `Status` messages.
-    pub miner_liveness: HashMap<String, crate::liveness::MinerLiveness>,
+    pub miner_liveness: crate::liveness::LivenessTable,
     /// Live controller counters. Shared with the dashboard router, so the HTTP
     /// handlers never take this mutex.
     pub metrics: Arc<crate::metrics::CoordinatorMetrics>,
@@ -264,7 +264,8 @@ impl CoordinatorState {
             stash: crate::stash::WinStash::new(WIN_STASH_K),
             timing: crate::timing::TimingTracker::with_defaults(),
             generation: 0,
-            miner_liveness: HashMap::new(),
+            miner_liveness: crate::liveness::LivenessTable::default(),
+
             metrics: Arc::new(crate::metrics::CoordinatorMetrics::new(&[])),
             last_proof_block_hash: String::new(),
             miner_types: HashMap::new(),
@@ -463,6 +464,52 @@ impl Default for CoordinatorState {
     }
 }
 
+/// Fans one message out to every live session. Clones the outbound senders
+/// under the lock, drops it, then awaits the sends, so the fan-out never holds
+/// the state lock across I/O.
+#[async_trait::async_trait]
+impl crate::liveness::MinerBroadcast for Arc<Mutex<CoordinatorState>> {
+    async fn broadcast(&self, msg: coord_msg::Msg) -> usize {
+        let senders: Vec<_> = {
+            let st = self.lock().await;
+            st.outbound.values().cloned().collect()
+        };
+        let n = senders.len();
+        for tx in senders {
+            let _ = tx.send(Ok(coord(msg.clone()))).await;
+        }
+        n
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::supervisor::SessionGate for Arc<Mutex<CoordinatorState>> {
+    async fn expect(&self, miner_id: &str) -> String {
+        let token = gen_session_token();
+        let _ = self
+            .lock()
+            .await
+            .expected_tokens
+            .insert(miner_id.to_owned(), token.clone());
+        token
+    }
+
+    async fn request_shutdown(&self, miner_id: &str, grace_ms: u32) {
+        let tx = self.lock().await.outbound.get(miner_id).cloned();
+        if let Some(tx) = tx {
+            let _ = tx.send(Ok(shutdown_msg(grace_ms))).await;
+        }
+    }
+
+    async fn reclaim(&self, miner_id: &str) {
+        let mut st = self.lock().await;
+        let jobs = st.reclaim_miner(miner_id);
+        for job in jobs {
+            let _ = st.router.route(job);
+        }
+    }
+}
+
 /// gRPC service holding shared state + chain client.
 pub struct CoordinatorService<C: ChainClient + 'static> {
     /// Shared session state.
@@ -544,7 +591,7 @@ pub(crate) struct PowOutcome<'a> {
     /// Round best before this outcome.
     pub current_best_milli: Option<i64>,
     /// Round context captured with the job, before validation or submit can wait.
-    pub round_log: Option<Arc<Mutex<crate::runtime::RoundLog>>>,
+    pub round_log: Option<Arc<Mutex<crate::round::log::RoundLog>>>,
     /// Device time the miner reported.
     pub device_access_time_us: u64,
 }
@@ -1158,14 +1205,10 @@ async fn run_session<C: ChainClient>(
                 if s.abandoned_generation > 0 {
                     st.last_abandoned_generation = s.abandoned_generation;
                 }
-                let prev = st
+                let generation = st.generation;
+                let events = st
                     .miner_liveness
-                    .get(&miner_id)
-                    .cloned()
-                    .unwrap_or_default();
-                let (next, events) =
-                    crate::liveness::evaluate_status(&prev, &s.sampler_stats, st.generation);
-                let _ = st.miner_liveness.insert(miner_id.clone(), next);
+                    .observe(&miner_id, &s.sampler_stats, generation);
                 let qblock = st.qblock_id;
                 drop(st);
                 for ev in &events {
@@ -1541,7 +1584,15 @@ mod tests {
             max_proof_solutions: 32,
             ..Default::default()
         });
-        let job = crate::lease::build_lease_job(&snap, [1; 32], 100, 4, 1);
+        let job = crate::lease::build_lease_job(
+            crate::lease::lease_generator(snap.family.as_ref()),
+            &snap.topology_hash,
+            snap.last_proof_block_hash,
+            [1; 32],
+            100,
+            4,
+            1,
+        );
         st.dispatch_inflight("m", job.clone());
         (st, job)
     }
@@ -1586,7 +1637,7 @@ mod tests {
         let (mut st, job) = lease_state();
         st.qblock_id = Some(64);
         st.target.as_mut().unwrap().max_energy_milli = 1_000_000;
-        st.round_log = Some(Arc::new(Mutex::new(crate::runtime::RoundLog::new(
+        st.round_log = Some(Arc::new(Mutex::new(crate::round::log::RoundLog::new(
             Some(64),
             [1; 32],
         ))));
@@ -1613,7 +1664,7 @@ mod tests {
         for field in ["qblock_id=65", "inclusion_block=693", "target_energy=1000"] {
             assert!(output.contains(field), "{output}");
         }
-        assert!(output.contains("quip_coordinator::runtime"), "{output}");
+        assert!(output.contains("quip_coordinator::round::log"), "{output}");
         assert_eq!(chain.submitted_count(), 1);
     }
 
@@ -1630,8 +1681,14 @@ mod tests {
             &result,
         )
         .unwrap();
-        let old_round = Arc::new(Mutex::new(crate::runtime::RoundLog::new(Some(64), [1; 32])));
-        let next_round = Arc::new(Mutex::new(crate::runtime::RoundLog::new(Some(65), [1; 32])));
+        let old_round = Arc::new(Mutex::new(crate::round::log::RoundLog::new(
+            Some(64),
+            [1; 32],
+        )));
+        let next_round = Arc::new(Mutex::new(crate::round::log::RoundLog::new(
+            Some(65),
+            [1; 32],
+        )));
         st.generation = 2;
         st.qblock_id = Some(65);
         st.round_log = Some(Arc::clone(&next_round));
@@ -1865,7 +1922,15 @@ mod tests {
             .as_slice()
             .try_into()
             .unwrap();
-        let mut job = crate::lease::build_lease_job(&snap, account, 0, 32, legacy.generation);
+        let mut job = crate::lease::build_lease_job(
+            crate::lease::lease_generator(snap.family.as_ref()),
+            &snap.topology_hash,
+            snap.last_proof_block_hash,
+            account,
+            0,
+            32,
+            legacy.generation,
+        );
         job.job_id.clone_from(&legacy.job_id);
         let _ = st.inflight.insert(job.job_id.clone(), job.clone());
         st.lease_topology = Some(Arc::new(
@@ -2026,7 +2091,17 @@ mod tests {
             ..MinerCaps::default()
         };
         st.router.register_miner("m", caps);
-        let job = crate::lease::build_lease_job(&lease_snapshot(), [0; 32], 21, 4, 1);
+        let snap = lease_snapshot();
+        let job = crate::lease::build_lease_job(
+            crate::lease::lease_generator(snap.family.as_ref()),
+            &snap.topology_hash,
+            snap.last_proof_block_hash,
+            [0; 32],
+            21,
+            4,
+            1,
+        );
+
         st.dispatch_inflight("m", job.clone());
         let reclaimed = st.reclaim_miner("m");
         assert_eq!(reclaimed, vec![job.clone()]);

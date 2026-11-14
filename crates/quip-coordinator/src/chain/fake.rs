@@ -2,11 +2,14 @@
 
 use super::sync::{SyncSource, SyncStatus};
 use super::{
-    ChainClient, ChainError, DecayParams, DescriptorOutcome, JobOrder, MinerInfo, MiningSnapshot,
-    NodeDescriptorV2Input, ParticipationOutcome, PendingProof, Proof, RegistrationOutcome,
-    SubmitAction, SubmitReceipt,
+    ChainClient, ChainError, DescriptorOutcome, JobOrder, NodeDescriptorV2Input,
+    ParticipationOutcome, PendingProof, RegistrationOutcome,
 };
 use crate::funding::BalanceSource;
+use crate::types::miner::MinerInfo;
+use crate::types::proof::{Proof, SubmitAction, SubmitReceipt};
+use crate::types::snapshot::{DecayParams, MiningSnapshot};
+
 use async_trait::async_trait;
 use std::sync::Mutex;
 

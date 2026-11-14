@@ -54,9 +54,9 @@ use quip_coordinator::chain::scale_types::{
     encode_register_miner_call, IsingParams, JobMode, MiningSnapshotScale, ResultDelivery,
     RewardResolution,
 };
-use quip_coordinator::chain::submit::SubmitAction;
 use quip_coordinator::chain::{ChainClient, JobOrder, RealChainClient};
 use quip_coordinator::types::hex::{hex_decode, hex_encode};
+use quip_coordinator::types::proof::SubmitAction;
 use quip_coordinator::types::topology_spec::{parse_topology_spec, preset_spec};
 
 use quip_coordinator::validate::MAX_PROOF_SOLUTIONS;

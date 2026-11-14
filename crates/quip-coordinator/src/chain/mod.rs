@@ -39,14 +39,14 @@ pub use seed::{
 pub use snapshot::round_root;
 pub use submit::{
     classify_descriptor, classify_participation, classify_receipt, classify_registration,
-    DescriptorOutcome, ParticipationOutcome, RegistrationOutcome, SubmitAction, SubmitReceipt,
+    DescriptorOutcome, ParticipationOutcome, RegistrationOutcome,
 };
 pub use transport::{BoxStream, RpcTransport};
 pub use transport_jsonrpsee::JsonrpseeTransport;
 pub use watch::{parse_tx_status, TxStatus};
 
 use crate::types::miner::MinerInfo;
-use crate::types::proof::Proof;
+use crate::types::proof::{Proof, SubmitReceipt};
 use crate::types::snapshot::{DecayParams, MiningSnapshot};
 use async_trait::async_trait;
 

@@ -26,7 +26,7 @@ use super::scale_types::{
 };
 use super::submit::{
     classify_descriptor, classify_participation, classify_receipt, classify_registration,
-    DescriptorOutcome, ParticipationOutcome, RegistrationOutcome, SubmitAction, SubmitReceipt,
+    DescriptorOutcome, ParticipationOutcome, RegistrationOutcome,
 };
 use super::transport::RpcTransport;
 use super::transport_jsonrpsee::JsonrpseeTransport;
@@ -34,7 +34,8 @@ use super::watch::{parse_tx_status, TxStatus};
 use super::{ChainClient, ChainError, JobOrder};
 use crate::types::hex::{hex_decode, hex_encode};
 use crate::types::miner::{MinerInfo, MinerKind};
-use crate::types::proof::Proof;
+use crate::types::proof::{Proof, SubmitAction, SubmitReceipt};
+
 use crate::types::snapshot::{
     DecayParams, MiningSnapshot, DEFAULT_BASE_MAX_ENERGY_MILLI, DEFAULT_C_EASY_MILLI,
     DEFAULT_C_HARD_MILLI, DEFAULT_C_KNEE_MILLI, EPOCH_LENGTH_BLOCKS,
