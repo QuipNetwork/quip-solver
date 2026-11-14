@@ -78,6 +78,11 @@ binary = "quip-cpu-sa"
 # would deliver, walks down until their cost exhausts the remaining allotment,
 # and joins when this round clears that bar. The two keys below tune it; the
 # defaults change nothing until the miner has recorded history.
+#
+# The miner postprocesses the QPU reads of twisted-ice dimer salts on the host
+# (quip-solver-dwave v0.3.7-rc2 and later, with the quip-dwave-qpp binary of
+# this image). The postprocess uses up to 4 processors, and never more than
+# the host has less one. Add `postprocess = false` under [dwave] to turn it off.
 # [dwave]
 # binary = "quip-dwave-qa"
 # budget = "30s"           # example allowance for the whole monthly period

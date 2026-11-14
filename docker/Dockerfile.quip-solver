@@ -26,11 +26,22 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 # resolves as a prebuilt wheel from PyPI on both architectures (no Rust, no
 # protoc). Only fetch-miners.sh is needed for the pin; the image and the
 # macOS bundle cannot drift to different dwave releases.
+#
+# The miner postprocesses its QPU reads with quip-dwave-qpp, a Rust binary in
+# crates/qpp of the same repository. The pip install does not build it, so
+# this step builds it from the same tag. Without the binary the miner reports
+# raw reads alone.
 COPY crates/quip-coordinator/tools/fetch-miners.sh /tmp/fetch-miners.sh
 RUN python -m venv /opt/venv \
     && DWAVE_TAG="$(bash /tmp/fetch-miners.sh --print-tag dwave)" \
     && /opt/venv/bin/pip install --no-cache-dir \
-       "quip-solver-dwave @ git+https://gitlab.com/quip.network/quip-solver-dwave.git@${DWAVE_TAG}"
+       "quip-solver-dwave @ git+https://gitlab.com/quip.network/quip-solver-dwave.git@${DWAVE_TAG}" \
+    && git clone --depth 1 --branch "${DWAVE_TAG}" \
+       https://gitlab.com/quip.network/quip-solver-dwave.git /tmp/quip-solver-dwave \
+    && cargo build --manifest-path /tmp/quip-solver-dwave/crates/qpp/Cargo.toml --locked --release \
+    && install -m 0755 /tmp/quip-solver-dwave/crates/qpp/target/release/quip-dwave-qpp \
+       /usr/local/bin/quip-dwave-qpp \
+    && rm -r /tmp/quip-solver-dwave
 
 WORKDIR /src
 
@@ -78,9 +89,10 @@ RUN groupadd --system --gid 1000 quip \
     && useradd --system --uid 1000 --gid 1000 --home /home/quip \
        --create-home --shell /usr/sbin/nologin quip
 
-# Coordinator binary + D-Wave venv from the builder.
+# Coordinator binary, D-Wave venv and D-Wave postprocessor from the builder.
 COPY --from=builder /src/target/release/quip-coordinator /usr/local/bin/quip-coordinator
 COPY --from=builder /opt/venv /opt/venv
+COPY --from=builder /usr/local/bin/quip-dwave-qpp /usr/local/bin/quip-dwave-qpp
 
 # Rebuild the venv's bytecode, validated by source hash rather than mtime.
 # pip wrote .pyc files in the builder, but the COPY above crosses a stage
