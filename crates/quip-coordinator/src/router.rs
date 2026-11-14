@@ -1,6 +1,6 @@
 //! Capability index, per-miner staged queue, credit accounting, cancel, reject.
 
-use crate::topology::Topology;
+use crate::types::topology::Topology;
 use ising_generators::Code;
 use quip_proto::v1::{
     ising_problem, Capabilities, FamilyDescriptor, FamilySupport, GeneratorAlgorithm, IsingProblem,
@@ -248,7 +248,7 @@ impl RoutingTopology {
             n_nodes: u32::try_from(topology.nodes.len()).ok()?,
             n_edges: u32::try_from(pairs.len()).ok()?,
             max_degree: maximum_degree(pairs.iter().copied()),
-            native_hash: crate::topology::native_topology_hash(&topology.nodes, &pairs)?,
+            native_hash: crate::types::topology::native_topology_hash(&topology.nodes, &pairs)?,
             nodes,
             edges: pairs
                 .into_iter()
@@ -827,7 +827,7 @@ fn milli_coefficients(
     let Some(ising_problem::Graph::Edges(edges)) = ising.graph.as_ref() else {
         return None;
     };
-    let (h, j) = crate::producer::problem::problem_milli(ising).ok()?;
+    let (h, j) = crate::types::problem::problem_milli(ising).ok()?;
     (edges.u.len() == edges.v.len() && j.len() == edges.u.len()).then_some((h, j, edges))
 }
 
@@ -869,7 +869,7 @@ fn native_compatible(caps: &MinerCaps, job: &Job, topology: Option<&RoutingTopol
             if native_hash.as_slice() != topology.native_hash.as_slice()
                 || edges.u.len() != edges.v.len()
                 || ising.encoding != quip_proto::v1::CoefficientEncoding::I32 as i32
-                || ising.scale != crate::producer::problem::MILLI_SCALE
+                || ising.scale != crate::types::problem::MILLI_SCALE
                 || !ising.h.len().is_multiple_of(4)
                 || ising.j.len() != edges.u.len().saturating_mul(4)
             {
@@ -975,7 +975,7 @@ mod tests {
     }
 
     fn lease_job(start: u64) -> Job {
-        let snap = crate::chain::snapshot::MiningSnapshot {
+        let snap = crate::types::snapshot::MiningSnapshot {
             head_hash: [0; 32],
             last_proof_block_hash: [7; 32],
             topology_hash: vec![9; 32],
@@ -989,7 +989,7 @@ mod tests {
             min_diversity_milli: 0,
             block_number: 1,
             spec_version: 117,
-            target_proof_blocks: crate::decay::TARGET_PROOF_BLOCKS,
+            target_proof_blocks: crate::types::snapshot::TARGET_PROOF_BLOCKS,
             family: None,
         };
         crate::lease::build_lease_job(&snap, [0; 32], start, 4, 1)
@@ -1042,9 +1042,7 @@ mod tests {
             kind: kind as i32,
             generation,
             deadline_ms: 9_999_999,
-            ising: Some(crate::producer::problem::milli_problem(
-                None, &[0; 2], &[0; 1],
-            )),
+            ising: Some(crate::types::problem::milli_problem(None, &[0; 2], &[0; 1])),
             provenance: Some(Provenance {
                 is_pow: generation != 0,
                 order_id: vec![],
@@ -1325,7 +1323,7 @@ mod tests {
         assert_eq!(r.miners.get("a").map(|q| q.granted_credits), Some(1));
 
         let mut small = make_job(3, JobKind::IsingSample);
-        small.ising = Some(crate::producer::problem::milli_problem(None, &[0], &[]));
+        small.ising = Some(crate::types::problem::milli_problem(None, &[0], &[]));
         assert!(r.stage_on("a", small));
         assert!(r.next_job("a").is_some());
         assert!(!r.update_capabilities("missing", caps_ising()));
@@ -1392,7 +1390,7 @@ mod tests {
         Job {
             job_id: degree.to_le_bytes().to_vec(),
             kind: JobKind::IsingSample as i32,
-            ising: Some(crate::producer::problem::milli_problem(
+            ising: Some(crate::types::problem::milli_problem(
                 Some(ising_problem::Graph::Edges(edges)),
                 &h,
                 &j,
@@ -1407,7 +1405,7 @@ mod tests {
         Job {
             job_id: topology.hash.clone(),
             kind: JobKind::IsingSample as i32,
-            ising: Some(crate::producer::problem::milli_problem(
+            ising: Some(crate::types::problem::milli_problem(
                 Some(ising_problem::Graph::TopologyHash(topology.hash.clone())),
                 &h,
                 &j,
@@ -1566,7 +1564,7 @@ mod tests {
         );
         let duplicate = Job {
             kind: JobKind::IsingSample as i32,
-            ising: Some(crate::producer::problem::milli_problem(
+            ising: Some(crate::types::problem::milli_problem(
                 Some(ising_problem::Graph::Edges(quip_proto::v1::EdgeList {
                     u: vec![0, 0],
                     v: vec![1, 1],
@@ -1654,7 +1652,7 @@ mod tests {
 
     fn native_caps(topology: &Topology) -> MinerCaps {
         MinerCaps {
-            native_topology_hash: crate::topology::native_topology_hash(
+            native_topology_hash: crate::types::topology::native_topology_hash(
                 &topology.nodes,
                 &topology.edge_pairs(),
             )
@@ -1667,7 +1665,7 @@ mod tests {
         let (u, v) = edges.iter().copied().unzip();
         Job {
             kind: JobKind::IsingSample as i32,
-            ising: Some(crate::producer::problem::milli_problem(
+            ising: Some(crate::types::problem::milli_problem(
                 Some(ising_problem::Graph::Edges(quip_proto::v1::EdgeList {
                     u,
                     v,

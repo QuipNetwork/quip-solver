@@ -8,14 +8,12 @@ pub mod lease_source;
 pub mod list_source;
 pub mod random_source;
 pub mod report;
-pub mod topology_spec;
 
 pub use harness::{run_drive, DriveManyParams, DriveManyReport};
 pub use lease_source::LeaseSource;
 pub use list_source::{ListSource, ListSourceError};
 pub use random_source::RandomSource;
 pub use report::{aggregate, print_table, write_jsonl, Aggregate, JobRow};
-pub use topology_spec::{parse_topology_spec, TopologySpec, TopologySpecError};
 
 use quip_proto::v1::Job;
 
@@ -68,7 +66,7 @@ mod tests {
             generation: n,
             deadline_ms: 9_999_999,
             ising: Some({
-                let mut problem = crate::producer::problem::milli_problem(None, &[0; 1], &[]);
+                let mut problem = crate::types::problem::milli_problem(None, &[0; 1], &[]);
                 problem.num_reads = 0;
                 problem
             }),

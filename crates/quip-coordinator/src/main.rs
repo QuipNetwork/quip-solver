@@ -2,25 +2,28 @@
 
 use clap::{Parser, Subcommand, ValueEnum};
 use quip_coordinator::chain::extrinsic::{
-    hex_decode, hex_encode, load_hybrid_pair, miner_identity_bytes, signer_account_bytes,
+    load_hybrid_pair, miner_identity_bytes, signer_account_bytes,
 };
 use quip_coordinator::chain::scale_types::{DifficultyConfig, EnergyBandScale};
 use quip_coordinator::chain::{
     apply_family, dimer_1200, plan_family, seed_chain, twisted_dimer, twisted_dimer_params,
-    ExistingDefault, FamilyOutcome, FamilyPlan, MinerKind, RealChainClient, SeedParams,
-    SeedTopology, DEFAULT_ENERGY_BAND, DEFAULT_SEED_DIFFICULTY,
+    ExistingDefault, FamilyOutcome, FamilyPlan, RealChainClient, SeedParams, SeedTopology,
+    DEFAULT_ENERGY_BAND, DEFAULT_SEED_DIFFICULTY,
 };
 use quip_coordinator::config::{parse_config, CoordinatorConfig, LaunchEntry};
 use quip_coordinator::drive::{
-    aggregate, drain_all, parse_topology_spec, print_table, run_drive, write_jsonl,
-    DriveManyParams, LeaseSource, ListSource, RandomSource, TopologySpec,
+    aggregate, drain_all, print_table, run_drive, write_jsonl, DriveManyParams, LeaseSource,
+    ListSource, RandomSource,
 };
 use quip_coordinator::logging::LogLevel;
-use quip_coordinator::presets::preset_spec;
 use quip_coordinator::runtime::{run_runtime, RuntimeParams};
 use quip_coordinator::session::{gen_session_token, CoordinatorState};
 use quip_coordinator::supervisor::BackoffPolicy;
-use quip_coordinator::topology::Topology;
+use quip_coordinator::types::hex::{hex_decode, hex_encode};
+use quip_coordinator::types::miner::MinerKind;
+use quip_coordinator::types::topology::Topology;
+use quip_coordinator::types::topology_spec::{parse_topology_spec, preset_spec, TopologySpec};
+
 use quip_proto::v1::{Configure, Job};
 use quip_protocol::session::{ExitCode, PROTOCOL_VERSION};
 use sp_core::crypto::Ss58Codec;
@@ -963,8 +966,8 @@ fn build_jobs(
             if let (Some(id), Some(path)) = (&args.family_id, &args.family_params) {
                 let params = std::fs::read(path)
                     .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-                let family = quip_coordinator::lease::ChallengeFamily::admit(
-                    quip_coordinator::lease::FAMILY_CONTRACTS,
+                let family = quip_coordinator::types::family::ChallengeFamily::admit(
+                    quip_coordinator::types::family::FAMILY_CONTRACTS,
                     id,
                     args.family_revision,
                     params,
@@ -1009,7 +1012,8 @@ async fn resolve_topology(args: &DriveArgs) -> Result<Option<TopologySpec>, Stri
             .await
             .map_err(|error| format!("fetch topology from {url}: {error}"))?
             .ok_or_else(|| format!("fetch topology from {url}: chain has no default topology"))?;
-        return TopologySpec::from_chain_meta(hash, meta)
+        return meta
+            .into_topology_spec(hash)
             .map(Some)
             .map_err(|error| format!("topology from {url}: {error}"));
     }
@@ -1297,18 +1301,16 @@ mod tests {
             .try_into()
             .map_err(|_| "topology hash is not 32 bytes".to_string())?;
         let edges = spec.topology.edge_pairs();
-        TopologySpec::from_chain_meta(
-            hash,
-            TopologyMetaScale {
-                nodes: spec.topology.nodes,
-                edges,
-                allowed_h_values: AllowedValueSpec::Set(spec.allowed_h_milli),
-                allowed_j_values: AllowedValueSpec::Set(spec.allowed_j_milli),
-                allowed_spin_values: AllowedValueSpec::Set(spec.allowed_spin_milli),
-                family: None,
-                registered_at: 99,
-            },
-        )
+        TopologyMetaScale {
+            nodes: spec.topology.nodes,
+            edges,
+            allowed_h_values: AllowedValueSpec::Set(spec.allowed_h_milli),
+            allowed_j_values: AllowedValueSpec::Set(spec.allowed_j_milli),
+            allowed_spin_values: AllowedValueSpec::Set(spec.allowed_spin_milli),
+            family: None,
+            registered_at: 99,
+        }
+        .into_topology_spec(hash)
     }
 
     fn assert_chain_topology(topology: &Topology, expected_hash: &[u8]) {
@@ -1321,7 +1323,7 @@ mod tests {
 
     #[test]
     fn drive_resolved_chain_topology_drives_random_jobs_and_overrides() {
-        use quip_coordinator::producer::problem::problem_milli;
+        use quip_coordinator::types::problem::problem_milli;
         let spec = resolved_chain_fixture().expect("valid chain fixture");
         let expected_hash = spec.topology.hash.clone();
         let mut args = drive_args(DriveSourceKind::Random);
@@ -1355,7 +1357,7 @@ mod tests {
 
     #[test]
     fn drive_resolved_chain_topology_drives_leases_and_nonce_replay() {
-        use quip_coordinator::producer::problem::problem_milli;
+        use quip_coordinator::types::problem::problem_milli;
         let spec = resolved_chain_fixture().expect("valid chain fixture");
         let hash = spec.topology.hash.clone();
         let mut lease_args = drive_args(DriveSourceKind::Lease);

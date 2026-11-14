@@ -1,11 +1,11 @@
 //! tonic `MinerService` server: token verify, handshake, job dispatch, results.
 
 use crate::cancel_timing::{CancelLatency, CancelTiming};
-use crate::chain::{
-    ChainClient, ChainError, Proof, SubmitAction, SubmitReceipt, MAX_ORDER_SOLUTIONS,
-};
+use crate::chain::{ChainClient, ChainError, SubmitAction, SubmitReceipt, MAX_ORDER_SOLUTIONS};
+use crate::types::proof::Proof;
+
 use crate::router::{MinerCaps, Router};
-use crate::topology::Topology;
+use crate::types::topology::Topology;
 use crate::validate::{beats_current, validate_result, ResolvedTopo};
 use quip_proto::v1::miner_service_server::{MinerService, MinerServiceServer};
 use quip_proto::v1::{
@@ -278,7 +278,7 @@ impl CoordinatorState {
     pub fn set_topology(&mut self, topology: Option<Topology>) {
         self.router.set_topology(topology.as_ref());
         self.lease_topology = topology.as_ref().and_then(|t| {
-            crate::lease::LeaseTopology::from_topology(t, crate::lease::FAMILY_CONTRACTS)
+            crate::lease::LeaseTopology::from_topology(t, crate::types::family::FAMILY_CONTRACTS)
                 .map_err(|e| tracing::error!(error = %e, "topology cannot back lease verification"))
                 .ok()
                 .map(Arc::new)
@@ -605,7 +605,7 @@ pub(crate) async fn settle_pow_result<C: ChainClient>(
             salt: salt.map_or_else(Vec::new, |s| s.to_vec()),
             device_access_time_us,
         };
-        let job_hex = crate::chain::extrinsic::hex_encode(job_id);
+        let job_hex = crate::types::hex::hex_encode(job_id);
         if let Some(log) = &round_log {
             log.lock().await.submission_started();
         }
@@ -743,12 +743,12 @@ pub(crate) async fn settle_pow_result<C: ChainClient>(
                 .as_ref()
                 .and_then(|r| r.as_ref().ok())
                 .and_then(|r| r.extrinsic_hash)
-                .map(|h| crate::chain::extrinsic::hex_encode(&h)),
+                .map(|h| crate::types::hex::hex_encode(&h)),
             chain_block_hash: receipt
                 .as_ref()
                 .and_then(|r| r.as_ref().ok())
                 .and_then(|r| r.block_hash)
-                .map(|h| crate::chain::extrinsic::hex_encode(&h)),
+                .map(|h| crate::types::hex::hex_encode(&h)),
             chain_block_number: receipt
                 .as_ref()
                 .and_then(|r| r.as_ref().ok())
@@ -1284,7 +1284,7 @@ async fn submit_mempool_result<C: ChainClient>(
     solutions: &[quip_proto::v1::Solution],
     device_access_time_us: u64,
 ) {
-    let order = crate::chain::extrinsic::hex_encode(&job.job_id);
+    let order = crate::types::hex::hex_encode(&job.job_id);
     let gates = state.lock().await.mempool_orders.get(&job.job_id).copied();
     let (Some(ising), Some(gates)) = (job.ising.as_ref(), gates) else {
         tracing::warn!(order = %order, "mempool result has no problem or no staged order; dropping");
@@ -1400,7 +1400,7 @@ pub async fn serve_one_session_expecting(
     let state = Arc::new(Mutex::new(st));
     // Chain is unused for handshake-only; use a no-op fake with empty snapshot.
     let chain = Arc::new(crate::chain::FakeChain::new(
-        crate::chain::MiningSnapshot {
+        crate::types::snapshot::MiningSnapshot {
             head_hash: [0u8; 32],
             last_proof_block_hash: [0u8; 32],
             topology_hash: vec![0u8; 32],
@@ -1414,7 +1414,7 @@ pub async fn serve_one_session_expecting(
             min_diversity_milli: 0,
             block_number: 0,
             spec_version: 117,
-            target_proof_blocks: crate::decay::TARGET_PROOF_BLOCKS,
+            target_proof_blocks: crate::types::snapshot::TARGET_PROOF_BLOCKS,
             family: None,
         },
         None,
@@ -1495,15 +1495,17 @@ mod tests {
     };
     use quip_protocol::lease::{LeaseSpec, TopologyView};
 
-    fn lease_snapshot() -> crate::chain::snapshot::MiningSnapshot {
+    fn lease_snapshot() -> crate::types::snapshot::MiningSnapshot {
         let nodes = vec![0, 1, 2, 3];
         let edges = vec![(0, 1), (1, 2), (2, 3), (0, 3)];
         let (h, j, spin) = (vec![-1000, 0, 1000], vec![-1000, 1000], vec![-1000, 1000]);
-        crate::chain::snapshot::MiningSnapshot {
+        crate::types::snapshot::MiningSnapshot {
             head_hash: [0; 32],
             last_proof_block_hash: [7; 32],
-            topology_hash: crate::topology::topology_hash_sets(&nodes, &edges, &h, &j, &spin)
-                .to_vec(),
+            topology_hash: crate::types::topology::topology_hash_sets(
+                &nodes, &edges, &h, &j, &spin,
+            )
+            .to_vec(),
             nodes,
             edges,
             allowed_h_milli: h,
@@ -1514,7 +1516,7 @@ mod tests {
             min_diversity_milli: 0,
             block_number: 42,
             spec_version: 117,
-            target_proof_blocks: crate::decay::TARGET_PROOF_BLOCKS,
+            target_proof_blocks: crate::types::snapshot::TARGET_PROOF_BLOCKS,
             family: None,
         }
     }
@@ -1723,7 +1725,7 @@ mod tests {
                 }),
                 epoch_length: 10,
                 algorithm: crate::decay::DecayAlgorithm::Stepwise,
-                target_proof_blocks: crate::decay::TARGET_PROOF_BLOCKS,
+                target_proof_blocks: crate::types::snapshot::TARGET_PROOF_BLOCKS,
             }),
             0,
         );
@@ -1846,7 +1848,7 @@ mod tests {
             &snap.allowed_spin_milli,
         );
         snap.family = Some(
-            crate::lease::ChallengeFamily::admit(
+            crate::types::family::ChallengeFamily::admit(
                 &FAMILY_TABLE,
                 "vectors/uniform-field",
                 1,
@@ -2046,9 +2048,7 @@ mod tests {
             kind: JobKind::IsingSample as i32,
             generation: 1,
             deadline_ms: 0,
-            ising: Some(crate::producer::problem::milli_problem(
-                None, &[0; 2], &[0; 1],
-            )),
+            ising: Some(crate::types::problem::milli_problem(None, &[0; 2], &[0; 1])),
             provenance: Some(Provenance {
                 is_pow: true,
                 order_id: vec![],
@@ -2286,7 +2286,7 @@ mod tests {
             &[1000],
             &[-1000, 1000],
         );
-        let problem = crate::producer::problem::milli_problem(
+        let problem = crate::types::problem::milli_problem(
             Some(quip_proto::v1::ising_problem::Graph::TopologyHash(
                 topology.hash.clone(),
             )),

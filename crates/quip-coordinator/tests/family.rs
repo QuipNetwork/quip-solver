@@ -4,8 +4,8 @@
 mod dispatch {
     //! CO-1: family capability matching and the operator solver pin.
 
-    use quip_coordinator::producer::problem::milli_problem;
     use quip_coordinator::router::{Ineligible, MinerCaps, Router};
+    use quip_coordinator::types::problem::milli_problem;
     use quip_proto::v1::{
         ising_problem, EdgeList, FamilyBinding, FamilyDescriptor, FamilySupport,
         GeneratorAlgorithm, IsingProblemGenerator, Job, JobKind, RejectReason,
@@ -171,7 +171,7 @@ mod dispatch {
 
     #[test]
     fn family_lease_ignores_base_topology_size_limits() {
-        let topology = quip_coordinator::topology::Topology::from_nodes_edges(
+        let topology = quip_coordinator::types::topology::Topology::from_nodes_edges(
             vec![0, 1, 2],
             vec![(0, 1), (1, 2)],
             &[0],
@@ -356,11 +356,13 @@ mod drive {
 
     use ising_generators::descriptor::{params_digest, Contract};
     use ising_generators::Code;
-    use quip_coordinator::chain::snapshot::head_state_key;
+    use quip_coordinator::drive::drain_all;
     use quip_coordinator::drive::lease_source::LeaseSource;
-    use quip_coordinator::drive::{drain_all, parse_topology_spec, TopologySpec};
-    use quip_coordinator::lease::{build_lease_job, ChallengeFamily};
-    use quip_coordinator::topology::Topology;
+    use quip_coordinator::lease::build_lease_job;
+    use quip_coordinator::types::family::ChallengeFamily;
+    use quip_coordinator::types::snapshot::head_state_key;
+    use quip_coordinator::types::topology::Topology;
+    use quip_coordinator::types::topology_spec::{parse_topology_spec, TopologySpec};
     use quip_proto::v1::{GeneratorAlgorithm, IsingProblemGenerator, Job};
     use quip_solver_conformance::families::layered::{P_F5000, P_L2_F0, P_SPEC, UNIFORM_V1};
 
@@ -368,7 +370,8 @@ mod drive {
     const FAMILY: &str = "vectors/uniform-field";
 
     fn spec() -> TopologySpec {
-        parse_topology_spec(quip_coordinator::presets::preset_spec("smoke").unwrap()).unwrap()
+        parse_topology_spec(quip_coordinator::types::topology_spec::preset_spec("smoke").unwrap())
+            .unwrap()
     }
 
     fn admit(params: &[u8], topology: &Topology) -> Result<ChallengeFamily, Code> {
@@ -449,13 +452,13 @@ mod drive {
             table.iter().map(|c| (c.family_id, c.revision)).collect()
         };
         assert_eq!(
-            ids(quip_coordinator::lease::FAMILY_CONTRACTS),
+            ids(quip_coordinator::types::family::FAMILY_CONTRACTS),
             ids(ising_generators::registry::CONTRACTS)
         );
         let spec = spec();
         assert_eq!(
             ChallengeFamily::admit(
-                quip_coordinator::lease::FAMILY_CONTRACTS,
+                quip_coordinator::types::family::FAMILY_CONTRACTS,
                 FAMILY,
                 1,
                 P_SPEC.to_vec(),
@@ -521,11 +524,10 @@ mod verification {
     use ising_generators::polariton::POLARITON_V1;
     use ising_generators::random::derive_nonce;
     use ising_generators::registry::CONTRACTS as REGISTRY;
-    use quip_coordinator::drive::TopologySpec;
-    use quip_coordinator::lease::{
-        build_lease_job, verify_and_select, ChallengeFamily, LeaseTopology,
-    };
-    use quip_coordinator::topology::Topology;
+    use quip_coordinator::lease::{build_lease_job, verify_and_select, LeaseTopology};
+    use quip_coordinator::types::family::ChallengeFamily;
+    use quip_coordinator::types::topology::Topology;
+    use quip_coordinator::types::topology_spec::TopologySpec;
     use quip_proto::v1::{IsingProblemGenerator, Result as JobResult, SetTarget, Solution};
     use quip_protocol::lease::LeaseSpec;
     use quip_protocol::scoring::energy_from_milli;
@@ -930,9 +932,10 @@ mod verification {
         use quip_coordinator::chain::proof_encode::{
             build_quantum_proof, ProofBuildContext, WitnessFormat,
         };
-        use quip_coordinator::chain::submit::Proof;
-        use quip_coordinator::lease::{ChallengeFamily, FAMILY_CONTRACTS};
-        use quip_coordinator::topology::Topology;
+        use quip_coordinator::types::family::{ChallengeFamily, FAMILY_CONTRACTS};
+        use quip_coordinator::types::proof::Proof;
+
+        use quip_coordinator::types::topology::Topology;
 
         let (lease, verifier, result) = polariton_report(true);
         let (_, validated) = verify_and_select(&lease, &verifier, &open_target(), &result).unwrap();

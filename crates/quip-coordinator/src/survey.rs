@@ -22,9 +22,9 @@
 //! The survey is best effort. Every failure degrades to `None` or to
 //! `"unknown"`, and nothing here can stop the node from filing a descriptor.
 
-use crate::chain::scale_types::{
-    CpuInfoScale, GpuInfoScale, OsInfoScale, RuntimeInfoScale, SystemInfoScale, MAX_ARCH_BYTES,
-    MAX_CPU_BRAND_BYTES, MAX_DOCKER_IMAGE_BYTES, MAX_GPUS, MAX_GPU_NAME_BYTES,
+use crate::types::host::{
+    CpuInfoScale, GpuInfoScale, HostSurvey, OsInfoScale, RuntimeInfoScale, SystemInfoScale,
+    MAX_ARCH_BYTES, MAX_CPU_BRAND_BYTES, MAX_DOCKER_IMAGE_BYTES, MAX_GPUS, MAX_GPU_NAME_BYTES,
     MAX_GPU_VENDOR_BYTES, MAX_OS_STRING_BYTES, MAX_RUNTIME_VERSION_BYTES,
 };
 use std::collections::BTreeSet;
@@ -93,15 +93,6 @@ pub struct RawSurvey {
     pub in_docker: bool,
     /// Container image, when the operator set one.
     pub docker_image: Option<String>,
-}
-
-/// Both descriptor blocks the survey produces.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HostSurvey {
-    /// Hardware block.
-    pub system: SystemInfoScale,
-    /// Node-software block.
-    pub runtime: RuntimeInfoScale,
 }
 
 /// Survey the host, returning a payload already inside every pallet bound.
@@ -767,7 +758,7 @@ mod tests {
     use std::time::Duration;
 
     /// Sanitize and keep the hardware block. Most tests assert on that half.
-    fn sys(raw: RawSurvey) -> crate::chain::scale_types::SystemInfoScale {
+    fn sys(raw: RawSurvey) -> crate::types::host::SystemInfoScale {
         sanitize(raw).system
     }
 
@@ -1047,7 +1038,7 @@ mod tests {
 
     #[test]
     fn every_bound_condition_is_enforced() {
-        use crate::chain::scale_types::{
+        use crate::types::host::{
             GpuInfoScale, SystemInfoScale, MAX_ARCH_BYTES, MAX_CPU_BRAND_BYTES, MAX_GPUS,
             MAX_GPU_NAME_BYTES, MAX_GPU_VENDOR_BYTES, MAX_OS_STRING_BYTES,
         };

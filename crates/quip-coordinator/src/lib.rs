@@ -15,7 +15,6 @@ pub mod liveness;
 pub mod logging;
 pub mod metrics;
 pub mod pool_watch;
-pub mod presets;
 /// `PoW` and mempool job construction helpers.
 pub mod producer;
 pub mod readiness;
@@ -27,5 +26,5 @@ pub mod stash;
 pub mod supervisor;
 pub mod survey;
 pub mod timing;
-pub mod topology;
+pub mod types;
 pub mod validate;

@@ -1,7 +1,8 @@
 //! Salt leases over a topology spec for offline lease benchmarks.
 
-use crate::chain::MiningSnapshot;
-use crate::drive::{JobSource, TopologySpec};
+use crate::drive::JobSource;
+use crate::types::snapshot::MiningSnapshot;
+use crate::types::topology_spec::TopologySpec;
 use quip_proto::v1::Job;
 
 /// Yields leases that together name counters `0..salts`, each at most
@@ -18,7 +19,7 @@ pub struct LeaseSource {
 impl LeaseSource {
     /// Bind every lease from this source to `family`.
     #[must_use]
-    pub fn with_family(mut self, family: crate::lease::ChallengeFamily) -> Self {
+    pub fn with_family(mut self, family: crate::types::family::ChallengeFamily) -> Self {
         self.snapshot.family = Some(family);
         self
     }
@@ -68,10 +69,11 @@ impl JobSource for LeaseSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drive::{drain_all, parse_topology_spec};
+    use crate::drive::drain_all;
+    use crate::types::topology_spec::parse_topology_spec;
 
     fn spec() -> TopologySpec {
-        parse_topology_spec(crate::presets::preset_spec("smoke").unwrap()).unwrap()
+        parse_topology_spec(crate::types::topology_spec::preset_spec("smoke").unwrap()).unwrap()
     }
 
     #[test]

@@ -226,7 +226,7 @@ fn miners_json(miners: &[crate::metrics::MinerEntry]) -> Value {
 /// "large by design" clause does not apply to them; they stay guarded numbers
 /// and agree with `controller.proofs_submitted` in [`counters_json`], which
 /// serializes the same field name as a number.
-fn miner_info_json(info: &crate::chain::MinerInfo) -> Value {
+fn miner_info_json(info: &crate::types::miner::MinerInfo) -> Value {
     json!({
         "registered_at": safe_u64("registered_at", 0, info.registered_at),
         "deposit": wire_u128(info.deposit),
@@ -1128,7 +1128,7 @@ mod tests {
             head_number: 10_249,
             is_mining: true,
             miner_registered: true,
-            miner_info: Some(crate::chain::MinerInfo {
+            miner_info: Some(crate::types::miner::MinerInfo {
                 registered_at: 8_100,
                 deposit: 1_000_000_000_000,
                 proofs_submitted: 412,

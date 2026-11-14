@@ -1,8 +1,9 @@
 //! Deterministic golden-draw problems over a topology spec.
 
-use crate::chain::MiningSnapshot;
-use crate::drive::{JobSource, TopologySpec};
+use crate::drive::JobSource;
 use crate::producer::derive_pow_job;
+use crate::types::snapshot::MiningSnapshot;
+use crate::types::topology_spec::TopologySpec;
 use quip_proto::v1::Job;
 
 /// Draws `count` problems over a topology via the golden `draw_ising_milli`
@@ -75,7 +76,8 @@ impl JobSource for RandomSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drive::{drain_all, parse_topology_spec};
+    use crate::drive::drain_all;
+    use crate::types::topology_spec::{parse_topology_spec, preset_spec};
 
     const SPEC: &str = r#"{
         "nodes": [0, 1, 2, 3],
@@ -94,8 +96,8 @@ mod tests {
         for (ja, jb) in jobs_a.iter().zip(&jobs_b) {
             assert_eq!(ja.job_id, jb.job_id);
             assert_eq!(
-                crate::producer::problem::problem_milli(ja.ising.as_ref().unwrap()).unwrap(),
-                crate::producer::problem::problem_milli(jb.ising.as_ref().unwrap()).unwrap()
+                crate::types::problem::problem_milli(ja.ising.as_ref().unwrap()).unwrap(),
+                crate::types::problem::problem_milli(jb.ising.as_ref().unwrap()).unwrap()
             );
         }
         let jobs_c = draw(8);
@@ -113,9 +115,33 @@ mod tests {
         assert_eq!(jobs.len(), 5);
         for job in jobs {
             let ising = job.ising.unwrap();
-            let (h, j) = crate::producer::problem::problem_milli(&ising).unwrap();
+            let (h, j) = crate::types::problem::problem_milli(&ising).unwrap();
             assert!(h.iter().all(|v| [-1000, 0, 1000].contains(v)));
             assert!(j.iter().all(|v| [-1000, 1000].contains(v)));
+        }
+    }
+
+    #[test]
+    fn aglais_random_jobs_have_zero_fields_and_the_chain_edge_count() {
+        use crate::types::problem::problem_milli;
+
+        let spec = parse_topology_spec(preset_spec("aglais").expect("Aglais preset resolves"))
+            .expect("Aglais preset parses");
+        let mut source = RandomSource::new(&spec, [0; 32], 7, 2, 0);
+        let jobs = drain_all(&mut source);
+        assert_eq!(jobs.len(), 2);
+        for job in jobs {
+            let problem = job.ising.as_ref().expect("job has an Ising problem");
+            let (h, j) = problem_milli(problem).expect("problem uses milli coefficients");
+            assert_eq!(h, vec![0; 4_577]);
+            assert_eq!(j.len(), 41_514);
+            assert!(j.iter().all(|value| [-1000, 1000].contains(value)));
+            assert_eq!(
+                problem.graph,
+                Some(quip_proto::v1::ising_problem::Graph::TopologyHash(
+                    spec.topology.hash.clone()
+                ))
+            );
         }
     }
 }

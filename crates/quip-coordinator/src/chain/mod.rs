@@ -30,25 +30,24 @@ pub use orders::{job_orders_prefix, order_id_from_key};
 pub use outcome::{SubmitLedger, QBLOCK_RETENTION};
 pub use pool::{decode_pending_proof, PendingProof};
 pub use real::RealChainClient;
-pub use scale_types::{
-    MinerInfoScale, MinerKind, MinerSpecScale, NodeDescriptorV2Input, NodeLogLevel, SolverType,
-    MAX_ORDER_SOLUTIONS,
-};
+pub use scale_types::{MinerInfoScale, NodeDescriptorV2Input, SolverType, MAX_ORDER_SOLUTIONS};
 pub use seed::{
     apply_family, dimer_1200, family_root_calls, plan_family, register_topology_call, seed_chain,
     ss58, twisted_dimer, twisted_dimer_params, ExistingDefault, FamilyOutcome, FamilyPlan,
     SeedParams, SeedTopology, DEFAULT_ENERGY_BAND, DEFAULT_SEED_DIFFICULTY, MIN_SEED_SPEC_VERSION,
 };
-pub use snapshot::{head_state_key, round_root, DecayParams, MiningSnapshot};
+pub use snapshot::round_root;
 pub use submit::{
     classify_descriptor, classify_participation, classify_receipt, classify_registration,
-    DescriptorOutcome, ParticipationOutcome, Proof, RegistrationOutcome, SubmitAction,
-    SubmitReceipt,
+    DescriptorOutcome, ParticipationOutcome, RegistrationOutcome, SubmitAction, SubmitReceipt,
 };
 pub use transport::{BoxStream, RpcTransport};
 pub use transport_jsonrpsee::JsonrpseeTransport;
 pub use watch::{parse_tx_status, TxStatus};
 
+use crate::types::miner::MinerInfo;
+use crate::types::proof::Proof;
+use crate::types::snapshot::{DecayParams, MiningSnapshot};
 use async_trait::async_trait;
 
 /// Errors from chain I/O (RPC, decode, submit).
@@ -73,24 +72,6 @@ impl std::fmt::Display for ChainError {
 }
 
 impl std::error::Error for ChainError {}
-
-/// `QuantumPow.Miners[account]`, widened for the dashboard wire shape.
-///
-/// The pallet stores `registered_at` and both proof counts as `u32`. They widen
-/// to `u64` here so the dashboard serializer has one integer type to guard.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MinerInfo {
-    /// Block the account registered at.
-    pub registered_at: u64,
-    /// Reserved miner deposit, in plancks.
-    pub deposit: u128,
-    /// Lifetime accepted proofs. Also the `pow_sequence` a submission reports.
-    pub proofs_submitted: u64,
-    /// Lifetime winning proofs.
-    pub proofs_won: u64,
-    /// Lifetime rewards, in plancks.
-    pub rewards_earned: u128,
-}
 
 /// Async chain seam: snapshot fetch, mempool orders, extrinsic submit.
 #[async_trait]

@@ -7,7 +7,9 @@
 //! this alone serves sessions and supervises miners but stages no work yet.
 
 use crate::chain::sync::{wait_until_synced, SyncOutcome, SyncSource};
-use crate::chain::{ChainClient, JobOrder, MiningSnapshot};
+use crate::chain::{ChainClient, JobOrder};
+use crate::types::snapshot::MiningSnapshot;
+
 use crate::config::{DescriptorParams, LaunchEntry};
 use crate::decay::{DecayAlgorithm, DecayModel, EnergyCurve};
 use crate::funding::{ensure_funded, BalanceSource, Faucet};
@@ -21,7 +23,7 @@ use crate::readiness::{
 use crate::round::{RoundEvent, RoundState};
 use crate::session::{coord, CoordinatorService, CoordinatorState};
 use crate::supervisor::{supervise_miner, BackoffPolicy};
-use crate::topology::Topology;
+use crate::types::topology::Topology;
 use crate::validate::QualityGates;
 use quip_proto::v1::miner_service_server::MinerServiceServer;
 use quip_proto::v1::{coord_msg, SetTarget};
@@ -211,7 +213,7 @@ impl RoundLog {
             qblock_id = %crate::logging::display_option(self.qblock_id),
             block,
             proof_owner = %(if proof.account == self.our_account { "ours" } else { "another_miner" }),
-            signer = %crate::chain::extrinsic::hex_encode(&proof.account),
+            signer = %crate::types::hex::hex_encode(&proof.account),
             proof_energy = crate::logging::energy_units(proof.best_energy_milli),
             target_energy = crate::logging::energy_units(target_milli),
             our_best_energy_this_round = %crate::logging::display_energy(self.our_best_milli),
@@ -293,7 +295,7 @@ impl RoundLog {
         self.reported = true;
         tracing::info!(
             qblock_id = %crate::logging::display_option(self.qblock_id),
-            winner = %crate::chain::extrinsic::hex_encode(&proof.account),
+            winner = %crate::types::hex::hex_encode(&proof.account),
             proof_energy = crate::logging::energy_units(proof.best_energy_milli),
             target_energy = crate::logging::energy_units(target_milli),
             our_best_energy_this_round = %crate::logging::display_energy(self.our_best_milli),
@@ -743,7 +745,7 @@ async fn stage_mempool_orders<C: ChainClient>(
         let _ = st
             .mempool_orders
             .insert(order.order_id.clone(), order_gates(&order));
-        let id = crate::chain::extrinsic::hex_encode(&order.order_id);
+        let id = crate::types::hex::hex_encode(&order.order_id);
         let Some(job) = job_order_to_job(&order) else {
             tracing::warn!(
                 order = %id,
@@ -895,7 +897,7 @@ pub async fn feeder_loop<C>(
                 params.metrics.chain().miner_info
             };
             params.metrics.set_chain(crate::metrics::ChainView {
-                head_hash: crate::chain::extrinsic::hex_encode(&snap.head_hash),
+                head_hash: crate::types::hex::hex_encode(&snap.head_hash),
                 head_number: snap.block_number,
                 is_mining: round != Some(RoundState::AwaitingQBlock),
                 miner_registered: miner_info.is_some(),
@@ -1060,7 +1062,7 @@ pub async fn feeder_loop<C>(
                     target_proof_blocks = snap.target_proof_blocks,
                     cancelled_jobs,
                     miners_told,
-                    topology = %crate::chain::extrinsic::hex_encode(&snap.topology_hash),
+                    topology = %crate::types::hex::hex_encode(&snap.topology_hash),
                     nodes = snap.nodes.len(),
                     edges = snap.edges.len(),
                     max_energy = crate::logging::energy_units(target.max_energy_milli),
@@ -1078,7 +1080,7 @@ pub async fn feeder_loop<C>(
                     st.qblock_id = qblock_id;
                     st.round_log.clone_from(&round_log);
                     st.last_proof_block_hash =
-                        crate::chain::extrinsic::hex_encode(&snap.last_proof_block_hash);
+                        crate::types::hex::hex_encode(&snap.last_proof_block_hash);
                     st.stash.reset(generation, model, last_proof_block);
                 }
                 // Requirements before any new-generation Job: Topology and
@@ -1431,7 +1433,7 @@ pub async fn feeder_loop<C>(
                 let check = crate::validate::check_proof_gates(&cand.solutions, &live_gates);
                 if !check.accepted {
                     tracing::debug!(
-                        job = %crate::chain::extrinsic::hex_encode(&cand.job_id),
+                        job = %crate::types::hex::hex_encode(&cand.job_id),
                         n_valid = check.n_valid,
                         diversity_milli = check.diversity_milli,
                         min_solutions = live_gates.min_solutions,
@@ -1446,7 +1448,7 @@ pub async fn feeder_loop<C>(
             if let Some(cand) = due {
                 use crate::chain::SubmitAction;
 
-                let proof = crate::chain::Proof {
+                let proof = crate::types::proof::Proof {
                     job_id: cand.job_id.clone(),
                     best_energy_milli: cand.best_energy_milli,
                     diversity_milli: cand.diversity_milli,
@@ -1458,7 +1460,7 @@ pub async fn feeder_loop<C>(
                     salt: cand.salt.map(|s| s.to_vec()).unwrap_or_default(),
                     device_access_time_us: cand.device_access_time_us,
                 };
-                let job_hex = crate::chain::extrinsic::hex_encode(&cand.job_id);
+                let job_hex = crate::types::hex::hex_encode(&cand.job_id);
                 if let Some(log) = &round_log {
                     log.lock().await.submission_started();
                 }

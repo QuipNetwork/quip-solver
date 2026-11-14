@@ -103,8 +103,8 @@ async fn drives_two_entry_list_end_to_end() {
 #[tokio::test]
 async fn drives_leases_end_to_end() {
     let miner = mock_miner();
-    let spec = quip_coordinator::drive::parse_topology_spec(
-        quip_coordinator::presets::preset_spec("smoke").expect("preset"),
+    let spec = quip_coordinator::types::topology_spec::parse_topology_spec(
+        quip_coordinator::types::topology_spec::preset_spec("smoke").expect("preset"),
     )
     .expect("spec");
     let mut src = LeaseSource::new(&spec, [0; 32], 1, 10, 4);
@@ -177,7 +177,7 @@ fn ring_jobs(count: usize, nodes: usize) -> Vec<Job> {
             generation: 0,
             deadline_ms: deadline,
             ising: Some({
-                let mut problem = quip_coordinator::producer::problem::milli_problem(
+                let mut problem = quip_coordinator::types::problem::milli_problem(
                     Some(ising_problem::Graph::Edges(EdgeList {
                         u: u.clone(),
                         v: v.clone(),

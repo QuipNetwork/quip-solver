@@ -1,8 +1,9 @@
 //! Build a chain `QuantumProof` from a coordinator `Proof` + mining context.
 
 use super::scale_types::QuantumProof;
-use super::submit::Proof;
-use crate::lease::ChallengeFamily;
+use crate::types::proof::Proof;
+
+use crate::types::family::ChallengeFamily;
 use parity_scale_codec::Encode;
 use quantum_validation::families::{AdvertisedLimits, FamilyChallenge, CONTRACTS};
 use quantum_validation::packed::pack_solution;
@@ -188,7 +189,7 @@ pub fn encode_quantum_proof(proof: &QuantumProof) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chain::submit::Proof;
+    use crate::types::proof::Proof;
     use parity_scale_codec::Decode;
 
     fn binary_ctx() -> ProofBuildContext {
@@ -212,7 +213,7 @@ mod tests {
             best_energy_milli: -100,
             diversity_milli: 200,
             n_valid: 1,
-            solutions: vec![crate::validate::SpinRow {
+            solutions: vec![crate::types::proof::SpinRow {
                 spins: vec![1, -1, 1, -1],
                 energy_milli: -100,
             }],

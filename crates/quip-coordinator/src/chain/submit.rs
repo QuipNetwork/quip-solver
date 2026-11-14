@@ -45,34 +45,6 @@ impl SubmitReceipt {
     }
 }
 
-/// A validated proof ready for chain submission.
-#[derive(Debug, Clone)]
-pub struct Proof {
-    /// Wire job id this proof answers.
-    pub job_id: Vec<u8>,
-    /// Best solution energy in milli units.
-    pub best_energy_milli: i64,
-    /// Diversity of the solution set in milli units.
-    pub diversity_milli: u32,
-    /// Count of solutions that passed local gates.
-    pub n_valid: u32,
-    /// Valid solutions (spins + reported energies).
-    pub solutions: Vec<crate::validate::SpinRow>,
-    /// `true` when this is a `PoW` proof (not a mempool order).
-    pub is_pow: bool,
-    /// Mempool order id bytes; empty for pure `PoW`.
-    pub order_id: Vec<u8>,
-    /// Producer generation this proof belongs to.
-    pub generation: u64,
-    /// `PoW` salt (32 bytes). Required for live `submit_proof`; empty for
-    /// `FakeChain` paths that only record the proof.
-    pub salt: Vec<u8>,
-    /// Miner-reported compute time in microseconds, from the result's
-    /// `SamplerMeta.device_access_time_us`. Plumbed into the on-chain
-    /// `QuantumProof`; `0` = unreported.
-    pub device_access_time_us: u64,
-}
-
 /// Outcome of a `MinerRegistry.set_descriptor` submission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DescriptorOutcome {

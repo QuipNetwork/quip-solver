@@ -9,16 +9,18 @@
 //! A funding failure at startup is fatal. A missing snapshot is not: the
 //! caller warns and the feeder retries after miners connect.
 
-use crate::chain::extrinsic::hex_encode;
 use crate::chain::scale_types::{
     MAX_NODE_ID_BYTES, MAX_NODE_NAME_BYTES, MAX_PUBLIC_HOST_BYTES, MAX_RPC_ENDPOINTS,
     MAX_RPC_ENDPOINT_BYTES,
 };
 use crate::chain::sync::{wait_until_synced, SyncOutcome, SyncSource};
 use crate::chain::{
-    ChainClient, DescriptorOutcome, MiningSnapshot, NodeDescriptorV2Input, ParticipationOutcome,
+    ChainClient, DescriptorOutcome, NodeDescriptorV2Input, ParticipationOutcome,
     RegistrationOutcome,
 };
+use crate::types::hex::hex_encode;
+use crate::types::snapshot::MiningSnapshot;
+
 use crate::config::DescriptorParams;
 use crate::funding::{
     ensure_funded, BalanceSource, Faucet, FundingError, FundingParams, HttpFaucet,
@@ -493,9 +495,11 @@ mod tests {
         SUBMIT_ATTEMPTS,
     };
     use crate::chain::{
-        ChainError, DescriptorOutcome, FakeChain, MinerKind, MinerSpecScale, MiningSnapshot,
-        ParticipationOutcome, RegistrationOutcome,
+        ChainError, DescriptorOutcome, FakeChain, ParticipationOutcome, RegistrationOutcome,
     };
+    use crate::types::miner::{MinerKind, MinerSpecScale};
+    use crate::types::snapshot::MiningSnapshot;
+
     use crate::config::DescriptorParams;
     use crate::funding::FundingParams;
     use crate::logging::test_support::{drain, init_capture, Capture};
@@ -520,7 +524,7 @@ mod tests {
             min_diversity_milli: 0,
             block_number: 1,
             spec_version: 117,
-            target_proof_blocks: crate::decay::TARGET_PROOF_BLOCKS,
+            target_proof_blocks: crate::types::snapshot::TARGET_PROOF_BLOCKS,
             family: None,
         }
     }

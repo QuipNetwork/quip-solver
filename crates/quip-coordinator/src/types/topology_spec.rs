@@ -1,11 +1,9 @@
-//! Drive-mode topology providers: JSON specs and registered chain metadata.
-//!
-//! Both produce a validated `TopologySpec` and a synthetic `MiningSnapshot`.
+//! Topology specs: the JSON format, its parser, and the presets embedded in
+//! the binary. A spec yields a validated `TopologySpec` and a synthetic
+//! `MiningSnapshot`.
 
-use crate::chain::extrinsic::hex_encode;
-use crate::chain::scale_types::{require_set_values, TopologyMetaScale};
-use crate::chain::MiningSnapshot;
-use crate::topology::{Topology, DEFAULT_SPIN_SET};
+use crate::types::snapshot::{MiningSnapshot, TARGET_PROOF_BLOCKS};
+use crate::types::topology::{Topology, DEFAULT_SPIN_SET};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -116,46 +114,27 @@ pub struct TopologySpec {
 }
 
 impl TopologySpec {
-    /// Convert registered chain metadata into a drive spec.
-    ///
-    /// Keeps node, edge, and value-set order. Difficulty gates use the same
-    /// defaults as a JSON spec without gates. Registration height is excluded
-    /// from topology identity.
+    /// Build a spec from graph and value sets, with the gates of a JSON spec
+    /// that has none.
     ///
     /// # Errors
-    /// Returns an error for unsupported value specs, invalid graph data,
-    /// a computed topology hash that differs from `hash`, or a topology bound
-    /// to a problem family.
-    pub fn from_chain_meta(hash: [u8; 32], meta: TopologyMetaScale) -> Result<Self, String> {
-        if let Some(family) = &meta.family {
-            return Err(format!(
-                "chain topology {} is bound to family {} revision {}; pass the \
-                 descriptor with --family-id, --family-revision, and --family-params",
-                hex_encode(&hash),
-                String::from_utf8_lossy(&family.family_id),
-                family.revision
-            ));
-        }
-        let raw = TopologySpecJson {
-            nodes: meta.nodes,
-            edges: meta.edges,
-            allowed_h_milli: require_set_values(&meta.allowed_h_values)
-                .map_err(|error| format!("chain topology allowed_h_milli: {error}"))?,
-            allowed_j_milli: require_set_values(&meta.allowed_j_values)
-                .map_err(|error| format!("chain topology allowed_j_milli: {error}"))?,
-            allowed_spin_milli: require_set_values(&meta.allowed_spin_values)
-                .map_err(|error| format!("chain topology allowed_spin_milli: {error}"))?,
+    /// Returns [`TopologySpecError`] when a required set is empty or an edge
+    /// references an unknown node id.
+    pub fn from_sets(
+        nodes: Vec<u32>,
+        edges: Vec<(u32, u32)>,
+        allowed_h_milli: Vec<i32>,
+        allowed_j_milli: Vec<i32>,
+        allowed_spin_milli: Vec<i32>,
+    ) -> Result<Self, TopologySpecError> {
+        validate_spec(TopologySpecJson {
+            nodes,
+            edges,
+            allowed_h_milli,
+            allowed_j_milli,
+            allowed_spin_milli,
             gates: None,
-        };
-        let spec = validate_spec(raw).map_err(|error| error.to_string())?;
-        if spec.topology.hash.as_slice() != hash.as_slice() {
-            return Err(format!(
-                "topology hash mismatch: chain reported {}, computed {}",
-                hex_encode(&hash),
-                hex_encode(&spec.topology.hash)
-            ));
-        }
-        Ok(spec)
+        })
     }
 
     /// Build a synthetic `MiningSnapshot` for generated or replayed drive work.
@@ -176,7 +155,7 @@ impl TopologySpec {
             min_diversity_milli: self.min_diversity_milli,
             block_number: 0,
             spec_version: 0,
-            target_proof_blocks: crate::decay::TARGET_PROOF_BLOCKS,
+            target_proof_blocks: TARGET_PROOF_BLOCKS,
             family: None,
         }
     }
@@ -245,11 +224,42 @@ fn validate_spec(raw: TopologySpecJson) -> Result<TopologySpec, TopologySpecErro
     })
 }
 
+/// The live D-Wave Advantage2 graph, Zephyr z(12, 4) with the removed qubits
+/// and couplers of the 2026-09-21 hardware snapshot: 4575 nodes and 41474
+/// edges. It is solver-core's `zephyr-z12t4-live` topology, the graph its
+/// live twisted-ice-dimer recipes are frozen on, and the file is
+/// byte-identical to the snapshot solver-core pins by sha256.
+const ZEPHYR_Z12T4_LIVE: &str = include_str!("../../fixtures/drive/zephyr-z12t4-live.spec.json");
+
+/// The graph the spec-119 Aglais chain registered: an older Advantage2
+/// snapshot (4577 nodes) without coupler (938, 2812), and `h` fixed at 0.
+const AGLAIS: &str = include_str!("../../fixtures/drive/aglais.spec.json");
+
+/// A small graph for fast smoke runs.
+const SMOKE: &str = include_str!("../../fixtures/drive/smoke.spec.json");
+
+/// Every preset name this binary understands.
+pub const PRESET_NAMES: [&str; 3] = ["zephyr-z12t4-live", "aglais", "smoke"];
+
+/// Return the embedded topology-spec JSON for `name`.
+///
+/// # Errors
+/// Returns an error for an unknown name.
+pub fn preset_spec(name: &str) -> Result<&'static str, String> {
+    match name {
+        "zephyr-z12t4-live" => Ok(ZEPHYR_Z12T4_LIVE),
+        "aglais" => Ok(AGLAIS),
+        "smoke" => Ok(SMOKE),
+        other => Err(format!(
+            "unknown topology preset {other:?}; valid presets: {}",
+            PRESET_NAMES.join(", ")
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chain::scale_types::TopologyMetaScale;
-    use quantum_validation::AllowedValueSpec;
 
     const VALID: &str = r#"{
         "nodes": [0, 1, 2, 3],
@@ -333,122 +343,62 @@ mod tests {
         }
     }
 
-    fn chain_meta_fixture() -> Result<([u8; 32], TopologyMetaScale), String> {
-        let spec = parse_topology_spec(crate::presets::preset_spec("aglais")?)
-            .map_err(|error| error.to_string())?;
-        let hash = spec
-            .topology
-            .hash
-            .as_slice()
-            .try_into()
-            .map_err(|_| "topology hash is not 32 bytes".to_string())?;
-        let edges = spec.topology.edge_pairs();
-        Ok((
-            hash,
-            TopologyMetaScale {
-                nodes: spec.topology.nodes,
-                edges,
-                allowed_h_values: AllowedValueSpec::Set(spec.allowed_h_milli),
-                allowed_j_values: AllowedValueSpec::Set(spec.allowed_j_milli),
-                allowed_spin_values: AllowedValueSpec::Set(spec.allowed_spin_milli),
-                family: None,
-                registered_at: 7,
-            },
-        ))
+    #[test]
+    fn every_listed_preset_resolves_and_parses_and_unknown_names_the_choices() {
+        for name in PRESET_NAMES {
+            let text = preset_spec(name)
+                .unwrap_or_else(|e| panic!("listed preset {name} must resolve: {e}"));
+            assert!(
+                parse_topology_spec(text).is_ok(),
+                "listed preset {name} must parse"
+            );
+        }
+        assert!(PRESET_NAMES.contains(&"aglais"));
+
+        for name in ["nope", "unknown"] {
+            let err = preset_spec(name).expect_err("unknown preset is an error");
+            assert!(err.contains(name), "error names the input: {err}");
+            assert!(
+                err.contains("zephyr-z12t4-live"),
+                "error lists choices: {err}"
+            );
+            assert!(err.contains("aglais"), "error lists choices: {err}");
+        }
     }
 
+    /// The live preset is solver-core's `zephyr-z12t4-live` graph, in the same
+    /// node and edge order.
     #[test]
-    fn from_chain_meta_preserves_aglais_and_uses_neutral_gates() {
-        let (hash, meta) = chain_meta_fixture().expect("valid Aglais metadata");
-        let expected_nodes = meta.nodes.clone();
-        let expected_edges = meta.edges.clone();
-        let mut late_registration = meta.clone();
-        let spec = TopologySpec::from_chain_meta(hash, meta).expect("valid chain topology");
-        assert_eq!(spec.topology.hash, hash.to_vec());
-        assert_eq!(spec.topology.nodes, expected_nodes);
-        assert_eq!(spec.topology.edge_pairs(), expected_edges);
+    fn the_live_preset_is_the_solver_core_live_graph() {
+        let spec = parse_topology_spec(preset_spec("zephyr-z12t4-live").expect("live preset"))
+            .expect("live preset parses");
+        let live = quip_solver_conformance::topology("../topologies/zephyr-z12t4-live.bin.gz")
+            .expect("solver-core live topology");
+        assert_eq!(spec.topology.nodes.len(), 4_575);
+        assert_eq!(spec.topology.edge_pairs().len(), 41_474);
+        assert_eq!(spec.topology.nodes, live.nodes);
+        assert_eq!(spec.topology.edge_pairs(), live.edges);
         assert_eq!(spec.allowed_h_milli, vec![0]);
         assert_eq!(spec.allowed_j_milli, vec![-1000, 1000]);
         assert_eq!(spec.allowed_spin_milli, vec![-1000, 1000]);
-        assert_eq!(spec.min_solutions, 0);
-        assert_eq!(spec.max_energy_milli, i64::MAX);
-        assert_eq!(spec.min_diversity_milli, 0);
-        let snapshot = spec.to_snapshot();
-        assert_eq!(snapshot.head_hash, [0; 32]);
-        assert_eq!(snapshot.last_proof_block_hash, [0; 32]);
-        assert_eq!(snapshot.block_number, 0);
-        assert_eq!(snapshot.spec_version, 0);
-        assert_eq!(snapshot.topology_hash, hash.to_vec());
-
-        // The registration height is not part of the topology hash.
-        late_registration.registered_at = u32::MAX;
-        let spec =
-            TopologySpec::from_chain_meta(hash, late_registration).expect("valid chain topology");
-        assert_eq!(spec.topology.hash, hash.to_vec());
     }
 
+    /// The Aglais preset keeps the topology hash the spec-119 chain registered.
     #[test]
-    fn from_chain_meta_rejects_unsupported_sets_bad_graphs_and_hashes() {
-        let (hash, meta) = chain_meta_fixture().expect("valid Aglais metadata");
-        let mut integer_h = meta.clone();
-        integer_h.allowed_h_values = AllowedValueSpec::IntegerRange { min: -1, max: 1 };
-        let mut continuous_j = meta.clone();
-        continuous_j.allowed_j_values = AllowedValueSpec::ContinuousRange {
-            min: -1000,
-            max: 1000,
-        };
-        let mut empty_spin = meta.clone();
-        empty_spin.allowed_spin_values = AllowedValueSpec::Set(vec![]);
-        let mut empty_nodes = meta.clone();
-        empty_nodes.nodes.clear();
-        let mut bad_edge = meta.clone();
-        bad_edge.edges.push((938, u32::MAX));
-        let mut incorrect_hash = hash;
-        *incorrect_hash.first_mut().expect("nonempty hash") ^= 1;
-        let mut bound = meta.clone();
-        bound.family = Some(crate::chain::scale_types::FamilyDescriptorScale {
-            family_id: b"quip/ice-glass".to_vec(),
-            revision: 1,
-            params: Vec::new(),
-        });
-        let cases = [
-            (
-                "family topology",
-                hash,
-                bound,
-                "bound to family quip/ice-glass revision 1",
-            ),
-            (
-                "integer range h",
-                hash,
-                integer_h,
-                "requires AllowedValueSpec::Set",
-            ),
-            (
-                "continuous range j",
-                hash,
-                continuous_j,
-                "requires AllowedValueSpec::Set",
-            ),
-            ("empty spin set", hash, empty_spin, "Set is empty"),
-            ("empty nodes", hash, empty_nodes, "nodes must be non-empty"),
-            (
-                "edge with unknown node",
-                hash,
-                bad_edge,
-                "references node id",
-            ),
-            (
-                "hash mismatch",
-                incorrect_hash,
-                meta,
-                "topology hash mismatch",
-            ),
-        ];
-        for (label, hash, meta, message) in cases {
-            let error = TopologySpec::from_chain_meta(hash, meta)
-                .expect_err("expected a chain topology error");
-            assert!(error.contains(message), "{label}: {error}");
-        }
+    fn aglais_matches_chain_identity() {
+        let spec = parse_topology_spec(preset_spec("aglais").expect("Aglais preset resolves"))
+            .expect("Aglais preset parses");
+        assert_eq!(spec.topology.nodes.len(), 4_577);
+        let edges = spec.topology.edge_pairs();
+        assert_eq!(edges.len(), 41_514);
+        assert!(!edges.contains(&(938, 2812)));
+        assert!(!edges.contains(&(2812, 938)));
+        assert_eq!(spec.allowed_h_milli, vec![0]);
+        assert_eq!(spec.allowed_j_milli, vec![-1000, 1000]);
+        assert_eq!(spec.allowed_spin_milli, vec![-1000, 1000]);
+        assert_eq!(
+            crate::types::hex::hex_encode(&spec.topology.hash),
+            "0xcbec1eb4e9dcc7ae343b386902d4dbba19b694a66cebf95bc06bd9260c3270e7"
+        );
     }
 }

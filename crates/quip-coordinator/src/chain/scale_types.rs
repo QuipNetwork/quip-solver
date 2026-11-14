@@ -16,6 +16,12 @@ use parity_scale_codec::{Decode, Encode};
 use quantum_validation::AllowedValueSpec;
 use sp_core::{H256, U256};
 
+use crate::types::hex::hex_encode;
+use crate::types::host::{RuntimeInfoScale, SystemInfoScale};
+use crate::types::miner::{MinerKind, MinerSpecScale, NodeLogLevel};
+
+use crate::types::topology_spec::TopologySpec;
+
 /// On-wire difficulty config (matches pallet `DifficultyConfig`).
 #[derive(Clone, Debug, Encode, Decode, PartialEq, Eq)]
 pub struct DifficultyConfig {
@@ -154,6 +160,47 @@ impl TopologyMetaScale {
             family: None,
             registered_at: v2.registered_at,
         })
+    }
+
+    /// Convert registered chain metadata into a topology spec.
+    ///
+    /// Keeps node, edge, and value-set order. Difficulty gates use the same
+    /// defaults as a JSON spec without gates. Registration height is excluded
+    /// from topology identity.
+    ///
+    /// # Errors
+    /// Returns an error for unsupported value specs, invalid graph data,
+    /// a computed topology hash that differs from `hash`, or a topology bound
+    /// to a problem family.
+    pub fn into_topology_spec(self, hash: [u8; 32]) -> Result<TopologySpec, String> {
+        if let Some(family) = &self.family {
+            return Err(format!(
+                "chain topology {} is bound to family {} revision {}; pass the \
+                 descriptor with --family-id, --family-revision, and --family-params",
+                hex_encode(&hash),
+                String::from_utf8_lossy(&family.family_id),
+                family.revision
+            ));
+        }
+        let spec = TopologySpec::from_sets(
+            self.nodes,
+            self.edges,
+            require_set_values(&self.allowed_h_values)
+                .map_err(|error| format!("chain topology allowed_h_milli: {error}"))?,
+            require_set_values(&self.allowed_j_values)
+                .map_err(|error| format!("chain topology allowed_j_milli: {error}"))?,
+            require_set_values(&self.allowed_spin_values)
+                .map_err(|error| format!("chain topology allowed_spin_milli: {error}"))?,
+        )
+        .map_err(|error| error.to_string())?;
+        if spec.topology.hash.as_slice() != hash.as_slice() {
+            return Err(format!(
+                "topology hash mismatch: chain reported {}, computed {}",
+                hex_encode(&hash),
+                hex_encode(&spec.topology.hash)
+            ));
+        }
+        Ok(spec)
     }
 }
 
@@ -421,52 +468,6 @@ pub const MAX_MINER_BACKEND_BYTES: usize = 32;
 /// Pallet `MaxMinerDeviceIdBytes`.
 pub const MAX_MINER_DEVICE_ID_BYTES: usize = 128;
 
-// The V2 survey bounds below mirror the validator runtime at the rev already
-// pinned in Cargo.toml (`runtime/src/configs/mod.rs`). Nothing links them at
-// compile time, so a runtime upgrade that moves a bound is a coordinator
-// change too. Over-length is a SCALE decode failure rather than a pallet
-// error, so it never reaches `DESCRIPTOR_REJECT`; see `crate::survey`.
-
-/// Pallet `MaxOsStringBytes`. One bound for `os.system`, `os.release`, and
-/// `os.machine` alike.
-pub const MAX_OS_STRING_BYTES: usize = 64;
-/// Pallet `MaxCpuBrandBytes`.
-pub const MAX_CPU_BRAND_BYTES: usize = 96;
-/// Pallet `MaxArchBytes`.
-pub const MAX_ARCH_BYTES: usize = 16;
-/// Pallet `MaxGpuVendorBytes`.
-pub const MAX_GPU_VENDOR_BYTES: usize = 16;
-/// Pallet `MaxGpuNameBytes`.
-pub const MAX_GPU_NAME_BYTES: usize = 96;
-/// Pallet `MaxGpus`.
-pub const MAX_GPUS: usize = 16;
-/// Pallet `MaxRuntimeVersionBytes`. One bound for `python` and `quip_version`
-/// alike.
-pub const MAX_RUNTIME_VERSION_BYTES: usize = 48;
-/// Pallet `MaxDockerImageBytes`.
-pub const MAX_DOCKER_IMAGE_BYTES: usize = 256;
-
-/// SCALE tag order must match `pallet_miner_registry::MinerKind`.
-#[derive(Clone, Copy, Debug, Encode, Decode, PartialEq, Eq)]
-pub enum MinerKind {
-    /// CPU sampler.
-    Cpu,
-    /// Discrete GPU sampler.
-    Gpu,
-    /// D-Wave QPU.
-    QpuDwave,
-    /// IBM QPU.
-    QpuIbm,
-    /// `IonQ` QPU.
-    QpuIonq,
-    /// Pasqal QPU.
-    QpuPasqal,
-    /// ASIC sampler.
-    Asic,
-    /// Apple Metal GPU. Last so the earlier tags stay stable.
-    Metal,
-}
-
 /// SCALE tag order must match `pallet_quantum_compute_mempool::MinerType`.
 ///
 /// Not [`MinerKind`]: the mempool pallet has no `Metal` tag, so encoding a
@@ -537,99 +538,6 @@ pub struct JobSolutionScale {
     pub num_valid: u32,
     /// Block that accepted this submission. A resubmission overwrites it.
     pub submitted_at: u32,
-}
-
-/// SCALE tag order must match `pallet_miner_registry::LogLevel`.
-#[derive(Clone, Copy, Debug, Encode, Decode, PartialEq, Eq)]
-pub enum NodeLogLevel {
-    /// Pallet `Debug`. Also the mapping for coordinator `trace`.
-    Debug,
-    /// Pallet `Info`.
-    Info,
-    /// Pallet `Warning`. Also the mapping for coordinator `warn`.
-    Warning,
-    /// Pallet `Error`.
-    Error,
-}
-
-/// One advertised miner. `Vec<u8>` encodes like the pallet `BoundedVec`.
-#[derive(Clone, Debug, Encode, Decode, PartialEq, Eq)]
-pub struct MinerSpecScale {
-    /// Backend class.
-    pub kind: MinerKind,
-    /// Operator label, usually the miner id.
-    pub label: Option<Vec<u8>>,
-    /// Backend section name (`cpu`, `cuda`, `metal`, `dwave`).
-    pub backend: Option<Vec<u8>>,
-    /// Device id when the miner has one.
-    pub device_id: Option<Vec<u8>>,
-}
-
-/// Operating-system identity inside [`SystemInfoScale`].
-#[derive(Clone, Debug, Encode, Decode, PartialEq, Eq)]
-pub struct OsInfoScale {
-    /// OS family.
-    pub system: Vec<u8>,
-    /// Kernel or build string.
-    pub release: Vec<u8>,
-    /// Machine architecture.
-    pub machine: Vec<u8>,
-}
-
-/// CPU identity inside [`SystemInfoScale`].
-#[derive(Clone, Debug, Encode, Decode, PartialEq, Eq)]
-pub struct CpuInfoScale {
-    /// Logical core count.
-    pub logical_cores: Option<u32>,
-    /// Physical core count.
-    pub physical_cores: Option<u32>,
-    /// Brand string.
-    pub brand: Vec<u8>,
-    /// Instruction-set architecture.
-    pub arch: Vec<u8>,
-}
-
-/// One GPU inside [`SystemInfoScale`].
-#[derive(Clone, Debug, Encode, Decode, PartialEq, Eq)]
-pub struct GpuInfoScale {
-    /// Enumeration index.
-    pub index: u8,
-    /// Vendor string.
-    pub vendor: Vec<u8>,
-    /// Product name.
-    pub name: Vec<u8>,
-    /// Device memory in MiB.
-    pub memory_mb: Option<u32>,
-    /// Utilization 0..=100.
-    pub utilization_pct: Option<u8>,
-}
-
-/// Optional hardware survey on a V2 descriptor.
-#[derive(Clone, Debug, Encode, Decode, PartialEq, Eq)]
-pub struct SystemInfoScale {
-    /// OS identity.
-    pub os: OsInfoScale,
-    /// CPU identity.
-    pub cpu: CpuInfoScale,
-    /// Host memory in MiB.
-    pub memory_mb: Option<u32>,
-    /// Attached GPUs.
-    pub gpus: Vec<GpuInfoScale>,
-}
-
-/// Optional node-software identity on a V2 descriptor.
-#[derive(Clone, Debug, Encode, Decode, PartialEq, Eq)]
-pub struct RuntimeInfoScale {
-    /// Python interpreter version.
-    pub python: Vec<u8>,
-    /// Node software version.
-    pub quip_version: Vec<u8>,
-    /// Protocol version number.
-    pub protocol_version: u32,
-    /// Whether the process is inside a container.
-    pub in_docker: bool,
-    /// Container image, when running in a container.
-    pub docker_image: Option<Vec<u8>>,
 }
 
 /// Caller-supplied V2 descriptor. This is the payload the coordinator files.
@@ -777,6 +685,8 @@ pub fn require_set_values(spec: &AllowedValueSpec<Vec<i32>>) -> Result<Vec<i32>,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::host::{CpuInfoScale, OsInfoScale};
+    use crate::types::topology_spec::{parse_topology_spec, preset_spec};
 
     #[test]
     fn register_solver_call_is_the_dispatch_indices_and_the_type_tag() {
@@ -1228,6 +1138,127 @@ mod tests {
             }
             // Must return Ok or Err, never panic (the point of the guard).
             let _ = JobOrderScale::decode(&mut &bad[..]);
+        }
+    }
+
+    fn chain_meta_fixture() -> Result<([u8; 32], TopologyMetaScale), String> {
+        let spec =
+            parse_topology_spec(preset_spec("aglais")?).map_err(|error| error.to_string())?;
+        let hash = spec
+            .topology
+            .hash
+            .as_slice()
+            .try_into()
+            .map_err(|_| "topology hash is not 32 bytes".to_string())?;
+        let edges = spec.topology.edge_pairs();
+        Ok((
+            hash,
+            TopologyMetaScale {
+                nodes: spec.topology.nodes,
+                edges,
+                allowed_h_values: AllowedValueSpec::Set(spec.allowed_h_milli),
+                allowed_j_values: AllowedValueSpec::Set(spec.allowed_j_milli),
+                allowed_spin_values: AllowedValueSpec::Set(spec.allowed_spin_milli),
+                family: None,
+                registered_at: 7,
+            },
+        ))
+    }
+
+    #[test]
+    fn from_chain_meta_preserves_aglais_and_uses_neutral_gates() {
+        let (hash, meta) = chain_meta_fixture().expect("valid Aglais metadata");
+        let expected_nodes = meta.nodes.clone();
+        let expected_edges = meta.edges.clone();
+        let mut late_registration = meta.clone();
+        let spec = meta.into_topology_spec(hash).expect("valid chain topology");
+        assert_eq!(spec.topology.hash, hash.to_vec());
+        assert_eq!(spec.topology.nodes, expected_nodes);
+        assert_eq!(spec.topology.edge_pairs(), expected_edges);
+        assert_eq!(spec.allowed_h_milli, vec![0]);
+        assert_eq!(spec.allowed_j_milli, vec![-1000, 1000]);
+        assert_eq!(spec.allowed_spin_milli, vec![-1000, 1000]);
+        assert_eq!(spec.min_solutions, 0);
+        assert_eq!(spec.max_energy_milli, i64::MAX);
+        assert_eq!(spec.min_diversity_milli, 0);
+        let snapshot = spec.to_snapshot();
+        assert_eq!(snapshot.head_hash, [0; 32]);
+        assert_eq!(snapshot.last_proof_block_hash, [0; 32]);
+        assert_eq!(snapshot.block_number, 0);
+        assert_eq!(snapshot.spec_version, 0);
+        assert_eq!(snapshot.topology_hash, hash.to_vec());
+
+        // The registration height is not part of the topology hash.
+        late_registration.registered_at = u32::MAX;
+        let spec = late_registration
+            .into_topology_spec(hash)
+            .expect("valid chain topology");
+        assert_eq!(spec.topology.hash, hash.to_vec());
+    }
+
+    #[test]
+    fn from_chain_meta_rejects_unsupported_sets_bad_graphs_and_hashes() {
+        let (hash, meta) = chain_meta_fixture().expect("valid Aglais metadata");
+        let mut integer_h = meta.clone();
+        integer_h.allowed_h_values = AllowedValueSpec::IntegerRange { min: -1, max: 1 };
+        let mut continuous_j = meta.clone();
+        continuous_j.allowed_j_values = AllowedValueSpec::ContinuousRange {
+            min: -1000,
+            max: 1000,
+        };
+        let mut empty_spin = meta.clone();
+        empty_spin.allowed_spin_values = AllowedValueSpec::Set(vec![]);
+        let mut empty_nodes = meta.clone();
+        empty_nodes.nodes.clear();
+        let mut bad_edge = meta.clone();
+        bad_edge.edges.push((938, u32::MAX));
+        let mut incorrect_hash = hash;
+        *incorrect_hash.first_mut().expect("nonempty hash") ^= 1;
+        let mut bound = meta.clone();
+        bound.family = Some(FamilyDescriptorScale {
+            family_id: b"quip/ice-glass".to_vec(),
+            revision: 1,
+            params: Vec::new(),
+        });
+        let cases = [
+            (
+                "family topology",
+                hash,
+                bound,
+                "bound to family quip/ice-glass revision 1",
+            ),
+            (
+                "integer range h",
+                hash,
+                integer_h,
+                "requires AllowedValueSpec::Set",
+            ),
+            (
+                "continuous range j",
+                hash,
+                continuous_j,
+                "requires AllowedValueSpec::Set",
+            ),
+            ("empty spin set", hash, empty_spin, "Set is empty"),
+            ("empty nodes", hash, empty_nodes, "nodes must be non-empty"),
+            (
+                "edge with unknown node",
+                hash,
+                bad_edge,
+                "references node id",
+            ),
+            (
+                "hash mismatch",
+                incorrect_hash,
+                meta,
+                "topology hash mismatch",
+            ),
+        ];
+        for (label, hash, meta, message) in cases {
+            let error = meta
+                .into_topology_spec(hash)
+                .expect_err("expected a chain topology error");
+            assert!(error.contains(message), "{label}: {error}");
         }
     }
 }

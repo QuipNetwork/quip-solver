@@ -21,10 +21,9 @@
 //! finds the open motion by its hash, votes aye, and closes it once the ayes
 //! reach the threshold. Runtimes before 120 are refused.
 
-use super::extrinsic::hex_encode;
 use super::real::{Confirmation, RealChainClient, SignedCallOutcome};
 use super::scale_types::{
-    DifficultyConfig, EnergyBandScale, FamilyDescriptorScale, MinerKind, WeightScale,
+    DifficultyConfig, EnergyBandScale, FamilyDescriptorScale, WeightScale,
     ADD_MINEABLE_TOPOLOGY_CALL_INDEX, BATCH_ALL_CALL_INDEX, CLOSE_CALL_INDEX,
     DISPATCH_AS_ROOT_CALL_INDEX, FOUNDATION_PALLET_INDEX, PROPOSE_CALL_INDEX,
     QUANTUM_POW_PALLET_INDEX, REGISTER_TOPOLOGY_CALL_INDEX, REMOVE_MINEABLE_TOPOLOGY_CALL_INDEX,
@@ -33,8 +32,11 @@ use super::scale_types::{
     VOTE_CALL_INDEX,
 };
 use super::ChainError;
-use crate::drive::TopologySpec;
-use crate::topology::{family_topology_hash, topology_hash_sets, Topology};
+use crate::types::hex::hex_encode;
+use crate::types::miner::MinerKind;
+use crate::types::topology_spec::TopologySpec;
+
+use crate::types::topology::{family_topology_hash, topology_hash_sets, Topology};
 use parity_scale_codec::{Compact, Encode};
 use quantum_validation::families::{AdvertisedLimits, FamilyChallenge, CONTRACTS};
 use quantum_validation::AllowedValueSpec;
@@ -213,8 +215,8 @@ impl SeedTopology {
             &self.allowed_j_milli,
             &self.allowed_spin_milli,
         );
-        let admitted = crate::lease::ChallengeFamily::admit(
-            crate::lease::FAMILY_CONTRACTS,
+        let admitted = crate::types::family::ChallengeFamily::admit(
+            crate::types::family::FAMILY_CONTRACTS,
             family_id,
             descriptor.revision,
             descriptor.params.clone(),
@@ -806,8 +808,8 @@ mod tests {
     use super::*;
 
     fn spec_topology(preset: &str) -> SeedTopology {
-        let text = crate::presets::preset_spec(preset).unwrap();
-        SeedTopology::from_spec(&crate::drive::parse_topology_spec(text).unwrap())
+        let text = crate::types::topology_spec::preset_spec(preset).unwrap();
+        SeedTopology::from_spec(&crate::types::topology_spec::parse_topology_spec(text).unwrap())
     }
 
     fn live() -> SeedTopology {
@@ -1056,9 +1058,9 @@ mod tests {
     /// hash function as `legacy_hash`, and the hash ignores node and edge order.
     #[test]
     fn a_topology_spec_converts_to_a_seed_topology_with_the_same_hash() {
-        for preset in crate::presets::PRESET_NAMES {
-            let text = crate::presets::preset_spec(preset).unwrap();
-            let spec = crate::drive::parse_topology_spec(text).unwrap();
+        for preset in crate::types::topology_spec::PRESET_NAMES {
+            let text = crate::types::topology_spec::preset_spec(preset).unwrap();
+            let spec = crate::types::topology_spec::parse_topology_spec(text).unwrap();
             let seed = SeedTopology::from_spec(&spec);
             assert_eq!(seed.nodes, spec.topology.nodes, "{preset}");
             assert_eq!(seed.edges, spec.topology.edge_pairs(), "{preset}");

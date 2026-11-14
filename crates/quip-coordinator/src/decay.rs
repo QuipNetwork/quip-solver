@@ -16,17 +16,14 @@
 //! Golden-faithful: `round` is half-away-from-zero (Rust `f64::round`, matching
 //! `libm::round`), and every add/sub saturates at i64 bounds.
 
+use crate::types::snapshot::TARGET_PROOF_BLOCKS;
+
 /// Geometric ease fraction, in milli (rate = 25/1000 = 0.025).
 pub const DECAY_RATE_MILLI: i64 = 25;
 /// Minimum per-step easing when the geometric term rounds below it (one energy
 /// unit in milli).
 pub const MIN_ENERGY_DELTA_MILLI: i64 = 1000;
 
-/// Round length the chain targets: fixed in runtimes 118 and 119, and the
-/// default of runtime 120 (`QuantumPowTargetProofBlocks`) when
-/// `TargetProofBlocksOverride` is unset. Past this many blocks in one round
-/// the continuous rule eases faster and the gated rule starts to ease.
-pub const TARGET_PROOF_BLOCKS: u64 = 100;
 /// Extra easing rate per epoch for overdue blocks
 /// (`OVERDUE_EASE_RATE_MILLI` in the pallet). Equal to `DECAY_RATE_MILLI`, so
 /// in the geometric regime an overdue round eases at twice the baseline
@@ -39,23 +36,6 @@ pub const CONTINUOUS_DECAY_SPEC_VERSION: u32 = 118;
 /// First runtime `spec_version` that holds the threshold through the
 /// round-length target before easing (quip-validator v0.4.0).
 pub const GATED_DECAY_SPEC_VERSION: u32 = 119;
-
-// The pallet exposes these as constants/defaults, not via any runtime API, so
-// (per the independent-reads path) the coordinator mirrors them. They match
-// quip-validator @ v0.2 `QuantumPow`; a chain retune must be echoed here.
-/// Blocks per decay epoch (`QuantumPow::EpochLength`).
-pub const EPOCH_LENGTH_BLOCKS: u64 = 100;
-/// Default curve calibration c-triple (per-mille: 700 == 0.70), from the
-/// `CurveC{Easy,Knee,Hard}Milli` constants. A topology may override these via
-/// `TopologyCurveC` storage, probed separately.
-pub const DEFAULT_C_EASY_MILLI: u32 = 700;
-/// Default knee calibration c (per-mille: 725 == 0.725).
-pub const DEFAULT_C_KNEE_MILLI: u32 = 725;
-/// Default hard calibration c (per-mille: 750 == 0.75).
-pub const DEFAULT_C_HARD_MILLI: u32 = 750;
-/// Default base difficulty `max_energy_milli` when `Difficulties[hash]` is unset
-/// (`DifficultyConfig::default()` on chain: `{5, -1_200_000, 200}`).
-pub const DEFAULT_BASE_MAX_ENERGY_MILLI: i64 = -1_200_000;
 
 /// GSE-estimate bounds for the decay curve (all negative). `ease_step` only
 /// references `min_milli`/`max_milli`; `knee_milli` is retained for parity with

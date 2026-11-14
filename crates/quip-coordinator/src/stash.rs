@@ -8,7 +8,7 @@
 //! threshold yet but will after enough decay, so they aren't discarded.
 
 use crate::decay::{DecayAlgorithm, DecayModel};
-use crate::validate::SpinRow;
+use crate::types::proof::SpinRow;
 use serde::Serialize;
 use std::fmt::Write as _;
 
@@ -274,7 +274,7 @@ mod tests {
             }),
             epoch_length: 10,
             algorithm: DecayAlgorithm::Stepwise,
-            target_proof_blocks: crate::decay::TARGET_PROOF_BLOCKS,
+            target_proof_blocks: crate::types::snapshot::TARGET_PROOF_BLOCKS,
         }
     }
 

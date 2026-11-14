@@ -11,7 +11,9 @@ use std::collections::{HashMap, HashSet};
 use crate::chain::extrinsic::account_identity_bytes;
 use crate::chain::proof_encode::decode_family_witnesses;
 use crate::chain::scale_types::QuantumProof;
-use crate::chain::{MiningSnapshot, PendingProof};
+use crate::chain::PendingProof;
+use crate::types::snapshot::MiningSnapshot;
+
 use quantum_validation::{
     calculate_diversity, derive_nonce, energy_of_solution_indexed, generate_ising_model_indexed,
     select_diverse, unpack_solution, AllowedValueSpec, TopologyIndex,
@@ -128,7 +130,7 @@ fn legacy_rows(proof: &QuantumProof, snap: &MiningSnapshot) -> Result<Vec<(i64, 
 fn family_rows(
     proof: &QuantumProof,
     snap: &MiningSnapshot,
-    family: &crate::lease::ChallengeFamily,
+    family: &crate::types::family::ChallengeFamily,
 ) -> Result<Vec<(i64, Vec<i8>)>, String> {
     decode_family_witnesses(
         family,
@@ -259,7 +261,7 @@ impl PoolWatch {
                     Verdict::BelowGates => continue,
                     Verdict::Malformed(reason) => {
                         tracing::debug!(
-                            extrinsic = %crate::chain::extrinsic::hex_encode(&p.extrinsic_hash),
+                            extrinsic = %crate::types::hex::hex_encode(&p.extrinsic_hash),
                             reason,
                             "pool: pending proof is malformed"
                         );
@@ -341,7 +343,7 @@ mod tests {
             min_diversity_milli: 0,
             block_number: 42,
             spec_version: 117,
-            target_proof_blocks: crate::decay::TARGET_PROOF_BLOCKS,
+            target_proof_blocks: crate::types::snapshot::TARGET_PROOF_BLOCKS,
             family: None,
         }
     }
@@ -410,15 +412,15 @@ mod tests {
         let blob =
             quip_solver_conformance::topology(quip_solver_conformance::families::ROUTING_TOPOLOGY)
                 .expect("routing topology fixture");
-        let topology = crate::topology::Topology::from_nodes_edges(
+        let topology = crate::types::topology::Topology::from_nodes_edges(
             blob.nodes.clone(),
             blob.edges.clone(),
             &[0],
             &[1000],
             &[-1000, 1000],
         );
-        let family = crate::lease::ChallengeFamily::admit(
-            crate::lease::FAMILY_CONTRACTS,
+        let family = crate::types::family::ChallengeFamily::admit(
+            crate::types::family::FAMILY_CONTRACTS,
             ising_generators::polariton::POLARITON_V1.family_id,
             ising_generators::polariton::POLARITON_V1.revision,
             quip_solver_conformance::families::polariton::P_POLARITON_Z24_L2_P0.to_vec(),

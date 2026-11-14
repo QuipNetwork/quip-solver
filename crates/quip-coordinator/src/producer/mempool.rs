@@ -1,7 +1,7 @@
 //! Convert mempool `JobOrder`s to wire `Job`s with inline `EdgeList`.
 
 use crate::chain::mempool::JobOrder;
-use crate::producer::problem::milli_problem;
+use crate::types::problem::milli_problem;
 use quip_proto::v1::{ising_problem, EdgeList, Job, JobKind, Provenance};
 use std::collections::HashMap;
 

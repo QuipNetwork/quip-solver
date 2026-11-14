@@ -48,8 +48,7 @@ use quantum_validation::{
     MilliValue,
 };
 use quip_coordinator::chain::extrinsic::{
-    build_hybrid_signed_extrinsic, hex_decode, hex_encode, miner_identity_bytes,
-    miners_storage_key, SignedExtensionContext,
+    build_hybrid_signed_extrinsic, miner_identity_bytes, miners_storage_key, SignedExtensionContext,
 };
 use quip_coordinator::chain::scale_types::{
     encode_register_miner_call, IsingParams, JobMode, MiningSnapshotScale, ResultDelivery,
@@ -57,8 +56,9 @@ use quip_coordinator::chain::scale_types::{
 };
 use quip_coordinator::chain::submit::SubmitAction;
 use quip_coordinator::chain::{ChainClient, JobOrder, RealChainClient};
-use quip_coordinator::drive::parse_topology_spec;
-use quip_coordinator::presets::preset_spec;
+use quip_coordinator::types::hex::{hex_decode, hex_encode};
+use quip_coordinator::types::topology_spec::{parse_topology_spec, preset_spec};
+
 use quip_coordinator::validate::MAX_PROOF_SOLUTIONS;
 use quip_transaction_crypto::{account_id_from_public, HybridPair};
 use sp_core::Pair;
@@ -447,7 +447,7 @@ async fn devnet_submit_proof_end_to_end() {
     let client = RealChainClient::new(
         vec![url.clone()],
         "//Alice".to_string(),
-        quip_coordinator::chain::MinerKind::Cpu,
+        quip_coordinator::types::miner::MinerKind::Cpu,
     );
 
     // ---------------- Milestone 1: read path ----------------
@@ -577,14 +577,14 @@ async fn devnet_submit_proof_end_to_end() {
     );
 
     // (5) Drive the coordinator's real submit path.
-    let proof = quip_coordinator::chain::submit::Proof {
+    let proof = quip_coordinator::types::proof::Proof {
         job_id: vec![],
         best_energy_milli: best_energy,
         diversity_milli: diversity,
         n_valid: valid.len() as u32,
         solutions: valid
             .iter()
-            .map(|(s, e)| quip_coordinator::validate::SpinRow {
+            .map(|(s, e)| quip_coordinator::types::proof::SpinRow {
                 spins: s.clone(),
                 energy_milli: *e,
             })
@@ -729,7 +729,7 @@ async fn devnet_mempool_job_proposed_end_to_end() {
     let client = RealChainClient::new(
         vec![url.clone()],
         "//Alice".to_string(),
-        quip_coordinator::chain::MinerKind::Cpu,
+        quip_coordinator::types::miner::MinerKind::Cpu,
     );
 
     // The canonical default plain-Ising spec is seeded at genesis; propose

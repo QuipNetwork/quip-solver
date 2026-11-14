@@ -1,7 +1,8 @@
 //! Parse `config.toml` into a per-miner launch plan.
 
-use crate::chain::scale_types::{RuntimeInfoScale, SystemInfoScale};
-use crate::chain::{MinerKind, MinerSpecScale, NodeLogLevel};
+use crate::types::host::{RuntimeInfoScale, SystemInfoScale};
+use crate::types::miner::{MinerKind, MinerSpecScale, NodeLogLevel};
+
 use quip_proto::v1::Configure;
 use std::collections::BTreeMap;
 
@@ -174,7 +175,7 @@ impl LaunchEntry {
     /// Pallet kind for this backend section.
     #[must_use]
     pub fn miner_kind(&self) -> MinerKind {
-        miner_kind_from_backend(&self.backend)
+        MinerKind::from_backend(&self.backend)
     }
 
     /// Descriptor miner spec for this launch entry.
@@ -190,17 +191,6 @@ impl LaunchEntry {
             // GPU 0. `None` for backends that name no device.
             device_id: self.device.map(|n| n.to_string().into_bytes()),
         }
-    }
-}
-
-/// Map a backend section name to the pallet `MinerKind`.
-#[must_use]
-pub fn miner_kind_from_backend(backend: &str) -> MinerKind {
-    match backend {
-        "cuda" => MinerKind::Gpu,
-        "metal" => MinerKind::Metal,
-        "dwave" => MinerKind::QpuDwave,
-        _ => MinerKind::Cpu,
     }
 }
 

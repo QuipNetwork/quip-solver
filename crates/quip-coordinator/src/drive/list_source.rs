@@ -1,11 +1,11 @@
 //! JSONL model replay list: one entry per line, auto-detected as either a
 //! nonce-ref (re-derived via `draw_ising_milli` against a topology) or an
 //! explicit problem (used verbatim).
-use crate::producer::problem::milli_problem;
+use crate::types::problem::milli_problem;
 
-use crate::chain::MiningSnapshot;
 use crate::drive::JobSource;
 use crate::producer::build_ising_job_from_nonce;
+use crate::types::snapshot::MiningSnapshot;
 use quip_proto::v1::{ising_problem, EdgeList, Job, JobKind, Provenance};
 use serde::Deserialize;
 
@@ -215,7 +215,7 @@ impl JobSource for ListSource {
 mod tests {
     use super::*;
     use crate::drive::drain_all;
-    use crate::producer::problem::problem_milli;
+    use crate::types::problem::problem_milli;
 
     fn snapshot() -> MiningSnapshot {
         MiningSnapshot {
@@ -232,7 +232,7 @@ mod tests {
             min_diversity_milli: 0,
             block_number: 0,
             spec_version: 0,
-            target_proof_blocks: crate::decay::TARGET_PROOF_BLOCKS,
+            target_proof_blocks: crate::types::snapshot::TARGET_PROOF_BLOCKS,
             family: None,
         }
     }

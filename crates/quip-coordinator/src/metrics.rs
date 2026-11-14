@@ -12,8 +12,8 @@
 //! Counters are monotonic for the life of the process and reset to `0` on
 //! restart, which is what the dashboard expects.
 
-use crate::chain::MinerKind;
-use crate::config::miner_kind_from_backend;
+use crate::types::miner::MinerKind;
+
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -110,7 +110,7 @@ pub struct ChainView {
     pub miner_registered: bool,
     /// `QuantumPow.Miners[account]`, or `None` when the account is not
     /// registered.
-    pub miner_info: Option<crate::chain::MinerInfo>,
+    pub miner_info: Option<crate::types::miner::MinerInfo>,
 }
 
 /// Per-backend counters and roster, plus the process-global counters.
@@ -298,7 +298,7 @@ impl CoordinatorMetrics {
 /// name is appended as the suffix the UI displays.
 #[must_use]
 pub fn miner_type_label(backend: &str) -> String {
-    let prefix = match miner_kind_from_backend(backend) {
+    let prefix = match MinerKind::from_backend(backend) {
         MinerKind::Cpu | MinerKind::Asic => "CPU",
         MinerKind::Gpu | MinerKind::Metal => "GPU",
         MinerKind::QpuDwave | MinerKind::QpuIbm | MinerKind::QpuIonq | MinerKind::QpuPasqal => {

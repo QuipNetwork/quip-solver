@@ -17,7 +17,9 @@
 mod common;
 
 use ising_generators::random::derive_nonce;
-use quip_coordinator::chain::{FakeChain, JobOrder, MiningSnapshot, PendingProof};
+use quip_coordinator::chain::{FakeChain, JobOrder, PendingProof};
+use quip_coordinator::types::snapshot::MiningSnapshot;
+
 use quip_coordinator::config::LaunchEntry;
 use quip_coordinator::router::MinerCaps;
 use quip_coordinator::runtime::{feeder_loop, run_runtime, FeederParams, RuntimeParams};
@@ -43,7 +45,8 @@ fn ising_snapshot() -> MiningSnapshot {
     let j = vec![-1000, 1000];
     let spin = vec![-1000, 1000];
     let topology_hash =
-        quip_coordinator::topology::topology_hash_sets(&nodes, &edges, &h, &j, &spin).to_vec();
+        quip_coordinator::types::topology::topology_hash_sets(&nodes, &edges, &h, &j, &spin)
+            .to_vec();
     MiningSnapshot {
         head_hash: [0u8; 32],
         last_proof_block_hash: [7u8; 32],
@@ -58,7 +61,7 @@ fn ising_snapshot() -> MiningSnapshot {
         min_diversity_milli: 0,
         block_number: 42,
         spec_version: 117,
-        target_proof_blocks: quip_coordinator::decay::TARGET_PROOF_BLOCKS,
+        target_proof_blocks: quip_coordinator::types::snapshot::TARGET_PROOF_BLOCKS,
         family: None,
     }
 }
@@ -145,14 +148,14 @@ fn named_feeder_params(buffer_depth: usize, poll_ms: u64) -> FeederParams {
         public_host: Some("96.233.112.201".into()),
         rpc_endpoints: vec!["ws://127.0.0.1:9944".into()],
         miners: vec![
-            quip_coordinator::chain::MinerSpecScale {
-                kind: quip_coordinator::chain::MinerKind::Cpu,
+            quip_coordinator::types::miner::MinerSpecScale {
+                kind: quip_coordinator::types::miner::MinerKind::Cpu,
                 label: Some(b"cpu-0".to_vec()),
                 backend: Some(b"cpu".to_vec()),
                 device_id: None,
             },
-            quip_coordinator::chain::MinerSpecScale {
-                kind: quip_coordinator::chain::MinerKind::Metal,
+            quip_coordinator::types::miner::MinerSpecScale {
+                kind: quip_coordinator::types::miner::MinerKind::Metal,
                 label: Some(b"metal-0".to_vec()),
                 backend: Some(b"metal".to_vec()),
                 device_id: None,
@@ -199,7 +202,7 @@ fn clearing_pending_proof(snap: &MiningSnapshot, account: [u8; 32]) -> PendingPr
 
 /// Three mutually distant rows, each pair at symmetric Hamming distance 2 of 4
 /// spins, so any two score 500 milli and all three score 500 milli.
-fn distant_rows() -> Vec<quip_coordinator::validate::SpinRow> {
+fn distant_rows() -> Vec<quip_coordinator::types::proof::SpinRow> {
     [
         (vec![1, 1, 1, 1], -3000),
         (vec![1, 1, -1, -1], -2000),
@@ -207,7 +210,7 @@ fn distant_rows() -> Vec<quip_coordinator::validate::SpinRow> {
     ]
     .into_iter()
     .map(
-        |(spins, energy_milli)| quip_coordinator::validate::SpinRow {
+        |(spins, energy_milli)| quip_coordinator::types::proof::SpinRow {
             spins,
             energy_milli,
         },
@@ -648,7 +651,7 @@ async fn feeder_sends_requirements_before_staging_each_round() {
 /// includes the proof arrives. That block's hash is the next root.
 #[tokio::test]
 async fn feeder_stops_on_a_clearing_pending_proof_and_mines_the_new_root() {
-    use quip_coordinator::chain::extrinsic::hex_encode;
+    use quip_coordinator::types::hex::hex_encode;
 
     let mut f = Feeder::spawn_with_outbound(
         FakeChain::new(snapshot_with_head([1u8; 32]), None),
@@ -708,7 +711,7 @@ async fn feeder_resumes_when_the_pending_proof_leaves_the_pool_without_a_qblock(
     );
     assert_eq!(
         f.state.lock().await.last_proof_block_hash,
-        quip_coordinator::chain::extrinsic::hex_encode(&[1u8; 32]),
+        quip_coordinator::types::hex::hex_encode(&[1u8; 32]),
         "resume keeps the root"
     );
 
@@ -1075,8 +1078,8 @@ async fn feeder_files_descriptor_once_across_two_rounds() {
     assert_eq!(
         desc.miners.iter().map(|m| m.kind).collect::<Vec<_>>(),
         vec![
-            quip_coordinator::chain::MinerKind::Cpu,
-            quip_coordinator::chain::MinerKind::Metal
+            quip_coordinator::types::miner::MinerKind::Cpu,
+            quip_coordinator::types::miner::MinerKind::Metal
         ]
     );
     f.stop().await;
@@ -1211,7 +1214,7 @@ async fn feeder_holds_a_stashed_candidate_until_the_live_difficulty_admits_it() 
                 curve: None,
                 epoch_length: 1,
                 algorithm: quip_coordinator::decay::DecayAlgorithm::Stepwise,
-                target_proof_blocks: quip_coordinator::decay::TARGET_PROOF_BLOCKS,
+                target_proof_blocks: quip_coordinator::types::snapshot::TARGET_PROOF_BLOCKS,
             }),
             0,
         );
@@ -1279,7 +1282,7 @@ async fn feeder_switches_the_decay_projection_when_the_runtime_upgrades() {
         }),
         epoch_length: 10,
         algorithm: DecayAlgorithm::Stepwise,
-        target_proof_blocks: quip_coordinator::decay::TARGET_PROOF_BLOCKS,
+        target_proof_blocks: quip_coordinator::types::snapshot::TARGET_PROOF_BLOCKS,
     };
     {
         let mut st = f.state.lock().await;

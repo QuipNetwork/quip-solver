@@ -6,13 +6,12 @@
 
 use super::extrinsic::{
     build_hybrid_signed_extrinsic, default_topology_storage_key, difficulties_storage_key,
-    extrinsic_hash, foundation_members_storage_key, foundation_voting_storage_key, hex_decode,
-    hex_encode, job_orders_storage_key, last_proof_block_hash_storage_key,
-    last_proof_block_storage_key, load_hybrid_pair, mineable_topologies_prefix,
-    miner_identity_bytes, miners_storage_key, node_descriptors_storage_key,
-    order_solutions_storage_key, participants_by_qblock_storage_key, qblocks_storage_key,
-    registered_topologies_storage_key, signer_account_bytes, solvers_storage_key,
-    target_proof_blocks_override_storage_key, topology_curve_c_storage_key,
+    extrinsic_hash, foundation_members_storage_key, foundation_voting_storage_key,
+    job_orders_storage_key, last_proof_block_hash_storage_key, last_proof_block_storage_key,
+    load_hybrid_pair, mineable_topologies_prefix, miner_identity_bytes, miners_storage_key,
+    node_descriptors_storage_key, order_solutions_storage_key, participants_by_qblock_storage_key,
+    qblocks_storage_key, registered_topologies_storage_key, signer_account_bytes,
+    solvers_storage_key, target_proof_blocks_override_storage_key, topology_curve_c_storage_key,
     topology_energy_band_storage_key, RuntimeTxContext, SignedExtensionContext,
 };
 use super::pool::{decode_pending_proof, PendingProof};
@@ -22,22 +21,25 @@ use super::scale_types::{
     encode_register_solver_call, encode_set_descriptor_call, encode_submit_proof_call,
     encode_submit_solution_call, require_set_values, CurveCScale, DifficultyConfig,
     EnergyBandScale, FamilyDescriptorScale, FoundationVotesScale, JobOrderScale, JobSolutionScale,
-    MinerInfoScale, MinerKind, NodeDescriptorV2Input, OrderStatus, OrderTiming, SolverInfoScale,
-    SolverType, TopologyMetaScale, WeightScale,
+    MinerInfoScale, NodeDescriptorV2Input, OrderStatus, OrderTiming, SolverInfoScale, SolverType,
+    TopologyMetaScale, WeightScale,
 };
 use super::submit::{
     classify_descriptor, classify_participation, classify_receipt, classify_registration,
-    DescriptorOutcome, ParticipationOutcome, Proof, RegistrationOutcome, SubmitAction,
-    SubmitReceipt,
+    DescriptorOutcome, ParticipationOutcome, RegistrationOutcome, SubmitAction, SubmitReceipt,
 };
 use super::transport::RpcTransport;
 use super::transport_jsonrpsee::JsonrpseeTransport;
 use super::watch::{parse_tx_status, TxStatus};
-use super::{ChainClient, ChainError, DecayParams, JobOrder, MinerInfo, MiningSnapshot};
-use crate::decay::{
-    DEFAULT_BASE_MAX_ENERGY_MILLI, DEFAULT_C_EASY_MILLI, DEFAULT_C_HARD_MILLI,
-    DEFAULT_C_KNEE_MILLI, EPOCH_LENGTH_BLOCKS,
+use super::{ChainClient, ChainError, JobOrder};
+use crate::types::hex::{hex_decode, hex_encode};
+use crate::types::miner::{MinerInfo, MinerKind};
+use crate::types::proof::Proof;
+use crate::types::snapshot::{
+    DecayParams, MiningSnapshot, DEFAULT_BASE_MAX_ENERGY_MILLI, DEFAULT_C_EASY_MILLI,
+    DEFAULT_C_HARD_MILLI, DEFAULT_C_KNEE_MILLI, EPOCH_LENGTH_BLOCKS,
 };
+
 use async_trait::async_trait;
 use futures::StreamExt as _;
 use parity_scale_codec::{Decode, Encode as _};
@@ -409,34 +411,34 @@ impl RealChainClient {
         topology_hash: [u8; 32],
         meta: &TopologyMetaScale,
         descriptor: &FamilyDescriptorScale,
-    ) -> Result<crate::lease::ChallengeFamily, String> {
+    ) -> Result<crate::types::family::ChallengeFamily, String> {
         let id = String::from_utf8_lossy(&descriptor.family_id);
         let label = format!("{id} revision {}", descriptor.revision);
         let family_id = std::str::from_utf8(&descriptor.family_id)
             .map_err(|_| format!("family id of {label} is not UTF-8"))?;
-        let topology = crate::topology::Topology::from_nodes_edges(
+        let topology = crate::types::topology::Topology::from_nodes_edges(
             meta.nodes.clone(),
             meta.edges.clone(),
             &[],
             &[],
             &[],
         );
-        let family = crate::lease::ChallengeFamily::admit(
-            crate::lease::FAMILY_CONTRACTS,
+        let family = crate::types::family::ChallengeFamily::admit(
+            crate::types::family::FAMILY_CONTRACTS,
             family_id,
             descriptor.revision,
             descriptor.params.clone(),
             &topology,
         )
         .map_err(|code| format!("this build does not admit family {label}: {code:?}"))?;
-        let legacy_hash = crate::topology::topology_hash(
+        let legacy_hash = crate::types::topology::topology_hash(
             &meta.nodes,
             &meta.edges,
             &meta.allowed_h_values.as_slice(),
             &meta.allowed_j_values.as_slice(),
             &meta.allowed_spin_values.as_slice(),
         );
-        let rebuilt = crate::topology::family_topology_hash(
+        let rebuilt = crate::types::topology::family_topology_hash(
             legacy_hash,
             *family.descriptor_digest(),
             *family.topology_order_digest(),
@@ -459,8 +461,13 @@ impl RealChainClient {
         topology_hash: [u8; 32],
         at_hex: &str,
         api_version: u32,
-    ) -> Result<Option<(TopologyMetaScale, Option<crate::lease::ChallengeFamily>)>, ChainError>
-    {
+    ) -> Result<
+        Option<(
+            TopologyMetaScale,
+            Option<crate::types::family::ChallengeFamily>,
+        )>,
+        ChainError,
+    > {
         let Some(meta) = self
             .topology_meta(topology_hash, at_hex, api_version)
             .await?
@@ -479,7 +486,7 @@ impl RealChainClient {
         &self,
         topology_hash: [u8; 32],
         meta: &TopologyMetaScale,
-    ) -> Result<Option<crate::lease::ChallengeFamily>, FamilyRefused> {
+    ) -> Result<Option<crate::types::family::ChallengeFamily>, FamilyRefused> {
         let Some(descriptor) = &meta.family else {
             return Ok(None);
         };
@@ -1344,7 +1351,7 @@ impl ChainClient for RealChainClient {
             block_number,
             spec_version,
             target_proof_blocks: target_override
-                .map_or(crate::decay::TARGET_PROOF_BLOCKS, u64::from),
+                .map_or(crate::types::snapshot::TARGET_PROOF_BLOCKS, u64::from),
             family,
         };
 
@@ -2090,9 +2097,9 @@ mod tests {
         let missing = serde_json::json!({ "specName": "quip-runtime" });
         assert!(parse_spec_version(&missing).is_err());
     }
-    use crate::chain::scale_types::MinerKind;
     use crate::chain::transport::RpcTransport;
     use crate::chain::{ChainError, MiningSnapshot};
+    use crate::types::miner::MinerKind;
     use quip_transaction_crypto::HybridPair;
     use serde_json::Value as JsonValue;
     use sp_core::Pair as _;
@@ -2352,12 +2359,14 @@ mod tests {
             params: JsonValue,
         ) -> Result<JsonValue, ChainError> {
             use crate::chain::extrinsic::{
-                default_topology_storage_key, difficulties_storage_key, hex_decode,
+                default_topology_storage_key, difficulties_storage_key,
                 last_proof_block_hash_storage_key, last_proof_block_storage_key,
                 target_proof_blocks_override_storage_key, topology_curve_c_storage_key,
                 topology_energy_band_storage_key,
             };
+            use crate::types::hex::hex_decode;
             use parity_scale_codec::Encode as _;
+
             let arg = |i: usize| {
                 params
                     .get(i)
@@ -2503,14 +2512,14 @@ mod tests {
             },
         )
         .expect("the validator admits the fixture");
-        let legacy = crate::topology::topology_hash(
+        let legacy = crate::types::topology::topology_hash(
             &meta.nodes,
             &meta.edges,
             &meta.allowed_h_values.as_slice(),
             &meta.allowed_j_values.as_slice(),
             &meta.allowed_spin_values.as_slice(),
         );
-        crate::topology::family_topology_hash(
+        crate::types::topology::family_topology_hash(
             legacy,
             challenge.descriptor_digest(),
             challenge.topology_order_digest(),
@@ -2569,7 +2578,7 @@ mod tests {
         use crate::chain::ChainClient as _;
         let meta = family_meta(1);
         let hash = chain_family_hash(&meta);
-        let legacy = crate::topology::topology_hash(
+        let legacy = crate::types::topology::topology_hash(
             &meta.nodes,
             &meta.edges,
             &meta.allowed_h_values.as_slice(),
@@ -2597,7 +2606,7 @@ mod tests {
         use crate::chain::proof_encode::WitnessFormat;
         use quantum_validation::AllowedValueSpec;
         let meta = family_meta(1);
-        let topology = crate::topology::Topology::from_nodes_edges(
+        let topology = crate::types::topology::Topology::from_nodes_edges(
             meta.nodes.clone(),
             meta.edges.clone(),
             &[],
@@ -2618,7 +2627,7 @@ mod tests {
             min_diversity_milli: 0,
             block_number: 1,
             spec_version: 120,
-            target_proof_blocks: crate::decay::TARGET_PROOF_BLOCKS,
+            target_proof_blocks: crate::types::snapshot::TARGET_PROOF_BLOCKS,
             family: None,
         };
         let spin = AllowedValueSpec::Set(vec![-1000, 1000]);
@@ -2627,8 +2636,8 @@ mod tests {
             WitnessFormat::Packed { num_nodes, .. } if num_nodes == meta.nodes.len()
         ));
         let descriptor = meta.family.expect("a family topology");
-        let family = crate::lease::ChallengeFamily::admit(
-            crate::lease::FAMILY_CONTRACTS,
+        let family = crate::types::family::ChallengeFamily::admit(
+            crate::types::family::FAMILY_CONTRACTS,
             std::str::from_utf8(&descriptor.family_id).expect("ascii id"),
             descriptor.revision,
             descriptor.params,
@@ -2842,7 +2851,7 @@ mod tests {
             min_diversity_milli: 0,
             block_number: 1,
             spec_version,
-            target_proof_blocks: crate::decay::TARGET_PROOF_BLOCKS,
+            target_proof_blocks: crate::types::snapshot::TARGET_PROOF_BLOCKS,
             family: None,
         }
     }
@@ -2870,8 +2879,9 @@ mod tests {
 
     #[tokio::test]
     async fn pending_proofs_are_verified_and_the_context_is_cached_per_spec_version() {
-        use crate::chain::extrinsic::{extrinsic_hash, hex_decode};
+        use crate::chain::extrinsic::extrinsic_hash;
         use crate::chain::ChainClient as _;
+        use crate::types::hex::hex_decode;
         let upgraded_entry = pool_entry([0x11; 32], 101, 2);
         let upgraded_hash = extrinsic_hash(&hex_decode(&upgraded_entry).expect("upgraded hex"));
         let validator = std::sync::Arc::new(PoolValidator {
@@ -2948,16 +2958,17 @@ mod tests {
     mod bid_orders {
         use super::super::Confirmation;
         use crate::chain::extrinsic::{
-            hex_decode, hex_encode, job_orders_storage_key, signer_account_bytes,
-            solvers_storage_key,
+            job_orders_storage_key, signer_account_bytes, solvers_storage_key,
         };
         use crate::chain::scale_types::{
-            IsingParams, JobMode, JobOrderScale, MinerKind, OrderStatus, OrderTiming,
-            ResultDelivery, RewardResolution, SolverInfoScale, SolverType,
+            IsingParams, JobMode, JobOrderScale, OrderStatus, OrderTiming, ResultDelivery,
+            RewardResolution, SolverInfoScale, SolverType,
         };
         use crate::chain::{
             BoxStream, ChainClient, ChainError, RealChainClient, RegistrationOutcome, RpcTransport,
         };
+        use crate::types::hex::{hex_decode, hex_encode};
+        use crate::types::miner::MinerKind;
         use parity_scale_codec::Encode as _;
         use quip_transaction_crypto::HybridPair;
         use serde_json::Value;
@@ -3331,9 +3342,12 @@ mod tests {
 #[cfg(test)]
 mod default_topology_tests {
     use super::RealChainClient;
-    use crate::chain::extrinsic::{default_topology_storage_key, hex_encode};
+    use crate::chain::extrinsic::default_topology_storage_key;
     use crate::chain::scale_types::TopologyMetaScale;
-    use crate::chain::{BoxStream, ChainError, MinerKind, RpcTransport};
+    use crate::chain::{BoxStream, ChainError, RpcTransport};
+    use crate::types::hex::hex_encode;
+    use crate::types::miner::MinerKind;
+
     use parity_scale_codec::Encode;
     use quantum_validation::AllowedValueSpec;
     use serde_json::Value;

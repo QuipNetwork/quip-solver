@@ -7,7 +7,9 @@
 //! position-resolved graph ([`ResolvedTopo`]) with no node-id lookup.
 //! `quantum_validation::energy_of_solution` is retained as a debug golden check.
 
+use crate::types::proof::SpinRow;
 use quantum_validation::{calculate_diversity, select_diverse, MilliValue};
+
 use quip_proto::v1::{ising_problem, IsingProblem, Solution};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -18,17 +20,6 @@ use std::collections::{HashMap, HashSet};
 /// extrinsic dispatches. The coordinator therefore submits only the
 /// diverse-selected subset, and the pallet re-selects within it.
 pub const MAX_PROOF_SOLUTIONS: usize = 32;
-
-/// One decoded solution: spins in node order and the energy this coordinator
-/// scored for them. The internal form of a proof row. Wire solutions are
-/// decoded once, when a result is validated.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SpinRow {
-    /// `+1`/`-1` spins in topology node order.
-    pub spins: Vec<i8>,
-    /// Energy in milli-units.
-    pub energy_milli: i64,
-}
 
 /// [`MAX_PROOF_SOLUTIONS`] as the wire `SetTarget.max_proof_solutions` value.
 pub const MAX_PROOF_SOLUTIONS_WIRE: u32 = 32;
@@ -269,7 +260,7 @@ pub fn validate_result(
     gates: &QualityGates,
     topo: &ResolvedTopo,
 ) -> Validated {
-    let (h_milli, j_milli) = match crate::producer::problem::problem_milli(problem) {
+    let (h_milli, j_milli) = match crate::types::problem::problem_milli(problem) {
         Ok(coefficients) => coefficients,
         Err(e) => {
             tracing::error!(error = %e, "validate_result: malformed problem coefficients; rejecting result");
@@ -535,7 +526,7 @@ mod tests {
         j: &[i32],
         num_reads: u32,
     ) -> IsingProblem {
-        let mut problem = crate::producer::problem::milli_problem(graph, h, j);
+        let mut problem = crate::types::problem::milli_problem(graph, h, j);
         problem.num_reads = num_reads;
         problem
     }
@@ -702,7 +693,7 @@ mod tests {
             couplings.push(if edge_idx % 2 == 0 { 1000 } else { -1000 });
         }
         let problem = {
-            let mut problem = crate::producer::problem::milli_problem(
+            let mut problem = crate::types::problem::milli_problem(
                 Some(ising_problem::Graph::Edges(quip_proto::v1::EdgeList {
                     u: edge_u,
                     v: edge_v,
@@ -799,7 +790,7 @@ mod tests {
         let mut h = vec![0i32; SHAPE_SPINS];
         h.extend_from_slice(&[1000, 2000, 4000, 8000]);
         {
-            let mut problem = crate::producer::problem::milli_problem(None, &h, &[]);
+            let mut problem = crate::types::problem::milli_problem(None, &h, &[]);
             problem.num_reads = 0;
             problem
         }

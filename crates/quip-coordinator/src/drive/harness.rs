@@ -13,7 +13,7 @@ use crate::config::LaunchEntry;
 use crate::drive::report::JobRow;
 use crate::router::{MinerCaps, Router};
 use crate::session::{coord, shutdown_msg, CoordinatorState};
-use crate::topology::Topology;
+use crate::types::topology::Topology;
 use crate::validate::validate_result;
 use quip_proto::v1::miner_service_server::{MinerService, MinerServiceServer};
 use quip_proto::v1::{
@@ -733,10 +733,9 @@ pub async fn run_drive(p: DriveManyParams<'_>) -> DriveManyReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drive::{
-        aggregate, drain_all, parse_topology_spec, write_jsonl, LeaseSource, ListSource,
-        TopologySpec, TopologySpecError,
-    };
+    use crate::drive::{aggregate, drain_all, write_jsonl, LeaseSource, ListSource};
+    use crate::types::topology_spec::{parse_topology_spec, TopologySpec, TopologySpecError};
+
     use crate::validate::MAX_PROOF_SOLUTIONS_WIRE;
     use quip_proto::v1::miner_service_client::MinerServiceClient;
     use quip_proto::v1::{
@@ -897,7 +896,7 @@ mod tests {
         Job {
             job_id: vec![id],
             kind: JobKind::IsingSample as i32,
-            ising: Some(crate::producer::problem::milli_problem(
+            ising: Some(crate::types::problem::milli_problem(
                 Some(ising_problem::Graph::Edges(EdgeList { u, v })),
                 &vec![0; nodes],
                 &vec![0; edges.len()],
@@ -1004,7 +1003,7 @@ mod tests {
             &[-1000, 1000],
         );
         let native_hash =
-            crate::topology::native_topology_hash(&topology.nodes, &topology.edge_pairs())
+            crate::types::topology::native_topology_hash(&topology.nodes, &topology.edge_pairs())
                 .expect("native graph is valid")
                 .to_vec();
         let mut session = DriveTestSession::new(

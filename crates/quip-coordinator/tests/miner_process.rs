@@ -69,8 +69,8 @@ mod protocol_version {
             },
         );
         let chain = Arc::new(FakeChain::new(
-            quip_coordinator::drive::parse_topology_spec(
-                quip_coordinator::presets::preset_spec("smoke").expect("preset"),
+            quip_coordinator::types::topology_spec::parse_topology_spec(
+                quip_coordinator::types::topology_spec::preset_spec("smoke").expect("preset"),
             )
             .expect("spec")
             .to_snapshot(),
@@ -215,7 +215,7 @@ mod supervisor {
                 deadline_ms: 9_999_999,
                 ising: Some({
                     let mut problem =
-                        quip_coordinator::producer::problem::milli_problem(None, &[0; 2], &[0; 1]);
+                        quip_coordinator::types::problem::milli_problem(None, &[0; 2], &[0; 1]);
                     problem.num_reads = 0;
                     problem
                 }),
