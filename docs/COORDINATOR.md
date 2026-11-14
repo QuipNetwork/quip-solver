@@ -24,15 +24,33 @@ how they fit together. For build and run commands, see `AGENTS.md`.
   It registers the dimer1200 family topology (`quip/twisted-ice-dimer`
   revision 1, solver-core's live recipe `x-w62-p1200`) on the
   `zephyr-z12t4-live` preset, sets its difficulty and energy band, adds it to
-  the mineable whitelist, and makes it the default. Runtime 120 has no `Sudo`
-  pallet, so the five calls go in one Foundation motion with threshold 1:
-  `Foundation.propose(ValidatorAdmission.dispatch_as_root(Utility.batch_all(...)))`.
-  Threshold 1 executes at once only when the signer is the sole Foundation
-  member, as `//Alice` is on the `dev` preset. A larger Foundation needs a
-  vote. The command refuses runtimes before 120 and a chain that already has
-  a default topology. It reads `DefaultTopology` back and fails unless it
-  equals the locally computed family hash, because the outer extrinsic
-  succeeds even when the batch inside it fails.
+  the mineable whitelist, and makes it the default. It refuses a chain that
+  already has a default topology.
+- `quip-coordinator set-family …` — makes another `quip/twisted-ice-dimer`
+  revision 1 topology the default, on a fresh chain or on a seeded one. It
+  takes the parameters as `--weak-milli` and `--pairs`, or as
+  `--params-hex`, the graph as `--topology` or `--topology-preset`, and the
+  energy band and first ceiling as required inputs. On a seeded chain the
+  batch also removes every other topology from the mineable whitelist, the
+  old default last. The pallet accepts a proof on any mineable topology, so
+  an old topology left on the whitelist would still pay out. `--dry-run`
+  prints the calls, the family hash and the motion without signing.
+
+Both commands run the same activation. Runtime 120 has no `Sudo` pallet, so
+the calls go in one Foundation motion:
+`Foundation.propose(ValidatorAdmission.dispatch_as_root(Utility.batch_all(...)))`.
+`dispatch_as_root` needs two thirds of the Foundation, so the threshold is
+⌈2N/3⌉ of N members, read from `Foundation.Members`. One member gives a
+threshold of 1, which executes at once, as `//Alice` does on the `dev`
+preset. With more members, each member runs the same command. The first run
+proposes the motion. Every run votes aye on the motion with the same proposal
+hash. The run whose vote reaches the threshold also calls `close`. Before
+anything is signed, the command checks the descriptor against the runtime's
+own family admission (`quantum_validation`, with the runtime's node and edge
+caps) and against the coordinator's. The command reports success only when
+`DefaultTopology` equals the locally computed family hash, because the outer
+extrinsic succeeds even when the batch inside it fails. Both commands refuse
+runtimes before 120.
 
 ## Logging
 

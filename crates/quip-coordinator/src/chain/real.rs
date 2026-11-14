@@ -6,13 +6,14 @@
 
 use super::extrinsic::{
     build_hybrid_signed_extrinsic, default_topology_storage_key, difficulties_storage_key,
-    extrinsic_hash, hex_decode, hex_encode, job_orders_storage_key,
-    last_proof_block_hash_storage_key, last_proof_block_storage_key, load_hybrid_pair,
+    extrinsic_hash, foundation_members_storage_key, foundation_voting_storage_key, hex_decode,
+    hex_encode, job_orders_storage_key, last_proof_block_hash_storage_key,
+    last_proof_block_storage_key, load_hybrid_pair, mineable_topologies_prefix,
     miner_identity_bytes, miners_storage_key, node_descriptors_storage_key,
     order_solutions_storage_key, participants_by_qblock_storage_key, qblocks_storage_key,
-    signer_account_bytes, solvers_storage_key, target_proof_blocks_override_storage_key,
-    topology_curve_c_storage_key, topology_energy_band_storage_key, RuntimeTxContext,
-    SignedExtensionContext,
+    registered_topologies_storage_key, signer_account_bytes, solvers_storage_key,
+    target_proof_blocks_override_storage_key, topology_curve_c_storage_key,
+    topology_energy_band_storage_key, RuntimeTxContext, SignedExtensionContext,
 };
 use super::pool::{decode_pending_proof, PendingProof};
 use super::proof_encode::{build_quantum_proof, ProofBuildContext, WitnessFormat};
@@ -20,9 +21,9 @@ use super::scale_types::{
     encode_deregister_solver_call, encode_participate_call, encode_register_miner_call,
     encode_register_solver_call, encode_set_descriptor_call, encode_submit_proof_call,
     encode_submit_solution_call, require_set_values, CurveCScale, DifficultyConfig,
-    EnergyBandScale, FamilyDescriptorScale, JobOrderScale, JobSolutionScale, MinerInfoScale,
-    MinerKind, NodeDescriptorV2Input, OrderStatus, OrderTiming, SolverInfoScale, SolverType,
-    TopologyMetaScale,
+    EnergyBandScale, FamilyDescriptorScale, FoundationVotesScale, JobOrderScale, JobSolutionScale,
+    MinerInfoScale, MinerKind, NodeDescriptorV2Input, OrderStatus, OrderTiming, SolverInfoScale,
+    SolverType, TopologyMetaScale, WeightScale,
 };
 use super::submit::{
     classify_descriptor, classify_participation, classify_receipt, classify_registration,
@@ -39,7 +40,7 @@ use crate::decay::{
 };
 use async_trait::async_trait;
 use futures::StreamExt as _;
-use parity_scale_codec::Decode;
+use parity_scale_codec::{Decode, Encode as _};
 use quantum_validation::AllowedValueSpec;
 use quip_transaction_crypto::{account_id_from_public, HybridPair};
 use serde_json::Value;
@@ -553,14 +554,120 @@ impl RealChainClient {
     /// Returns a transport error when the validator cannot be reached, or a
     /// decode error when the stored value is not a 32-byte hash.
     pub(crate) async fn default_topology(&self) -> Result<Option<[u8; 32]>, ChainError> {
+        let at = self.head_hex().await?;
+        self.read_storage::<[u8; 32]>(&default_topology_storage_key(), &at)
+            .await
+    }
+
+    /// The current head block hash, `0x`-prefixed.
+    pub(crate) async fn head_hex(&self) -> Result<String, ChainError> {
         let head = self
             .rpc_call("chain_getBlockHash", Value::Array(vec![]))
             .await?;
-        let at = head
-            .as_str()
-            .ok_or_else(|| ChainError::Decode("chain_getBlockHash not a string".into()))?;
-        self.read_storage::<[u8; 32]>(&default_topology_storage_key(), at)
+        head.as_str()
+            .map(String::from)
+            .ok_or_else(|| ChainError::Decode("chain_getBlockHash not a string".into()))
+    }
+
+    /// Every key of `QuantumPow.MineableTopologies` at `at`.
+    ///
+    /// The pallet keeps at most the default and one other topology mineable,
+    /// so one page holds the whole map; a full page means that invariant does
+    /// not hold here and is reported rather than read past.
+    pub(crate) async fn mineable_topologies(&self, at: &str) -> Result<Vec<[u8; 32]>, ChainError> {
+        const PAGE: u32 = 64;
+        let prefix = mineable_topologies_prefix();
+        let page = self
+            .rpc_call(
+                "state_getKeysPaged",
+                Value::Array(vec![
+                    Value::String(hex_encode(&prefix)),
+                    Value::Number(PAGE.into()),
+                    Value::Null,
+                    Value::String(at.to_string()),
+                ]),
+            )
+            .await?;
+        let keys = page
+            .as_array()
+            .ok_or_else(|| ChainError::Decode("state_getKeysPaged not an array".into()))?;
+        if keys.len() >= PAGE as usize {
+            return Err(ChainError::Decode(format!(
+                "QuantumPow.MineableTopologies holds {} or more keys",
+                keys.len()
+            )));
+        }
+        keys.iter()
+            .map(|k| {
+                let bytes = k
+                    .as_str()
+                    .ok_or_else(|| ChainError::Decode("storage key not a string".into()))
+                    .and_then(|hex| hex_decode(hex).map_err(ChainError::Decode))?;
+                // prefix ++ blake2_128(hash) ++ hash
+                bytes
+                    .get(prefix.len() + 16..)
+                    .and_then(|h| <[u8; 32]>::try_from(h).ok())
+                    .ok_or_else(|| ChainError::Decode("mineable topology key length".into()))
+            })
+            .collect()
+    }
+
+    /// Is `hash` in `QuantumPow.RegisteredTopologies` at `at`?
+    pub(crate) async fn topology_registered(
+        &self,
+        hash: &[u8; 32],
+        at: &str,
+    ) -> Result<bool, ChainError> {
+        self.storage_value_present(&registered_topologies_storage_key(hash), at)
             .await
+    }
+
+    /// The Foundation member accounts at `at`.
+    pub(crate) async fn foundation_members(&self, at: &str) -> Result<Vec<[u8; 32]>, ChainError> {
+        Ok(self
+            .read_storage::<Vec<[u8; 32]>>(&foundation_members_storage_key(), at)
+            .await?
+            .unwrap_or_default())
+    }
+
+    /// The open Foundation vote on `proposal_hash` at `at`, if any.
+    pub(crate) async fn foundation_votes(
+        &self,
+        proposal_hash: &[u8; 32],
+        at: &str,
+    ) -> Result<Option<FoundationVotesScale>, ChainError> {
+        self.read_storage::<FoundationVotesScale>(&foundation_voting_storage_key(proposal_hash), at)
+            .await
+    }
+
+    /// The dispatch weight of `call`, from `TransactionPaymentCallApi`.
+    ///
+    /// `Foundation.close` needs at least the proposal's weight as its bound.
+    pub(crate) async fn call_weight(&self, call: &[u8]) -> Result<WeightScale, ChainError> {
+        let mut args = call.to_vec();
+        u32::try_from(call.len())
+            .map_err(|_| ChainError::Decode("call longer than u32".into()))?
+            .encode_to(&mut args);
+        let result = self
+            .rpc_call(
+                "state_call",
+                Value::Array(vec![
+                    Value::String("TransactionPaymentCallApi_query_call_info".into()),
+                    Value::String(hex_encode(&args)),
+                ]),
+            )
+            .await?;
+        let hex = result
+            .as_str()
+            .ok_or_else(|| ChainError::Decode("query_call_info not a string".into()))?;
+        let bytes = hex_decode(hex).map_err(ChainError::Decode)?;
+        // RuntimeDispatchInfo { weight, class, partial_fee }: the weight leads.
+        WeightScale::decode(&mut &bytes[..]).map_err(|e| ChainError::Decode(e.to_string()))
+    }
+
+    /// The account this client signs with.
+    pub(crate) fn signer_account(&self) -> Result<[u8; 32], ChainError> {
+        Ok(signer_account_bytes(&self.pair()?))
     }
 
     /// Read the genesis hash and the runtime versions from the validator.
@@ -806,10 +913,18 @@ impl RealChainClient {
                 )
                 .await
             }
-            Confirmation::DefaultTopology => {
-                self.storage_value_present(&default_topology_storage_key(), block_hex)
+            Confirmation::DefaultTopologyIs { hash } => Ok(self
+                .read_storage::<[u8; 32]>(&default_topology_storage_key(), block_hex)
+                .await?
+                == Some(hash)),
+            Confirmation::MotionOpen { proposal } => {
+                self.storage_value_present(&foundation_voting_storage_key(&proposal), block_hex)
                     .await
             }
+            Confirmation::Voted { proposal, account } => Ok(self
+                .foundation_votes(&proposal, block_hex)
+                .await?
+                .is_some_and(|votes| votes.ayes.contains(&account))),
             Confirmation::SolverRegistered { account } => {
                 let stored = self
                     .read_storage::<SolverInfoScale>(&solvers_storage_key(&account), block_hex)
@@ -971,8 +1086,16 @@ impl RealChainClient {
                 "dispatch failed and this account is absent from the participant set for qblock \
                  {qblock_id}"
             ),
-            Confirmation::DefaultTopology => {
-                "dispatch failed and QuantumPow.DefaultTopology is still unset".to_string()
+            Confirmation::DefaultTopologyIs { .. } => {
+                "dispatch failed and QuantumPow.DefaultTopology is not the requested topology"
+                    .to_string()
+            }
+            Confirmation::MotionOpen { .. } => {
+                "dispatch failed and Foundation.Voting holds no vote for the motion".to_string()
+            }
+            Confirmation::Voted { .. } => {
+                "dispatch failed and Foundation.Voting does not list this account as an aye"
+                    .to_string()
             }
             Confirmation::SolverRegistered { .. } => {
                 "dispatch failed and QuantumComputeMempool.Solvers has no entry with the requested \
@@ -1037,8 +1160,16 @@ pub(crate) enum Confirmation {
     MinerRegistered { account: [u8; 32] },
     /// `MinerRegistry.ParticipantsByQBlock[qblock_id][account]` is present.
     Participation { qblock_id: u64, account: [u8; 32] },
-    /// `QuantumPow.DefaultTopology` is present. Used by seed-chain.
-    DefaultTopology,
+    /// `QuantumPow.DefaultTopology` equals this hash. Presence alone is not
+    /// enough on a chain that already had a default.
+    DefaultTopologyIs { hash: [u8; 32] },
+    /// `Foundation.Voting[proposal]` is present: the motion is open for votes.
+    MotionOpen { proposal: [u8; 32] },
+    /// `Foundation.Voting[proposal]` lists this account among the ayes.
+    Voted {
+        proposal: [u8; 32],
+        account: [u8; 32],
+    },
     /// `QuantumComputeMempool.Solvers[account]` holds the configured solver type.
     SolverRegistered { account: [u8; 32] },
     /// `QuantumComputeMempool.Solvers[account]` is absent.
