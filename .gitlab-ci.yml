@@ -429,6 +429,20 @@ build-coordinator-darwin-arm64:
     - if: $CI_COMMIT_TAG
   variables:
     CARGO_HOME: $CI_PROJECT_DIR/.cargo
+  # Without a cache every run cloned polkadot-sdk (about 560 MB of git
+  # history) and compiled every crate from nothing, which ran into the
+  # runner's 10-minute limit on v0.3.9-rc2 and rc4. The paths match
+  # .toolchain. The key is fixed rather than built from Cargo.lock: this job
+  # runs only on tags, and each rc tag bumps the version in Cargo.lock, so a
+  # lockfile key would start every release cold. Cargo reuses whatever still
+  # matches and rebuilds the rest.
+  cache:
+    key: cargo-$CI_JOB_NAME
+    paths:
+      - .cargo/registry/index/
+      - .cargo/registry/cache/
+      - .cargo/git/db/
+      - target/
   # This job deliberately installs nothing but Rust. Nothing in the workspace
   # generates code from .proto files: there is no build.rs, and neither
   # prost-build nor tonic-build resolves into Cargo.lock, because tonic and
