@@ -221,10 +221,11 @@ async fn late_session_receipt_does_not_supply_the_next_rounds_best() {
         },
     )
     .await;
-    let shared_best = state.lock().await.current_best_milli;
-    assert!(
-        shared_best.is_some(),
-        "exercise the existing late state write"
+    assert_eq!(
+        state.lock().await.current_best_milli,
+        None,
+        "a receipt for generation {} must not set the best of generation 2",
+        job.generation
     );
     let mut log = next_round.lock().await;
     log.log_heartbeat(694, 2, 1, false);

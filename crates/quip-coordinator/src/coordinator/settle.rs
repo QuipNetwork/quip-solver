@@ -125,7 +125,12 @@ pub(crate) async fn settle_pow_result<R: ResultSink + ?Sized>(
         match submit_result.as_ref().map(|r| r.action) {
             Ok(SubmitAction::Success) => {
                 let mut st = state.lock().await;
-                st.current_best_milli = Some(validated.best_energy_milli);
+                // The receipt can land after the feeder entered a new
+                // generation and reset the best; only the job's own
+                // generation may take this energy.
+                if st.generation == job.generation {
+                    st.current_best_milli = Some(validated.best_energy_milli);
+                }
                 st.metrics.record_proof_submitted(miner_id);
                 if let Some(n) = submit_notify.lock().await.take() {
                     let _ = n.send(());
