@@ -37,6 +37,8 @@ pub struct FakeChain {
     sync: Mutex<Result<SyncStatus, String>>,
     balance_calls: Mutex<usize>,
     sync_calls: Mutex<usize>,
+    /// Calls to [`ChainClient::fetch_mining_snapshot`], one per feeder poll.
+    snapshot_calls: std::sync::atomic::AtomicUsize,
     /// Captured `qblock_id` values from [`ChainClient::declare_participation`].
     participations: Mutex<Vec<u64>>,
     /// Scripted participate result (default `Declared`).
@@ -91,6 +93,7 @@ impl FakeChain {
             })),
             balance_calls: Mutex::new(0),
             sync_calls: Mutex::new(0),
+            snapshot_calls: std::sync::atomic::AtomicUsize::new(0),
             participations: Mutex::new(Vec::new()),
             participation_result: Mutex::new(Ok(ParticipationOutcome::Declared)),
             descriptors: Mutex::new(Vec::new()),
@@ -332,6 +335,14 @@ impl FakeChain {
         }
     }
 
+    /// How many times `fetch_mining_snapshot` has been called. The feeder reads
+    /// it once at the top of every poll, so it counts polls started.
+    #[must_use]
+    pub fn snapshot_calls(&self) -> usize {
+        self.snapshot_calls
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// How many times `sync_status` has been called.
     ///
     /// # Panics
@@ -532,6 +543,9 @@ impl ChainClient for FakeChain {
         _miner_account: [u8; 32],
         _topology_hash: Option<[u8; 32]>,
     ) -> Result<Option<MiningSnapshot>, ChainError> {
+        let _ = self
+            .snapshot_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         #[expect(
             clippy::unwrap_used,
             reason = "test double; Mutex poison is a test failure"

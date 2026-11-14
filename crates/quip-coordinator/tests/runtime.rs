@@ -361,6 +361,27 @@ impl Feeder {
         wait_until(40, 40, async || self.chain.participation_calls() >= n).await
     }
 
+    /// Let the feeder finish `n` more polls, then return. Negative checks
+    /// ("nothing happened") run after this, so they prove the feeder looked
+    /// and did nothing, instead of proving that a wall-clock pause passed.
+    /// Run the test under `start_paused = true` so the wait costs no real time.
+    async fn after_polls(&self, n: usize) {
+        self.after_ticks(n, FakeChain::snapshot_calls).await;
+    }
+
+    /// Like [`Self::after_polls`] for a feeder held inside a failing round
+    /// step. The step retries once per poll interval, and `count` reads the
+    /// calls that step makes.
+    async fn after_ticks(&self, n: usize, count: fn(&FakeChain) -> usize) {
+        // The counter moves when a call starts. One extra start means the
+        // `n`-th call ran to the end of its body.
+        let target = count(&self.chain) + n + 1;
+        assert!(
+            wait_until(100_000, 10, async || count(&self.chain) >= target).await,
+            "the feeder stopped making progress"
+        );
+    }
+
     fn rx(&mut self) -> &mut Outbound {
         self.rx.as_mut().expect("feeder spawned with an outbound")
     }
@@ -535,7 +556,7 @@ async fn feeder_stages_per_salt_jobs_and_leases_from_the_identity() {
 /// Registration sits between funding and requirements. A coordinator that
 /// cannot register must not mine: the pallet rejects every proof from an
 /// unregistered account, and the account still pays for each attempt.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn feeder_registers_once_and_holds_off_mining_until_it_succeeds() {
     let chain = FakeChain::new(ising_snapshot(), None);
     chain.set_registration_result(Err(quip_coordinator::chain::ChainError::Unavailable(
@@ -545,7 +566,7 @@ async fn feeder_registers_once_and_holds_off_mining_until_it_succeeds() {
 
     // Registration keeps failing, so the walk never reaches staging.
     for _ in 0..10 {
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        f.after_ticks(1, FakeChain::registration_calls).await;
         assert_eq!(
             f.staged().await,
             0,
@@ -561,7 +582,7 @@ async fn feeder_registers_once_and_holds_off_mining_until_it_succeeds() {
     );
 
     let submits = f.chain.registration_submits();
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    f.after_polls(4).await;
     assert_eq!(
         f.chain.registration_submits(),
         submits,
@@ -621,7 +642,7 @@ async fn feeder_grows_window_for_drainer_and_holds_floor_for_idle() {
 /// refresh: the feeder stops the dead generation, pushes the new round's
 /// `Topology` and `SetTarget`, and only then stages jobs of the new
 /// generation. Same topology hash and same gates still require that push.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn feeder_sends_requirements_before_staging_each_round() {
     let mut f = Feeder::spawn_with_outbound(
         FakeChain::new(snapshot_with_head([1u8; 32]), None),
@@ -647,7 +668,7 @@ async fn feeder_sends_requirements_before_staging_each_round() {
     }
     assert!(f.wait_staged(2).await, "first round never staged jobs");
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    f.after_polls(5).await;
     assert!(
         f.quiet(),
         "unchanged head and difficulty must not re-broadcast"
@@ -666,7 +687,7 @@ async fn feeder_sends_requirements_before_staging_each_round() {
 /// A proof in the pool that clears the round stops the miners: the current
 /// generation is cancelled and nothing is staged until the block that
 /// includes the proof arrives. That block's hash is the next root.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn feeder_stops_on_a_clearing_pending_proof_and_mines_the_new_root() {
     use quip_coordinator::types::hex::hex_encode;
 
@@ -686,7 +707,7 @@ async fn feeder_stops_on_a_clearing_pending_proof_and_mines_the_new_root() {
     assert_eq!(f.staged().await, 0, "nothing stays staged");
 
     // Waiting: no requirements, no staging, while the root is unchanged.
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    f.after_polls(7).await;
     assert!(f.quiet(), "no broadcast while awaiting the qblock");
     assert_eq!(f.staged().await, 0);
 
@@ -705,7 +726,7 @@ async fn feeder_stops_on_a_clearing_pending_proof_and_mines_the_new_root() {
 /// The pending proof leaves the pool and no qblock follows: the round
 /// resumes on the same root with a fresh generation, and a resubmission of
 /// the same proof does not stop it again.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn feeder_resumes_when_the_pending_proof_leaves_the_pool_without_a_qblock() {
     let mut f = Feeder::spawn_with_outbound(
         FakeChain::new(snapshot_with_head([1u8; 32]), None),
@@ -735,7 +756,7 @@ async fn feeder_resumes_when_the_pending_proof_leaves_the_pool_without_a_qblock(
     let mut resubmitted = clearing_pending_proof(&snapshot_with_head([1u8; 32]), [5u8; 32]);
     resubmitted.extrinsic_hash = [9u8; 32];
     f.chain.set_pending_proofs(vec![resubmitted]);
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    f.after_polls(7).await;
     assert!(
         f.quiet(),
         "a resubmitted proof must not stop the resumed round"
@@ -744,7 +765,7 @@ async fn feeder_resumes_when_the_pending_proof_leaves_the_pool_without_a_qblock(
 }
 
 /// The proof stays pending but two blocks pass with no qblock: resume.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn feeder_resumes_after_two_blocks_when_the_pending_proof_never_lands() {
     let mut f = Feeder::spawn_with_outbound(
         FakeChain::new(snapshot_with_head([1u8; 32]), None),
@@ -766,7 +787,7 @@ async fn feeder_resumes_after_two_blocks_when_the_pending_proof_never_lands() {
         f.wait_generation(3).await,
         "the round never resumed on the same root"
     );
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    f.after_polls(7).await;
     assert!(
         f.quiet(),
         "the timed-out proof must not stop the resumed round"
@@ -775,7 +796,7 @@ async fn feeder_resumes_after_two_blocks_when_the_pending_proof_never_lands() {
 }
 
 /// A pending proof derived from another root is not this round's win.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn feeder_ignores_a_pending_proof_for_another_round() {
     let mut f = Feeder::spawn_with_outbound(
         FakeChain::new(snapshot_with_head([1u8; 32]), None),
@@ -788,7 +809,7 @@ async fn feeder_ignores_a_pending_proof_for_another_round() {
         &snapshot_with_head([9u8; 32]),
         [5u8; 32],
     )]);
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    f.after_polls(7).await;
     assert!(f.quiet(), "no Cancel for another round's proof");
     assert_eq!(f.generation().await, 1);
     assert!(f.staged().await > 0);
@@ -799,7 +820,7 @@ async fn feeder_ignores_a_pending_proof_for_another_round() {
 /// only at process start. A mid-run funding failure must not exit: it holds
 /// off staging the new generation and retries. Startup still exits 64; this
 /// path must not.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn feeder_re_checks_readiness_each_round_and_holds_off_when_underfunded() {
     let f = Feeder::spawn(
         FakeChain::new(snapshot_with_head([1u8; 32]), None),
@@ -822,7 +843,7 @@ async fn feeder_re_checks_readiness_each_round_and_holds_off_when_underfunded() 
 
     f.chain.set_snapshot(Some(snapshot_with_head([2u8; 32])));
     assert!(f.wait_generation(2).await, "second round never started");
-    tokio::time::sleep(Duration::from_millis(80)).await;
+    f.after_polls(2).await;
     assert!(
         f.chain.sync_calls() > sync_after_first,
         "second round must re-read sync status ({} then {})",
@@ -840,7 +861,7 @@ async fn feeder_re_checks_readiness_each_round_and_holds_off_when_underfunded() 
     // FundingParams, so ensure_funded fails immediately.
     f.chain.set_balance(Ok(0));
     f.chain.set_snapshot(Some(snapshot_with_head([3u8; 32])));
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    f.after_ticks(6, FakeChain::balance_calls).await;
     let st = f.state.lock().await;
     assert_eq!(
         new_generation_staged(&st, 3),
@@ -911,7 +932,7 @@ async fn feeder_drops_dead_generation_inflight_and_does_not_submit_it() {
 /// it keeps failing. A failure is retried once per round, not once per poll.
 /// Once registered, the feeder stages an open order exactly once as a
 /// generation-0 job, however many blocks it sees.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn feeder_registers_as_solver_once_per_round_and_stages_each_order_once() {
     let chain = FakeChain::new(ising_snapshot(), Some(mempool_order()));
     chain.set_solver_registration_result(Err(quip_coordinator::chain::ChainError::Unavailable(
@@ -923,7 +944,7 @@ async fn feeder_registers_as_solver_once_per_round_and_stages_each_order_once() 
         wait_until(100, 30, async || f.staged().await >= 2).await,
         "PoW must mine while solver registration fails"
     );
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    f.after_polls(6).await;
     assert!(f.state.lock().await.mempool_orders.is_empty());
     assert_eq!(
         f.chain.solver_registration_submits(),
@@ -950,7 +971,7 @@ async fn feeder_registers_as_solver_once_per_round_and_stages_each_order_once() 
 
     // Later blocks re-read the order map; the order must not be staged again.
     f.chain.set_snapshot(Some(snapshot_at([2u8; 32], 44)));
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    f.after_polls(6).await;
     let jobs = f.state.lock().await.router.reclaim("cpu-0");
     let orders: Vec<_> = jobs.iter().filter(|j| j.generation == 0).collect();
     assert_eq!(orders.len(), 1, "the order must be staged exactly once");
@@ -970,7 +991,7 @@ async fn feeder_registers_as_solver_once_per_round_and_stages_each_order_once() 
 /// credits (or any miner that is down) must not be recorded as a participant.
 /// Two rounds on the same minted qblock send one participate call, and a new
 /// qblock sends another.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn feeder_declares_participation_once_per_qblock_after_a_result() {
     let chain = FakeChain::new(snapshot_with_head([1u8; 32]), None);
     chain.set_qblock_id(Some(10));
@@ -978,7 +999,7 @@ async fn feeder_declares_participation_once_per_qblock_after_a_result() {
 
     assert!(f.wait_generation(1).await, "first round never staged");
     // Several polls with work staged and nothing returned.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    f.after_polls(5).await;
     assert_eq!(
         f.chain.participation_calls(),
         0,
@@ -995,7 +1016,7 @@ async fn feeder_declares_participation_once_per_qblock_after_a_result() {
     // Same candidate qblock on the next round: no second declaration.
     f.chain.set_snapshot(Some(snapshot_with_head([2u8; 32])));
     assert!(f.return_one_result(2).await, "second round never mined");
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    f.after_polls(5).await;
     assert!(
         f.chain.take_participations().is_empty(),
         "same candidate must not be declared twice"
@@ -1205,7 +1226,7 @@ async fn feeder_keeps_mining_when_descriptor_is_rejected() {
 /// was stashed under. While the ceiling admits only two of its three rows the
 /// chain would reject it for want of solutions, so the feeder has to hold it;
 /// once the ceiling eases to admit all three, it submits.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn feeder_holds_a_stashed_candidate_until_the_live_difficulty_admits_it() {
     let f = Feeder::spawn(
         FakeChain::new(gated_snapshot(-1500), None),
@@ -1243,7 +1264,7 @@ async fn feeder_holds_a_stashed_candidate_until_the_live_difficulty_admits_it() 
     }
 
     // The ceiling admits two of the three rows: below `min_solutions`.
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    f.after_polls(7).await;
     assert_eq!(
         f.chain.submitted_count(),
         0,
