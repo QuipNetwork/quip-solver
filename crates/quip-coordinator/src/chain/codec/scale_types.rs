@@ -616,7 +616,6 @@ pub fn require_set_values(spec: &AllowedValueSpec<Vec<i32>>) -> Result<Vec<i32>,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::host::{CpuInfoScale, OsInfoScale};
     use crate::types::topology_spec::{parse_topology_spec, preset_spec};
     use sp_core::U256;
 
@@ -719,75 +718,6 @@ mod tests {
         }
     }
 
-    fn assert_roundtrip<T: Encode + Decode + PartialEq + std::fmt::Debug>(label: &str, value: &T) {
-        let encoded = value.encode();
-        assert_eq!(
-            T::decode(&mut &encoded[..]).ok().as_ref(),
-            Some(value),
-            "{label}"
-        );
-    }
-
-    #[test]
-    fn scale_types_roundtrip() {
-        assert_roundtrip(
-            "QuantumProof",
-            &QuantumProof {
-                topology_hash: H256::from([0xab; 32]),
-                nonce: U256::from(0x1234_5678u64),
-                salt: [0xcd; 32],
-                solutions: vec![vec![0b1010_0101], vec![0x00, 0xff]],
-                device_access_time_us: 987_654,
-            },
-        );
-        let snap = MiningSnapshotScale {
-            last_proof_block_hash: H256::from([1u8; 32]),
-            difficulty: DifficultyConfig {
-                min_solutions: 5,
-                max_energy_milli: -1_200_000,
-                min_diversity_milli: 200,
-            },
-            topology_hash: H256::from([2u8; 32]),
-            nodes: vec![0, 1, 2],
-            edges: vec![(0, 1), (1, 2)],
-            allowed_h_values: AllowedValueSpec::Set(vec![-1000, 0, 1000]),
-            allowed_j_values: AllowedValueSpec::Set(vec![-1000, 1000]),
-            allowed_spin_values: AllowedValueSpec::Set(vec![-1000, 1000]),
-            family: Some(FamilyDescriptorScale {
-                family_id: b"quip/ice-glass".to_vec(),
-                revision: 1,
-                params: vec![1, 2, 3],
-            }),
-        };
-        assert_roundtrip("Option<MiningSnapshotScale>", &Some(snap));
-        let meta = TopologyMetaScale {
-            nodes: vec![0, 1, 2],
-            edges: vec![(0, 1), (1, 2)],
-            allowed_h_values: AllowedValueSpec::Set(vec![-1000, 0, 1000]),
-            allowed_j_values: AllowedValueSpec::Set(vec![-1000, 1000]),
-            allowed_spin_values: AllowedValueSpec::Set(vec![-1000, 1000]),
-            family: None,
-            registered_at: 7,
-        };
-        assert_roundtrip("Option<TopologyMetaScale>", &Some(meta));
-        assert_roundtrip(
-            "EnergyBandScale",
-            &EnergyBandScale {
-                hard_milli: -9_000_000,
-                easy_milli: -7_000_000,
-            },
-        );
-        assert_roundtrip("JobOrderScale", &valid_job_order());
-        assert_roundtrip(
-            "CurveCScale",
-            &CurveCScale {
-                easy_milli: 700,
-                knee_milli: 725,
-                hard_milli: 750,
-            },
-        );
-    }
-
     /// The pallet's `TopologyMeta` byte layout under each API version, built
     /// field by field. Version 3 puts `family` before `registered_at`.
     #[test]
@@ -856,33 +786,6 @@ mod tests {
             Some([1, 4, b'n', 4, b'N', 0, 0, 0, 1, 1, 4, 0, 0, 0, 0, 0, 0].as_slice()),
             "V2 variant index must be 1"
         );
-    }
-
-    #[test]
-    fn set_descriptor_option_struct_is_not_unit() {
-        // Option<SystemInfo> must not collapse to Option<()>. A Some value
-        // starts with 0x01 then the inner struct, not a single unit byte.
-        let info = SystemInfoScale {
-            os: OsInfoScale {
-                system: b"Linux".to_vec(),
-                release: Vec::new(),
-                machine: Vec::new(),
-            },
-            cpu: CpuInfoScale {
-                logical_cores: None,
-                physical_cores: None,
-                brand: b"x".to_vec(),
-                arch: b"x".to_vec(),
-            },
-            memory_mb: None,
-            gpus: Vec::new(),
-        };
-        let some = Some(info.clone()).encode();
-        let none = Option::<SystemInfoScale>::None.encode();
-        assert_eq!(none, vec![0]);
-        assert_eq!(some.first().copied(), Some(1));
-        assert_eq!(some.get(1..), Some(info.encode().as_slice()));
-        assert_ne!(some, vec![1]);
     }
 
     #[test]

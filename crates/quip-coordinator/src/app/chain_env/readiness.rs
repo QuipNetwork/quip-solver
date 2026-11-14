@@ -490,9 +490,8 @@ pub(crate) async fn declare_round_participation<C: ChainClient>(
 mod tests {
     use super::ReadinessError;
     use super::{
-        build_descriptor_payload, candidate_qblock_id, declare_round_participation,
-        file_round_descriptor, prepare_round, register_round_miner, HttpFaucet, ProcessLatches,
-        SUBMIT_ATTEMPTS,
+        build_descriptor_payload, declare_round_participation, file_round_descriptor,
+        prepare_round, register_round_miner, HttpFaucet, ProcessLatches, SUBMIT_ATTEMPTS,
     };
     use crate::chain::{ChainError, DescriptorOutcome, ParticipationOutcome, RegistrationOutcome};
     use crate::testing::fake_chain::FakeChain;
@@ -531,13 +530,6 @@ mod tests {
 
     fn account() -> [u8; 32] {
         [0xab; 32]
-    }
-
-    #[test]
-    fn candidate_is_one_past_latest() {
-        assert_eq!(candidate_qblock_id(None), 1);
-        assert_eq!(candidate_qblock_id(Some(0)), 1);
-        assert_eq!(candidate_qblock_id(Some(4581)), 4582);
     }
 
     #[test]

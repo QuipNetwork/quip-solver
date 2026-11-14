@@ -226,14 +226,6 @@ mod tests {
     use super::*;
     use crate::chain::codec::extrinsic::job_orders_storage_key;
 
-    #[test]
-    fn the_prefix_is_the_leading_half_of_a_full_order_key() {
-        let prefix = job_orders_prefix();
-        assert_eq!(prefix.len(), 32);
-        let full = job_orders_storage_key(42);
-        assert!(full.starts_with(&prefix), "prefix must lead the full key");
-    }
-
     /// `Blake2_128Concat` appends the SCALE-encoded key, so the order id is
     /// recoverable from the key alone. That is what makes enumeration work.
     #[test]

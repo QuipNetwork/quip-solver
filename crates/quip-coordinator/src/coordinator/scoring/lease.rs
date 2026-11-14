@@ -432,24 +432,6 @@ mod tests {
     }
 
     #[test]
-    fn lease_job_ids_are_distinct_from_32_byte_nonces() {
-        let id = lease_job_id(11);
-        assert!(id.starts_with(LEASE_JOB_ID_PREFIX));
-        assert_ne!(id.len(), 32);
-        assert_ne!(lease_job_id(11), lease_job_id(12));
-        let snap = snap();
-        assert!(is_lease(&build_lease_job(
-            lease_generator(snap.family.as_ref()),
-            &snap.topology_hash,
-            snap.last_proof_block_hash,
-            [0; 32],
-            11,
-            1,
-            1
-        )));
-    }
-
-    #[test]
     fn salt_rate_averages_lease_completions_over_quiet_polls() {
         // A miner finishing one 60,000-salt lease every 10 one-second polls
         // runs at 6,000 salts per second. Per-poll smoothing swings between

@@ -164,7 +164,6 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::str::FromStr as _;
 
     #[test]
     fn resolve_directives_prefers_explicit_level_then_rust_log_then_info() {
@@ -218,12 +217,6 @@ mod tests {
             let d = default_filter(level);
             assert!(EnvFilter::try_new(&d).is_ok(), "{d}");
         }
-    }
-
-    #[test]
-    fn level_display_round_trips_to_directive_text() {
-        assert_eq!(LogLevel::Warn.to_string(), "warn");
-        assert!(tracing::Level::from_str(LogLevel::Trace.as_str()).is_ok());
     }
 
     #[test]

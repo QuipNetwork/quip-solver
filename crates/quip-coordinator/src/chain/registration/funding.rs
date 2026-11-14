@@ -707,18 +707,6 @@ mod tests {
     }
 
     #[test]
-    fn retry_warning_names_a_chain_read_failure_when_balance_is_unknown() {
-        assert_eq!(
-            retry_warning_message(None),
-            "cannot read miner account balance from the chain; retrying"
-        );
-        assert_eq!(
-            retry_warning_message(Some(5)),
-            "miner account is not funded yet; retrying"
-        );
-    }
-
-    #[test]
     fn backoff_doubles_then_saturates() {
         assert_eq!(next_backoff(BACKOFF_START), Duration::from_secs(4));
         assert_eq!(

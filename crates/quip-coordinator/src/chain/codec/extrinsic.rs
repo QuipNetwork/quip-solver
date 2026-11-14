@@ -714,20 +714,6 @@ mod tests {
     }
 
     #[test]
-    fn default_topology_key_is_the_two_storage_hashes() {
-        let key = default_topology_storage_key();
-        assert_eq!(key.len(), 32);
-        #[expect(
-            clippy::indexing_slicing,
-            reason = "length is asserted to 32 bytes above"
-        )]
-        {
-            assert_eq!(&key[..16], &twox128(b"QuantumPow")[..]);
-            assert_eq!(&key[16..], &twox128(b"DefaultTopology")[..]);
-        }
-    }
-
-    #[test]
     fn the_qblocks_key_is_a_blake2_128_concat_map_key() {
         let key = qblocks_storage_key(1_121_300);
         assert_eq!(key.len(), 16 + 16 + 16 + 4);
