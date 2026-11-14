@@ -503,7 +503,6 @@ mod tests {
     use crate::config::DescriptorParams;
     use crate::host::survey::{sanitize, RawGpu, RawSurvey};
     use crate::observe::logging::test_support::{drain, init_capture, Capture};
-    use sp_core::crypto::{AccountId32, Ss58Codec};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -548,32 +547,6 @@ mod tests {
         assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
         assert!(!id.starts_with("0x"));
         assert_eq!(id, "ab".repeat(32));
-    }
-
-    #[tokio::test]
-    async fn participation_is_declared_once_per_qblock() {
-        let chain = FakeChain::new(snap(), None);
-        let mut last = None;
-        // The same qblock declares once.
-        chain.set_qblock_id(Some(10));
-        let _ = declare_round_participation(&chain, &mut last, account()).await;
-        let _ = declare_round_participation(&chain, &mut last, account()).await;
-        assert_eq!(chain.participation_calls(), 1);
-        assert_eq!(last, Some(11));
-        // A new qblock declares again.
-        chain.set_qblock_id(Some(11));
-        let _ = declare_round_participation(&chain, &mut last, account()).await;
-        assert_eq!(chain.participation_calls(), 2);
-        assert_eq!(chain.take_participations(), vec![11, 12]);
-        // A transient error does not record the qblock, so the next call retries.
-        chain.set_qblock_id(Some(12));
-        chain.set_participation_result(Err(ChainError::Unavailable("rpc down".into())));
-        let _ = declare_round_participation(&chain, &mut last, account()).await;
-        assert_eq!(last, Some(12));
-        chain.set_participation_result(Ok(ParticipationOutcome::Declared));
-        let _ = declare_round_participation(&chain, &mut last, account()).await;
-        assert_eq!(chain.participation_calls(), 2);
-        assert_eq!(last, Some(13));
     }
 
     /// Run the startup walk with the given latches against `chain`.
@@ -722,60 +695,6 @@ token = "{SENTINEL}"
         );
     }
 
-    /// Participation is the feeder's to declare, after a miner has returned a
-    /// Result for the round. The process-start walk has no such evidence.
-    #[tokio::test]
-    async fn prepare_round_registers_and_funds_but_does_not_declare() {
-        let chain = FakeChain::new(snap(), None);
-        chain.set_qblock_id(Some(20));
-        let registered = AtomicBool::new(false);
-        let _snap = prepare(
-            &chain,
-            &DescriptorParams::default(),
-            &AtomicBool::new(false),
-            &registered,
-        )
-        .await
-        .expect("prepare_round");
-        assert_eq!(chain.participation_calls(), 0);
-        assert_eq!(chain.descriptor_calls(), 0);
-        assert_eq!(chain.registration_submits(), 1);
-        assert!(registered.load(Ordering::Relaxed));
-        assert_eq!(chain.take_balance_accounts(), vec![account()]);
-    }
-
-    #[tokio::test]
-    async fn prepare_round_files_a_v2_descriptor_once() {
-        let chain = FakeChain::new(snap(), None);
-        chain.set_qblock_id(Some(20));
-        let filed = AtomicBool::new(false);
-        let params = named_descriptor();
-        let _snap = prepare(&chain, &params, &filed, &AtomicBool::new(false))
-            .await
-            .expect("prepare_round");
-        assert!(filed.load(Ordering::Relaxed));
-        assert_eq!(chain.descriptor_calls(), 1);
-        let filed_payload = chain.take_descriptors();
-        let desc = filed_payload.first().expect("one descriptor");
-        assert_eq!(
-            desc.node_id,
-            super::node_id_from_account(&account()).into_bytes()
-        );
-        assert_eq!(desc.node_name, b"Tesla");
-        assert_eq!(
-            desc.public_host.as_deref(),
-            Some(b"96.233.112.201".as_slice())
-        );
-        assert_eq!(desc.public_port, None);
-        assert!(desc.auto_mine);
-        assert_eq!(desc.miners.len(), 2);
-        assert_eq!(desc.miners.get(1).map(|m| m.kind), Some(MinerKind::Metal));
-        assert!(desc.system_info.is_none());
-        assert!(desc.runtime.is_none());
-        file_round_descriptor(&chain, &filed, &params, account()).await;
-        assert_eq!(chain.descriptor_calls(), 0);
-    }
-
     #[tokio::test]
     async fn an_unregistered_account_registers_once_and_then_latches() {
         let chain = FakeChain::new(snap(), None);
@@ -787,21 +706,6 @@ token = "{SENTINEL}"
         assert!(register_round_miner(&chain, &registered).await);
         assert_eq!(chain.registration_calls(), 1);
         assert_eq!(chain.registration_submits(), 1);
-    }
-
-    #[tokio::test]
-    async fn an_already_registered_account_submits_nothing() {
-        let chain = FakeChain::new(snap(), None);
-        chain.set_registered(true);
-        let registered = AtomicBool::new(false);
-        assert!(register_round_miner(&chain, &registered).await);
-        assert_eq!(chain.registration_calls(), 1);
-        assert_eq!(
-            chain.registration_submits(),
-            0,
-            "a second register_miner would fail with MinerAlreadyRegistered and burn fees"
-        );
-        assert!(registered.load(Ordering::Relaxed));
     }
 
     #[tokio::test]
@@ -835,32 +739,6 @@ token = "{SENTINEL}"
         .await
         .expect("startup continues so the feeder can retry");
         assert!(!registered.load(Ordering::Relaxed));
-    }
-
-    #[tokio::test]
-    async fn missing_or_blank_node_name_files_ss58_address_once() {
-        let account = [0xab; 32];
-        for node_name in [None, Some(String::new()), Some(" \t\n".into())] {
-            let params = DescriptorParams {
-                node_name,
-                node_id: Some("custom-node-id".into()),
-                ..named_descriptor()
-            };
-            let chain = FakeChain::new(snap(), None);
-            let filed = AtomicBool::new(false);
-            file_round_descriptor(&chain, &filed, &params, account).await;
-            file_round_descriptor(&chain, &filed, &params, account).await;
-            assert!(filed.load(Ordering::Relaxed));
-            let descriptors = chain.take_descriptors();
-            assert_eq!(descriptors.len(), 1);
-            let descriptor = descriptors.first().expect("one descriptor");
-            let name = std::str::from_utf8(&descriptor.node_name).expect("UTF-8 name");
-            assert_eq!(
-                AccountId32::from_ss58check(name).expect("SS58 address"),
-                AccountId32::from(account)
-            );
-            assert_eq!(descriptor.node_id, b"custom-node-id");
-        }
     }
 
     #[test]

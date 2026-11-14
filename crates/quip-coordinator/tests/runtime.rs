@@ -553,6 +553,23 @@ async fn feeder_stages_per_salt_jobs_and_leases_from_the_identity() {
     f.stop().await;
 }
 
+/// An account that registered in an earlier process submits nothing: a second
+/// `register_miner` would fail with `MinerAlreadyRegistered` and burn fees.
+#[tokio::test]
+async fn feeder_mines_without_submitting_for_an_already_registered_account() {
+    let chain = FakeChain::new(ising_snapshot(), None);
+    chain.set_registered(true);
+    let f = Feeder::spawn(chain, feeder_params(2, 30), vec![("cpu-0", ising_caps())]).await;
+
+    assert!(f.wait_staged(2).await, "mining never started");
+    assert!(
+        f.chain.registration_calls() >= 1,
+        "startup must check the registration"
+    );
+    assert_eq!(f.chain.registration_submits(), 0);
+    f.stop().await;
+}
+
 /// Registration sits between funding and requirements. A coordinator that
 /// cannot register must not mine: the pallet rejects every proof from an
 /// unregistered account, and the account still pays for each attempt.
@@ -1113,6 +1130,14 @@ async fn feeder_files_descriptor_once_across_two_rounds() {
     let filed = f.chain.take_descriptors();
     let desc = filed.first().expect("one descriptor");
     assert_eq!(desc.node_name, b"Tesla");
+    // The default node id is the signing account as 64 hex digits, no prefix.
+    assert_eq!(desc.node_id, "00".repeat(32).into_bytes());
+    assert_eq!(
+        desc.public_host.as_deref(),
+        Some(b"96.233.112.201".as_slice())
+    );
+    assert_eq!(desc.public_port, None);
+    assert!(desc.auto_mine);
     assert_eq!(
         desc.miners.iter().map(|m| m.kind).collect::<Vec<_>>(),
         vec![
@@ -1123,35 +1148,41 @@ async fn feeder_files_descriptor_once_across_two_rounds() {
     f.stop().await;
 }
 
-/// Missing `[miner].node_name` files the SS58 address and starts mining.
+/// A missing, empty or whitespace-only `[miner].node_name` files the SS58
+/// address once and starts mining. An explicit `node_id` is kept.
 #[tokio::test]
-async fn feeder_reaches_mining_when_node_name_is_missing() {
-    let chain = FakeChain::new(snapshot_with_head([1u8; 32]), None);
-    chain.set_qblock_id(Some(10));
-    let mut params = named_feeder_params(1, 40);
-    params.chain.descriptor.node_name = None;
-    params.feeder.miner_account = [0xab; 32];
-    params.chain.miner_account = [0xab; 32];
-    let f = Feeder::spawn(chain, params, vec![("cpu-0", ising_caps())]).await;
+async fn feeder_reaches_mining_when_node_name_is_missing_empty_or_blank() {
+    for node_name in [None, Some(String::new()), Some(" \t\n".to_string())] {
+        let chain = FakeChain::new(snapshot_with_head([1u8; 32]), None);
+        chain.set_qblock_id(Some(10));
+        let mut params = named_feeder_params(1, 40);
+        params.chain.descriptor.node_name = node_name.clone();
+        params.chain.descriptor.node_id = Some("custom-node-id".into());
+        params.feeder.miner_account = [0xab; 32];
+        params.chain.miner_account = [0xab; 32];
+        let f = Feeder::spawn(chain, params, vec![("cpu-0", ising_caps())]).await;
 
-    assert!(
-        f.wait_generation(1).await,
-        "missing node_name must not block mining"
-    );
-    let descriptors = f.chain.take_descriptors();
-    assert_eq!(descriptors.len(), 1);
-    let descriptor = descriptors.first().expect("one descriptor");
-    let name = std::str::from_utf8(&descriptor.node_name).expect("UTF-8 name");
-    assert_eq!(
-        AccountId32::from_ss58check(name).expect("SS58 address"),
-        AccountId32::from([0xab; 32])
-    );
-    assert!(f.return_one_result(1).await, "first round never mined");
-    assert!(
-        f.wait_participations(1).await,
-        "the default node name must not stop participation"
-    );
-    f.stop().await;
+        assert!(
+            f.wait_generation(1).await,
+            "node_name {node_name:?} must not block mining"
+        );
+        let descriptors = f.chain.take_descriptors();
+        assert_eq!(descriptors.len(), 1, "node_name {node_name:?}");
+        let descriptor = descriptors.first().expect("one descriptor");
+        let name = std::str::from_utf8(&descriptor.node_name).expect("UTF-8 name");
+        assert_eq!(
+            AccountId32::from_ss58check(name).expect("SS58 address"),
+            AccountId32::from([0xab; 32]),
+            "node_name {node_name:?}"
+        );
+        assert_eq!(descriptor.node_id, b"custom-node-id");
+        assert!(f.return_one_result(1).await, "first round never mined");
+        assert!(
+            f.wait_participations(1).await,
+            "the default node name must not stop participation"
+        );
+        f.stop().await;
+    }
 }
 
 /// Transient descriptor or participation errors must not hold off mining.
@@ -1184,6 +1215,10 @@ async fn feeder_keeps_mining_when_descriptor_or_participation_is_transient() {
         f.wait_participations(2).await,
         "a transient participation error must be retried"
     );
+    // The failed declaration is not recorded: the retry names the same qblock.
+    let declared = f.chain.take_participations();
+    assert_eq!(declared.first(), Some(&11));
+    assert_eq!(declared.get(1), Some(&11));
     assert!(
         f.staged().await >= 1,
         "participation retries must not stop staging"

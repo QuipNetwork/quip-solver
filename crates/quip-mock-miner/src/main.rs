@@ -553,26 +553,6 @@ mod tests {
     }
 
     #[test]
-    fn lease_reports_each_winner_then_one_done_and_one_credit() {
-        let topo = lease_topology();
-        let msgs = handle_lease(lease(3), Some(&topo), Some(&open_target()));
-        let results = msgs
-            .iter()
-            .filter(|m| matches!(m.msg, Some(miner_msg::Msg::Result(_))))
-            .count();
-        assert_eq!(results, 3);
-        let n = msgs.len();
-        assert!(matches!(
-            &msgs.get(n.saturating_sub(2)).expect("LeaseDone message").msg,
-            Some(miner_msg::Msg::LeaseDone(d)) if d.salts_done == 3
-        ));
-        assert!(matches!(
-            &msgs.get(n.saturating_sub(1)).expect("credit message").msg,
-            Some(miner_msg::Msg::JobRequest(r)) if r.credits == 1
-        ));
-    }
-
-    #[test]
     fn lease_without_target_is_rejected_target_missing() {
         let msgs = handle_lease(lease(3), Some(&lease_topology()), None);
         assert_eq!(

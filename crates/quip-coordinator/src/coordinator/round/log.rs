@@ -230,31 +230,6 @@ mod tests {
     }
 
     #[test]
-    fn round_log_reports_our_confirmed_win_only_once() {
-        let mut log = RoundLog::new(Some(64), [1; 32]);
-        log.observe_pending(pending([2; 32]), -5_030_000);
-        let output = capture_logs(|| {
-            for _ in 0..2 {
-                log.submission_started();
-                log.submission_finished(Some(&won()), -5_038_000, -5_030_000);
-            }
-            log.close();
-            log.close();
-        });
-        assert_eq!(output.matches("qblock won by us").count(), 1, "{output}");
-        assert!(!output.contains("another miner"), "{output}");
-        for field in [
-            "qblock_id=65",
-            "inclusion_block=693",
-            "proof_energy=-5038",
-            "target_energy=-5030",
-            "round_elapsed_s=",
-        ] {
-            assert!(output.contains(field), "{output}");
-        }
-    }
-
-    #[test]
     fn round_log_reports_only_foreign_pending_proofs_after_closure() {
         for (account, best, expected) in [
             ([2; 32], Some(-4_999_000), Some("-4999")),

@@ -159,7 +159,14 @@ async fn session_lease_win_reports_the_round_receipt_once() {
 
     let output = drain(&buf);
     assert_eq!(output.matches("qblock won by us").count(), 1, "{output}");
-    for field in ["qblock_id=65", "inclusion_block=693", "target_energy=1000"] {
+    assert!(!output.contains("another miner"), "{output}");
+    for field in [
+        "qblock_id=65",
+        "inclusion_block=693",
+        "proof_energy=",
+        "target_energy=1000",
+        "round_elapsed_s=",
+    ] {
         assert!(output.contains(field), "{output}");
     }
     assert!(

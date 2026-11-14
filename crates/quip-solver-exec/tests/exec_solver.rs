@@ -34,6 +34,24 @@ fn file_mode_delivers_model_and_parses_solutions() {
 }
 
 #[test]
+fn file_mode_substitutes_every_model_token_including_an_embedded_one() {
+    // `$1` is `--model=<path>` and `$2` is `<path>`: both tokens must carry the
+    // same existing, non-empty model file.
+    let cmd = format!(
+        "sh -c 'f=${{1#--model=}}; test -s \"$f\" && test \"$f\" = \"$2\" && echo \"{ONE_SOLUTION}\" || echo \"[]\"' _ --model={{model}} {{model}}"
+    );
+    let sampler = ExecSampler::new(&cmd, 5_000, false).expect("valid cmd");
+    let out = sampler
+        .sample(&graph(), &SampleParams::default())
+        .expect("ok");
+    assert_eq!(
+        out.len(),
+        1,
+        "an embedded {{model}} token was not substituted"
+    );
+}
+
+#[test]
 fn stdin_mode_delivers_model_on_stdin() {
     // `cat` drains stdin to EOF (newline-independent); a non-empty capture
     // proves the model arrived on stdin.

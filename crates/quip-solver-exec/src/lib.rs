@@ -283,18 +283,6 @@ mod tests {
     }
 
     #[test]
-    fn render_argv_substitutes_every_model_token() {
-        let tmpl: Vec<String> = ["solver", "--model={model}", "{model}", "--reads=8"]
-            .map(str::to_owned)
-            .to_vec();
-        let got = render_argv(&tmpl, Path::new("/tmp/m.json"));
-        assert_eq!(
-            got,
-            vec!["solver", "--model=/tmp/m.json", "/tmp/m.json", "--reads=8"]
-        );
-    }
-
-    #[test]
     fn parse_solutions_maps_valid_reads() {
         let json =
             br#"[{"spins":[1,-1],"energy_milli":-14000},{"spins":[-1,-1],"energy_milli":-1}]"#;
