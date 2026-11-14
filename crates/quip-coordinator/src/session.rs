@@ -10,7 +10,7 @@ use quip_proto::v1::miner_service_server::{MinerService, MinerServiceServer};
 use quip_proto::v1::{
     coord_msg, miner_msg, Capabilities, Configure, CoordMsg, MinerMsg, Shutdown, Welcome,
 };
-use quip_protocol::session::PROTOCOL_VERSION;
+use quip_protocol::session::{SessionConfig, PROTOCOL_VERSION};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::Path;
@@ -28,6 +28,18 @@ use tonic::{Request, Response, Status, Streaming};
 /// Grants are single `u32`s, so this only absorbs a burst of `JobRequest`s
 /// arriving while the dispatcher is mid-send.
 const GRANT_CHANNEL_DEPTH: usize = 1024;
+
+/// Credits the coordinator grants when the miner sends `Ready`.
+///
+/// `queue_depth = 0` on the wire means the operator set no depth, and the miner
+/// picks its own. The miner SDKs then run at their default of 3 and size their
+/// credit window on the assumption that the coordinator seeds that same 3, so
+/// the seed comes from the depth `SessionConfig` resolves, not the wire value.
+/// A miner that wants a deeper pipeline, such as the D-Wave miner, grants the
+/// rest itself with `JobRequest`; the seed adds to that and never caps it.
+pub(crate) fn seed_credits(configure: &Configure) -> u32 {
+    SessionConfig::from_configure(String::new(), configure).queue_depth
+}
 
 /// Grant `credits` and send every job the miner is now entitled to.
 ///
@@ -885,7 +897,7 @@ async fn run_session<C: ChainClient>(
         let token_ok = !expected.is_empty() && hello.session_token == expected;
         let protocol_ok = hello.capabilities.is_some() && caps.protocol_version == PROTOCOL_VERSION;
         let configure = st.configure.get(&miner_id).cloned().unwrap_or(Configure {
-            queue_depth: 3,
+            queue_depth: 0,
             idle_timeout_s: 300,
             heartbeat_s: 15,
             reconnect_window_s: 60,
@@ -935,7 +947,7 @@ async fn run_session<C: ChainClient>(
     {
         return;
     }
-    let configure_queue_depth = configure.queue_depth;
+    let seed_credits = seed_credits(&configure);
     if tx
         .send(Ok(coord(coord_msg::Msg::Configure(configure))))
         .await
@@ -961,7 +973,6 @@ async fn run_session<C: ChainClient>(
     // in-band Shutdown/cancel while it runs; dropped when the loop exits.
     state.lock().await.register_outbound(&miner_id, tx.clone());
 
-    let seed_credits = configure_queue_depth.max(1);
     // Declared before the dispatcher so the wakeup sender can be registered
     // alongside it; see `wake_dispatcher`.
     // Dispatcher task: the only writer of `Job`s for this session.
@@ -1405,6 +1416,20 @@ mod tests {
         Job, JobKind, LeaseDone, Provenance, Result as WireResult, SetTarget, Solution,
     };
     use quip_protocol::lease::{LeaseSpec, TopologyView};
+
+    /// An unset depth on the wire still seeds the 3 credits the miner SDKs
+    /// count on, so a depth-3 miner keeps its dispatch rate; an explicit depth
+    /// seeds itself.
+    #[test]
+    fn seed_credits_follow_the_effective_depth() {
+        let depth = |queue_depth| Configure {
+            queue_depth,
+            ..Configure::default()
+        };
+        assert_eq!(seed_credits(&depth(0)), 3);
+        assert_eq!(seed_credits(&depth(1)), 1);
+        assert_eq!(seed_credits(&depth(7)), 7);
+    }
 
     fn lease_snapshot() -> crate::chain::snapshot::MiningSnapshot {
         let nodes = vec![0, 1, 2, 3];

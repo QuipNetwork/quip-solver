@@ -336,7 +336,9 @@ fn make_configure(table: &toml::Table) -> Configure {
         let _ = passthrough.remove(k);
     }
     Configure {
-        queue_depth: u32_of("queue_depth", 3),
+        // 0 is "not set" on the wire: the miner picks its own depth. The SDKs
+        // default to 3; the D-Wave miner uses its measured QPU pipeline depth.
+        queue_depth: u32_of("queue_depth", 0),
         idle_timeout_s: u32_of("idle_timeout_s", 300),
         heartbeat_s: u32_of("heartbeat_s", 15),
         reconnect_window_s: u32_of("reconnect_window_s", 60),
@@ -895,6 +897,40 @@ budget_reset_day = 1
             Some(0.10)
         );
         assert_eq!(backend.len(), 4);
+        Ok(())
+    }
+
+    /// An entry without `queue_depth` sends 0, "not set", so the miner picks
+    /// its own depth instead of a coordinator default it cannot tell apart from
+    /// an operator choice.
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions report mismatches while Result propagates setup errors."
+    )]
+    fn entry_without_queue_depth_sends_zero() -> TestResult {
+        let config = parse_config(SAMPLE)?;
+        let cuda = config
+            .launch
+            .iter()
+            .find(|entry| entry.miner_id == "cuda-0")
+            .ok_or("config must launch cuda-0")?;
+        assert_eq!(cuda.configure.queue_depth, 0);
+        Ok(())
+    }
+
+    /// The D-Wave miner answers a 0 with its own QPU pipeline depth, so its
+    /// entry must send 0 too, and must not slip a depth in via `backend_toml`.
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions report mismatches while Result propagates setup errors."
+    )]
+    fn dwave_entry_without_queue_depth_sends_zero() -> TestResult {
+        let config = parse_config(SAMPLE)?;
+        let (dwave, backend) = dwave_entry(&config)?;
+        assert_eq!(dwave.configure.queue_depth, 0);
+        assert!(!backend.contains_key("queue_depth"));
         Ok(())
     }
 
