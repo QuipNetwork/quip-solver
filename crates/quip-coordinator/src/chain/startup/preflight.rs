@@ -12,6 +12,7 @@
 //! that runs forever and mines nothing.
 
 use crate::chain::{ChainError, RealChainClient};
+use crate::types::hex::hex_encode;
 use serde_json::Value;
 
 /// Runtime API trait the coordinator mines against.
@@ -110,7 +111,7 @@ fn api_id(trait_name: &str) -> [u8; 8] {
 /// which is a list of `[<0x-prefixed 8-byte id>, <version>]` pairs.
 fn find_api_version(apis: &Value, trait_name: &str) -> Option<u32> {
     let want = api_id(trait_name);
-    let want_hex = format!("0x{}", hex_lower(&want));
+    let want_hex = hex_encode(&want);
     apis.as_array()?.iter().find_map(|entry| {
         let pair = entry.as_array()?;
         let id = pair.first()?.as_str()?;
@@ -137,17 +138,8 @@ pub(crate) fn runtime_version_json(spec_version: u32, api_version: u32) -> Value
         "specName": "quip-runtime",
         "specVersion": spec_version,
         "transactionVersion": 7,
-        "apis": [[format!("0x{}", hex_lower(&api_id(QUANTUM_POW_API))), api_version]],
+        "apis": [[hex_encode(&api_id(QUANTUM_POW_API)), api_version]],
     })
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(s, "{b:02x}");
-    }
-    s
 }
 
 /// Parse a `state_getRuntimeVersion` response into [`ValidatorInfo`].
@@ -221,13 +213,18 @@ mod tests {
     /// is looking for the right key.
     #[test]
     fn api_id_matches_substrate_core() {
-        assert_eq!(hex_lower(&api_id("Core")), "df6acb689907609b");
+        assert_eq!(hex_encode(&api_id("Core")), "0xdf6acb689907609b");
     }
 
     #[test]
     fn finds_quantum_pow_api_version() {
-        let want = format!("0x{}", hex_lower(&api_id(QUANTUM_POW_API)));
-        let upper = format!("0X{}", hex_lower(&api_id(QUANTUM_POW_API)).to_uppercase());
+        let want = hex_encode(&api_id(QUANTUM_POW_API));
+        let upper = format!(
+            "0X{}",
+            hex_encode(&api_id(QUANTUM_POW_API))
+                .trim_start_matches("0x")
+                .to_uppercase()
+        );
         for (label, apis, expected) in [
             (
                 "listed after Core",
@@ -250,10 +247,7 @@ mod tests {
     fn rv_with(api: Option<u32>) -> Value {
         let mut apis = vec![json!(["0xdf6acb689907609b", 5])];
         if let Some(v) = api {
-            apis.push(json!([
-                format!("0x{}", hex_lower(&api_id(QUANTUM_POW_API))),
-                v
-            ]));
+            apis.push(json!([hex_encode(&api_id(QUANTUM_POW_API)), v]));
         }
         json!({
             "specName": "quip-runtime",

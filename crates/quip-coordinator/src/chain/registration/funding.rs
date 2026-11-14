@@ -189,7 +189,7 @@ fn classify_status(status: u16, detail: &str) -> Result<(), FaucetError> {
 #[async_trait]
 impl Faucet for HttpFaucet {
     async fn request(&self, dest: [u8; 32], amount: u128) -> Result<(), FaucetError> {
-        let dest_hex = format!("0x{}", hex_lower(&dest));
+        let dest_hex = hex_encode(&dest);
         let url = format!("{}/request", self.base_url);
         let resp = self
             .client
@@ -205,15 +205,6 @@ impl Faucet for HttpFaucet {
         let detail = resp.text().await.unwrap_or_default();
         classify_status(status, &detail)
     }
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(s, "{b:02x}");
-    }
-    s
 }
 
 /// Next backoff gap, doubling from `current` up to [`BACKOFF_MAX`].
@@ -692,12 +683,6 @@ mod tests {
                 "status {s} must be transient"
             );
         }
-    }
-
-    #[test]
-    fn dest_is_lowercase_hex() {
-        assert_eq!(hex_lower(&[0x0a, 0xff]), "0aff");
-        assert_eq!(hex_lower(&[0u8; 32]).len(), 64);
     }
 
     #[test]

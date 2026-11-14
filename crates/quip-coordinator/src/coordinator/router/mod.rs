@@ -216,6 +216,16 @@ fn maximum_degree(edges: impl Iterator<Item = (u32, u32)>) -> u32 {
     degrees.values().copied().max().unwrap_or(0)
 }
 
+/// Whether a cancel up to `max_generation` drops a job of `generation`.
+///
+/// Mempool jobs (`generation == 0`) are never cancelled. Staged jobs
+/// ([`Router::cancel`]) and in-flight jobs (`CoordinatorState::cancel_inflight`)
+/// share this rule.
+#[must_use]
+pub fn is_cancelled_by(generation: u64, max_generation: u64) -> bool {
+    generation != 0 && generation <= max_generation
+}
+
 /// Routes jobs to miners by capability, stages them, and gates dispatch on credits.
 #[derive(Debug, Default)]
 pub struct Router {
@@ -583,7 +593,7 @@ impl Router {
         for q in self.miners.values_mut() {
             let before = q.staged.len();
             q.staged
-                .retain(|j| j.generation == 0 || j.generation > max_generation);
+                .retain(|j| !is_cancelled_by(j.generation, max_generation));
             dropped += before.saturating_sub(q.staged.len());
         }
         dropped

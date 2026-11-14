@@ -1,7 +1,7 @@
 //! The coordinator's shared state: routing, in-flight work, the round, and
 //! the session registry, under one lock.
 
-use crate::coordinator::router::{MinerCaps, Router};
+use crate::coordinator::router::{is_cancelled_by, MinerCaps, Router};
 use crate::coordinator::scoring::validate::ResolvedTopo;
 use crate::miner::session::service::gen_session_token;
 use crate::miner::session::state::{SessionHost, SessionState};
@@ -198,7 +198,7 @@ impl CoordinatorState {
         let ids: Vec<Vec<u8>> = self
             .inflight
             .iter()
-            .filter(|(_, job)| job.generation != 0 && job.generation <= max_generation)
+            .filter(|(_, job)| is_cancelled_by(job.generation, max_generation))
             .map(|(id, _)| id.clone())
             .collect();
         let n = ids.len();

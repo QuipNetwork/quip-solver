@@ -78,19 +78,10 @@ mod tests {
         parse_topology_spec(crate::types::topology_spec::preset_spec("smoke").unwrap()).unwrap()
     }
 
+    /// The contiguous ranges themselves are asserted through the drive source
+    /// in `tests/family.rs`. A zero lease size counts as one salt per lease.
     #[test]
-    fn splits_salts_into_contiguous_leases_and_treats_zero_size_as_one() {
-        let jobs = drain_all(&mut LeaseSource::new(&spec(), [0; 32], 1, 10, 4));
-        let ranges: Vec<(u64, u64)> = jobs
-            .iter()
-            .map(|j| {
-                j.generator
-                    .as_ref()
-                    .map(|g| (g.salt_start, g.salt_count))
-                    .unwrap()
-            })
-            .collect();
-        assert_eq!(ranges, vec![(0, 4), (4, 4), (8, 2)]);
+    fn a_zero_lease_size_is_one_salt_per_lease() {
         assert_eq!(
             drain_all(&mut LeaseSource::new(&spec(), [0; 32], 1, 3, 0)).len(),
             3
