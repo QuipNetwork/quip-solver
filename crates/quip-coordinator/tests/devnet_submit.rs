@@ -51,10 +51,11 @@ use quip_coordinator::chain::extrinsic::{
     build_hybrid_signed_extrinsic, miner_identity_bytes, miners_storage_key, SignedExtensionContext,
 };
 use quip_coordinator::chain::scale_types::{
-    encode_register_miner_call, IsingParams, JobMode, MiningSnapshotScale, ResultDelivery,
-    RewardResolution,
+    encode_register_miner_call, IsingParams, MiningSnapshotScale, ResultDelivery, RewardResolution,
 };
-use quip_coordinator::chain::{ChainClient, JobOrder, RealChainClient};
+use quip_coordinator::chain::{ChainClient, RealChainClient};
+use quip_coordinator::types::order::{JobMode, JobOrder};
+
 use quip_coordinator::types::hex::{hex_decode, hex_encode};
 use quip_coordinator::types::proof::SubmitAction;
 use quip_coordinator::types::topology_spec::{parse_topology_spec, preset_spec};

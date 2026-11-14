@@ -6,23 +6,28 @@
 //! (`extrinsic::build_hybrid_signed_extrinsic`) and returns nothing for
 //! every other shape. That is not an error: the pool holds every kind of
 //! call.
+//!
+//! [`judge_pending_proof`] replays the pallet's `submit_proof` checks
+//! (`quip-validator/pallets/quantum-pow/src/lib.rs`, `validate_proof`) with
+//! the same `quantum_validation` functions, against the snapshot the feeder is
+//! mining. Difficulty eases every block until a win, so a proof that clears
+//! now also clears at its inclusion block.
 
+use super::extrinsic::account_identity_bytes;
 use super::extrinsic::{encode_additional, extrinsic_hash, signing_payload, RuntimeTxContext};
-use super::scale_types::{QuantumProof, QUANTUM_POW_PALLET_INDEX, SUBMIT_PROOF_CALL_INDEX};
+use super::proof_encode::decode_family_witnesses;
+use super::scale_types::{QUANTUM_POW_PALLET_INDEX, SUBMIT_PROOF_CALL_INDEX};
+use crate::types::family::ChallengeFamily;
+use crate::types::proof::QuantumProof;
+use crate::types::snapshot::{MiningSnapshot, PendingProof, Verdict};
+use quantum_validation::{
+    calculate_diversity, derive_nonce, energy_of_solution_indexed, generate_ising_model_indexed,
+    select_diverse, unpack_solution, AllowedValueSpec, TopologyIndex,
+};
+
 use parity_scale_codec::{Compact, Decode, Input};
 use quip_transaction_crypto::{HybridPair, HybridTxSignature};
 use sp_core::Pair as _;
-
-/// A `QuantumPow.submit_proof` waiting in the pool.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PendingProof {
-    /// `blake2_256` of the extrinsic bytes. Keys the per-round verdict cache.
-    pub extrinsic_hash: [u8; 32],
-    /// The signing `AccountId32`.
-    pub account: [u8; 32],
-    /// The proof as submitted.
-    pub proof: QuantumProof,
-}
 
 /// Version byte of a signed v4 extrinsic, the only envelope the coordinator emits.
 const SIGNED_V4: u8 = 0x84;
@@ -130,6 +135,125 @@ fn signature_holds(
         encode_additional(ctx.spec_version, ctx.transaction_version, &ctx.genesis_hash);
     let payload = signing_payload(call, extra, &additional);
     HybridPair::verify(&signature.signature, &payload, &signature.public)
+}
+
+/// Replay the pallet's `submit_proof` checks against `snap`.
+///
+/// Registration of the signer is not checked. The pool already ran the signed
+/// extensions. A clearing proof from an unregistered account is included, fails,
+/// and leaves the pool without a qblock. The feeder then resumes and ignores
+/// that proof, by signer and nonce, for the rest of the root, so a resubmission
+/// cannot stop the miners again.
+#[must_use]
+pub fn judge_pending_proof(pending: &PendingProof, snap: &MiningSnapshot) -> Verdict {
+    if pending.proof.topology_hash.as_bytes() != snap.topology_hash.as_slice() {
+        return Verdict::OtherRound;
+    }
+    let identity = account_identity_bytes(&pending.account);
+    let expected = derive_nonce(&snap.last_proof_block_hash, &identity, &pending.proof.salt);
+    if pending.proof.nonce != expected {
+        return Verdict::OtherRound;
+    }
+    match score(&pending.proof, snap) {
+        Ok(verdict) => verdict,
+        Err(reason) => Verdict::Malformed(reason),
+    }
+}
+
+/// Score every row, and apply the gates. `Err` is the pallet's pre-scoring
+/// rejection.
+fn score(proof: &QuantumProof, snap: &MiningSnapshot) -> Result<Verdict, String> {
+    let scored = match &snap.family {
+        None => legacy_rows(proof, snap)?,
+        Some(family) => family_rows(proof, snap, family)?,
+    };
+    let valid: Vec<(i64, Vec<i8>)> = scored
+        .into_iter()
+        .filter(|(energy, _)| *energy < snap.max_energy_milli)
+        .collect();
+
+    let Some(best_energy_milli) = valid.iter().map(|(e, _)| *e).min() else {
+        return Ok(Verdict::BelowGates);
+    };
+    let rows: Vec<&[i8]> = valid.iter().map(|(_, s)| s.as_slice()).collect();
+    let target = rows
+        .len()
+        .min(usize::try_from(snap.min_solutions.max(1)).unwrap_or(usize::MAX));
+    let selected_idx = select_diverse(&rows, target).map_err(|e| format!("select: {e:?}"))?;
+    let selected: Vec<&[i8]> = selected_idx
+        .iter()
+        .filter_map(|&i| rows.get(i).copied())
+        .collect();
+    let diversity = calculate_diversity(&selected).map_err(|e| format!("diversity: {e:?}"))?;
+    let n_valid = u32::try_from(rows.len()).unwrap_or(u32::MAX);
+
+    if n_valid >= snap.min_solutions && diversity >= snap.min_diversity_milli {
+        Ok(Verdict::Clears { best_energy_milli })
+    } else {
+        Ok(Verdict::BelowGates)
+    }
+}
+
+/// Each row's spins and energy on the legacy model the nonce draws, as the
+/// pallet's `validate_proof` computes them.
+fn legacy_rows(proof: &QuantumProof, snap: &MiningSnapshot) -> Result<Vec<(i64, Vec<i8>)>, String> {
+    let index =
+        TopologyIndex::new(&snap.nodes, &snap.edges).map_err(|e| format!("topology: {e:?}"))?;
+    let (h, j) = generate_ising_model_indexed(
+        proof.nonce,
+        &snap.nodes,
+        &snap.edges,
+        &AllowedValueSpec::Set(snap.allowed_h_milli.as_slice()),
+        &AllowedValueSpec::Set(snap.allowed_j_milli.as_slice()),
+        &index,
+    )
+    .map_err(|e| format!("model: {e:?}"))?;
+    let mut rows = Vec::with_capacity(proof.solutions.len());
+    for spins in unpack_rows(proof, snap)? {
+        let energy = energy_of_solution_indexed(&spins, &h, &snap.edges, &j, &index)
+            .map_err(|e| format!("energy: {e:?}"))?;
+        rows.push((energy, spins));
+    }
+    Ok(rows)
+}
+
+/// Each row's spins and energy on the family instance the nonce regenerates,
+/// as the pallet's `validate_family_proof` computes them: the validator's own
+/// `FamilyChallenge::decode_witnesses` over the compact codec bytes. A skipped
+/// nonce or one bad witness rejects the whole proof, as it does on chain.
+fn family_rows(
+    proof: &QuantumProof,
+    snap: &MiningSnapshot,
+    family: &ChallengeFamily,
+) -> Result<Vec<(i64, Vec<i8>)>, String> {
+    decode_family_witnesses(
+        family,
+        &snap.nodes,
+        &snap.edges,
+        proof.nonce.to_big_endian(),
+        &proof.solutions,
+    )
+}
+
+/// Unpack every row to one sign per topology node under the snapshot's spin set.
+fn unpack_rows(proof: &QuantumProof, snap: &MiningSnapshot) -> Result<Vec<Vec<i8>>, String> {
+    let num_spins = snap.nodes.len();
+    let spin_spec = AllowedValueSpec::Set(snap.allowed_spin_milli.as_slice());
+    let mut rows = Vec::with_capacity(proof.solutions.len());
+    for packed in &proof.solutions {
+        let milli =
+            unpack_solution(packed, num_spins, &spin_spec).map_err(|e| format!("unpack: {e:?}"))?;
+        let mut spins = Vec::with_capacity(milli.len());
+        for value in milli {
+            spins.push(match value.signum() {
+                1 => 1i8,
+                -1 => -1i8,
+                _ => return Err("zero spin".into()),
+            });
+        }
+        rows.push(spins);
+    }
+    Ok(rows)
 }
 
 #[cfg(test)]

@@ -1,7 +1,8 @@
 //! tonic `MinerService` server: token verify, handshake, job dispatch, results.
 
 use crate::cancel_timing::{CancelLatency, CancelTiming};
-use crate::chain::{ChainClient, ChainError, MAX_ORDER_SOLUTIONS};
+use crate::coordinator::ResultSink;
+use crate::types::order::MAX_ORDER_SOLUTIONS;
 use crate::types::proof::{Proof, SubmitAction, SubmitReceipt};
 
 use crate::router::{MinerCaps, Router};
@@ -120,15 +121,107 @@ fn short_job_id(job_id: &[u8]) -> String {
     s
 }
 
+/// The session side of the coordinator state: who may connect, and how to
+/// reach each live session.
+#[derive(Default)]
+pub struct SessionState {
+    /// Per-miner expected session tokens (`miner_id` → hex token).
+    pub expected_tokens: HashMap<String, String>,
+    /// Per-miner `Configure` messages to send after `Welcome`.
+    pub configure: HashMap<String, Configure>,
+    /// Live per-miner outbound channels, so the supervisor can push an in-band
+    /// `Shutdown`/cancel to a running session. Registered on handshake success,
+    /// removed when the session ends.
+    pub outbound: HashMap<String, mpsc::Sender<Result<CoordMsg, Status>>>,
+    /// Live per-miner dispatcher wakeups. A miner grants its credits as soon as
+    /// it starts, which is usually before the first chain snapshot arrives, so
+    /// the grant drains an empty queue and the dispatcher parks. Staging alone
+    /// does not wake it, and the miner sends no further `JobRequest` until a
+    /// job completes. The feeder sends a zero-credit grant here after it stages
+    /// work, which re-runs the drain without changing the credit balance.
+    pub wakeups: HashMap<String, mpsc::Sender<u32>>,
+    /// Live per-session `Cancel` timing, registered beside `outbound`.
+    pub(crate) cancel_timings: HashMap<String, Arc<CancelTiming>>,
+}
+
+impl SessionState {
+    /// Register a live session's outbound channel for supervisor-initiated sends.
+    pub fn register_outbound(
+        &mut self,
+        miner_id: &str,
+        tx: mpsc::Sender<Result<CoordMsg, Status>>,
+    ) {
+        let _ = self.outbound.insert(miner_id.to_string(), tx);
+    }
+
+    /// Register a live session's dispatcher wakeup channel.
+    pub fn register_wakeup(&mut self, miner_id: &str, grants: mpsc::Sender<u32>) {
+        let _ = self.wakeups.insert(miner_id.to_string(), grants);
+    }
+
+    /// Wake a miner's dispatcher so it drains newly staged work against credits
+    /// the miner already granted.
+    ///
+    /// The send is non-blocking on purpose. A full channel already holds an
+    /// unread wakeup, and one wakeup drains the whole queue, so dropping this
+    /// one loses nothing. Blocking here would stall the feeder for every other
+    /// miner.
+    pub fn wake_dispatcher(&self, miner_id: &str) {
+        if let Some(grants) = self.wakeups.get(miner_id) {
+            let _ = grants.try_send(0);
+        }
+    }
+
+    /// Drop a session's outbound channel when it ends.
+    pub fn deregister_outbound(&mut self, miner_id: &str) {
+        let _ = self.outbound.remove(miner_id);
+        let _ = self.wakeups.remove(miner_id);
+        let _ = self.cancel_timings.remove(miner_id);
+    }
+}
+
+/// The state a session loop runs against: the session registry, and what a
+/// joining miner must receive after `Configure`.
+pub trait SessionHost: Send + 'static {
+    /// The session registry.
+    fn sessions(&self) -> &SessionState;
+    /// The session registry, for registration.
+    fn sessions_mut(&mut self) -> &mut SessionState;
+    /// The `Topology` and `SetTarget` a miner joining now must receive, in
+    /// send order. Empty before the first round.
+    fn requirements(&self) -> Vec<coord_msg::Msg>;
+}
+
+impl SessionHost for CoordinatorState {
+    fn sessions(&self) -> &SessionState {
+        &self.sessions
+    }
+
+    fn sessions_mut(&mut self) -> &mut SessionState {
+        &mut self.sessions
+    }
+
+    fn requirements(&self) -> Vec<coord_msg::Msg> {
+        let mut msgs = Vec::new();
+        if let Some(topo) = self.topology.as_ref() {
+            msgs.push(coord_msg::Msg::Topology(topo.to_proto()));
+        }
+        // The current difficulty, so a miner joining mid-generation tracks it
+        // immediately, rather than waiting for the next reseed broadcast.
+        if let Some(target) = self.target {
+            msgs.push(coord_msg::Msg::SetTarget(target));
+        }
+        msgs
+    }
+}
+
 /// How many top candidates the win-time stash retains per generation.
 const WIN_STASH_K: usize = 8;
 
 /// Shared coordinator runtime state for one or more miner sessions.
 pub struct CoordinatorState {
-    /// Per-miner expected session tokens (`miner_id` → hex token).
-    pub expected_tokens: HashMap<String, String>,
-    /// Per-miner `Configure` messages to send after `Welcome`.
-    pub configure: HashMap<String, Configure>,
+    /// Who may connect and how to reach each live session.
+    pub sessions: SessionState,
     /// Active graph topology advertised to miners, if any.
     pub topology: Option<Topology>,
     /// Dense-position view of `topology` that lease verification draws on.
@@ -155,19 +248,6 @@ pub struct CoordinatorState {
     /// Populated in [`CoordinatorState::dispatch_inflight`] for lease jobs
     /// only; cleared in [`CoordinatorState::complete_inflight`].
     pub lease_issued_at: HashMap<Vec<u8>, std::time::Instant>,
-    /// Live per-miner outbound channels, so the supervisor can push an in-band
-    /// `Shutdown`/cancel to a running session. Registered on handshake success,
-    /// removed when the session ends.
-    pub outbound: HashMap<String, mpsc::Sender<Result<CoordMsg, Status>>>,
-    /// Live per-miner dispatcher wakeups. A miner grants its credits as soon as
-    /// it starts, which is usually before the first chain snapshot arrives, so
-    /// the grant drains an empty queue and the dispatcher parks. Staging alone
-    /// does not wake it, and the miner sends no further `JobRequest` until a
-    /// job completes. The feeder sends a zero-credit grant here after it stages
-    /// work, which re-runs the drain without changing the credit balance.
-    pub wakeups: HashMap<String, mpsc::Sender<u32>>,
-    /// Live per-session `Cancel` timing, registered beside `outbound`.
-    pub(crate) cancel_timings: HashMap<String, Arc<CancelTiming>>,
     /// `job_id` (nonce) → the 32-byte salt it was derived from, so the winning
     /// `Proof` carries the salt live submit requires. Recorded when the feeder
     /// stages a job, consumed on its `Result`, cleared on reseed.
@@ -221,8 +301,7 @@ impl CoordinatorState {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            expected_tokens: HashMap::new(),
-            configure: HashMap::new(),
+            sessions: SessionState::default(),
             topology: None,
             lease_topology: None,
             resolved_topo: Arc::new(ResolvedTopo::default()),
@@ -231,9 +310,6 @@ impl CoordinatorState {
             inflight: HashMap::new(),
             inflight_owner: HashMap::new(),
             lease_issued_at: HashMap::new(),
-            outbound: HashMap::new(),
-            cancel_timings: HashMap::new(),
-            wakeups: HashMap::new(),
             salts: HashMap::new(),
             current_best_milli: None,
             mined_generation: None,
@@ -369,23 +445,9 @@ impl CoordinatorState {
             }
         }
         jobs.extend(self.router.reclaim(miner_id));
-        let _ = self.outbound.remove(miner_id);
-        let _ = self.cancel_timings.remove(miner_id);
+        let _ = self.sessions.outbound.remove(miner_id);
+        let _ = self.sessions.cancel_timings.remove(miner_id);
         jobs
-    }
-
-    /// Register a live session's outbound channel for supervisor-initiated sends.
-    pub fn register_outbound(
-        &mut self,
-        miner_id: &str,
-        tx: mpsc::Sender<Result<CoordMsg, Status>>,
-    ) {
-        let _ = self.outbound.insert(miner_id.to_string(), tx);
-    }
-
-    /// Register a live session's dispatcher wakeup channel.
-    pub fn register_wakeup(&mut self, miner_id: &str, grants: mpsc::Sender<u32>) {
-        let _ = self.wakeups.insert(miner_id.to_string(), grants);
     }
 
     /// Apply a compatible snapshot and wake dispatchers without granting credits.
@@ -413,29 +475,9 @@ impl CoordinatorState {
             "miner capability snapshot applied"
         );
         for id in self.router.miner_ids() {
-            self.wake_dispatcher(&id);
+            self.sessions.wake_dispatcher(&id);
         }
         true
-    }
-
-    /// Wake a miner's dispatcher so it drains newly staged work against credits
-    /// the miner already granted.
-    ///
-    /// The send is non-blocking on purpose. A full channel already holds an
-    /// unread wakeup, and one wakeup drains the whole queue, so dropping this
-    /// one loses nothing. Blocking here would stall the feeder for every other
-    /// miner.
-    pub fn wake_dispatcher(&self, miner_id: &str) {
-        if let Some(grants) = self.wakeups.get(miner_id) {
-            let _ = grants.try_send(0);
-        }
-    }
-
-    /// Drop a session's outbound channel when it ends.
-    pub fn deregister_outbound(&mut self, miner_id: &str) {
-        let _ = self.outbound.remove(miner_id);
-        let _ = self.wakeups.remove(miner_id);
-        let _ = self.cancel_timings.remove(miner_id);
     }
 }
 
@@ -449,11 +491,11 @@ impl Default for CoordinatorState {
 /// under the lock, drops it, then awaits the sends, so the fan-out never holds
 /// the state lock across I/O.
 #[async_trait::async_trait]
-impl crate::liveness::MinerBroadcast for Arc<Mutex<CoordinatorState>> {
+impl<S: SessionHost> crate::liveness::MinerBroadcast for Arc<Mutex<S>> {
     async fn broadcast(&self, msg: coord_msg::Msg) -> usize {
         let senders: Vec<_> = {
             let st = self.lock().await;
-            st.outbound.values().cloned().collect()
+            st.sessions().outbound.values().cloned().collect()
         };
         let n = senders.len();
         for tx in senders {
@@ -470,13 +512,15 @@ impl crate::supervisor::SessionGate for Arc<Mutex<CoordinatorState>> {
         let _ = self
             .lock()
             .await
+            .sessions
             .expected_tokens
             .insert(miner_id.to_owned(), token.clone());
         token
     }
 
     async fn request_shutdown(&self, miner_id: &str, grace_ms: u32) {
-        let tx = self.lock().await.outbound.get(miner_id).cloned();
+        let tx = self.lock().await.sessions.outbound.get(miner_id).cloned();
+
         if let Some(tx) = tx {
             let _ = tx.send(Ok(shutdown_msg(grace_ms))).await;
         }
@@ -492,27 +536,27 @@ impl crate::supervisor::SessionGate for Arc<Mutex<CoordinatorState>> {
 }
 
 /// gRPC service holding shared state + chain client.
-pub struct CoordinatorService<C: ChainClient + 'static> {
+pub struct CoordinatorService<R: ResultSink + ?Sized + 'static> {
     /// Shared session state.
     pub state: Arc<Mutex<CoordinatorState>>,
-    /// Chain client for proof submit.
-    pub chain: Arc<C>,
+    /// Where accepted proofs and mempool solutions go.
+    pub sink: Arc<R>,
     /// Notifies waiters when a proof is submitted successfully.
     pub submit_notify: Arc<Mutex<Option<oneshot::Sender<()>>>>,
 }
 
-impl<C: ChainClient + 'static> Clone for CoordinatorService<C> {
+impl<R: ResultSink + ?Sized + 'static> Clone for CoordinatorService<R> {
     fn clone(&self) -> Self {
         Self {
             state: Arc::clone(&self.state),
-            chain: Arc::clone(&self.chain),
+            sink: Arc::clone(&self.sink),
             submit_notify: Arc::clone(&self.submit_notify),
         }
     }
 }
 
 #[tonic::async_trait]
-impl<C: ChainClient + 'static> MinerService for CoordinatorService<C> {
+impl<R: ResultSink + ?Sized + 'static> MinerService for CoordinatorService<R> {
     type SessionStream = OutboundStream;
 
     async fn session(
@@ -530,9 +574,10 @@ impl<C: ChainClient + 'static> MinerService for CoordinatorService<C> {
 
 /// Run one miner session on its own task and return the stream the transport
 /// reads the session's outbound messages from.
-pub fn start_session<E: SessionEvents>(
+pub fn start_session<S: SessionHost, E: SessionEvents>(
     mut inbound: Streaming<MinerMsg>,
-    state: Arc<Mutex<CoordinatorState>>,
+    state: Arc<Mutex<S>>,
+
     events: Arc<E>,
 ) -> OutboundStream {
     let (tx, rx) = mpsc::channel::<Result<CoordMsg, Status>>(64);
@@ -577,7 +622,7 @@ pub(crate) struct PowOutcome<'a> {
     /// Salt the nonce was derived from, required by live submit.
     pub salt: Option<[u8; 32]>,
     /// Scored rows and gate verdict.
-    pub validated: crate::validate::Validated,
+    pub validated: crate::types::proof::Validated,
     /// Gates the verdict used.
     pub gates: crate::validate::QualityGates,
     /// Round best before this outcome.
@@ -595,8 +640,8 @@ pub(crate) struct PowOutcome<'a> {
     clippy::too_many_lines,
     reason = "settling a proof preserves submit, stash, and attempt ordering"
 )]
-pub(crate) async fn settle_pow_result<C: ChainClient>(
-    chain: &C,
+pub(crate) async fn settle_pow_result<R: ResultSink + ?Sized>(
+    sink: &R,
     state: &Arc<Mutex<CoordinatorState>>,
     submit_notify: &Arc<Mutex<Option<oneshot::Sender<()>>>>,
     outcome: PowOutcome<'_>,
@@ -620,7 +665,7 @@ pub(crate) async fn settle_pow_result<C: ChainClient>(
     // Chain detail of the submit attempt, kept for the
     // attempt record below; `None` when this result never
     // reached the gate that triggers a submit.
-    let mut receipt: Option<Result<SubmitReceipt, ChainError>> = None;
+    let mut receipt: Option<Result<SubmitReceipt, String>> = None;
     if validated.accepted && beats_current(validated.best_energy_milli, best) {
         let proof = Proof {
             job_id: job_id.to_vec(),
@@ -648,7 +693,7 @@ pub(crate) async fn settle_pow_result<C: ChainClient>(
         if let Some(log) = &round_log {
             log.lock().await.submission_started();
         }
-        let submit_result = chain.submit_proof(&proof).await;
+        let submit_result = sink.submit_proof(&proof).await;
         if let Some(log) = &round_log {
             log.lock().await.submission_finished(
                 submit_result.as_ref().ok(),
@@ -823,8 +868,8 @@ pub(crate) async fn settle_pow_result<C: ChainClient>(
 /// and a result that fails authenticity verification (a bad miner, not a
 /// near miss) are dropped. A dropped result never marks the round mined;
 /// `note_result` fires only after verification succeeds.
-pub(crate) async fn handle_lease_result<C: ChainClient>(
-    chain: &C,
+pub(crate) async fn handle_lease_result<R: ResultSink + ?Sized>(
+    sink: &R,
     state: &Arc<Mutex<CoordinatorState>>,
     submit_notify: &Arc<Mutex<Option<oneshot::Sender<()>>>>,
     miner_id: &str,
@@ -870,7 +915,7 @@ pub(crate) async fn handle_lease_result<C: ChainClient>(
     };
     state.lock().await.note_result(job.generation);
     settle_pow_result(
-        chain,
+        sink,
         state,
         submit_notify,
         PowOutcome {
@@ -992,10 +1037,10 @@ pub trait SessionEvents: Send + Sync + 'static {
     clippy::too_many_lines,
     reason = "session loop is one cohesive handshake + message dispatch"
 )]
-pub async fn run_session<E: SessionEvents>(
+pub async fn run_session<S: SessionHost, E: SessionEvents>(
     inbound: &mut (impl tokio_stream::Stream<Item = Result<MinerMsg, Status>> + Unpin),
     tx: &mpsc::Sender<Result<CoordMsg, Status>>,
-    state: Arc<Mutex<CoordinatorState>>,
+    state: Arc<Mutex<S>>,
     events: Arc<E>,
     cancel_timing: Arc<CancelTiming>,
 ) {
@@ -1012,20 +1057,25 @@ pub async fn run_session<E: SessionEvents>(
     let caps = hello.capabilities.clone().unwrap_or_default();
     let (token_ok, protocol_ok, configure) = {
         let st = state.lock().await;
-        let expected = st
+        let sessions = st.sessions();
+        let expected = sessions
             .expected_tokens
             .get(&miner_id)
             .cloned()
             .unwrap_or_default();
         let token_ok = !expected.is_empty() && hello.session_token == expected;
         let protocol_ok = hello.capabilities.is_some() && caps.protocol_version == PROTOCOL_VERSION;
-        let configure = st.configure.get(&miner_id).cloned().unwrap_or(Configure {
-            queue_depth: 0,
-            idle_timeout_s: 300,
-            heartbeat_s: 15,
-            reconnect_window_s: 60,
-            backend_toml: String::new(),
-        });
+        let configure = sessions
+            .configure
+            .get(&miner_id)
+            .cloned()
+            .unwrap_or(Configure {
+                queue_depth: 0,
+                idle_timeout_s: 300,
+                heartbeat_s: 15,
+                reconnect_window_s: 60,
+                backend_toml: String::new(),
+            });
         (token_ok, protocol_ok, configure)
     };
 
@@ -1065,15 +1115,8 @@ pub async fn run_session<E: SessionEvents>(
     }
     {
         let st = state.lock().await;
-        if let Some(topo) = st.topology.as_ref() {
-            let _ = tx
-                .send(Ok(coord(coord_msg::Msg::Topology(topo.to_proto()))))
-                .await;
-        }
-        // Push the current difficulty so a miner joining mid-generation tracks
-        // it immediately, rather than waiting for the next reseed broadcast.
-        if let Some(target) = st.target {
-            let _ = tx.send(Ok(coord(coord_msg::Msg::SetTarget(target)))).await;
+        for msg in st.requirements() {
+            let _ = tx.send(Ok(coord(msg))).await;
         }
     }
 
@@ -1081,8 +1124,9 @@ pub async fn run_session<E: SessionEvents>(
     // in-band Shutdown/cancel while it runs; dropped when the loop exits.
     {
         let mut st = state.lock().await;
-        st.register_outbound(&miner_id, tx.clone());
-        let _ = st
+        let sessions = st.sessions_mut();
+        sessions.register_outbound(&miner_id, tx.clone());
+        let _ = sessions
             .cancel_timings
             .insert(miner_id.clone(), Arc::clone(&cancel_timing));
     }
@@ -1092,7 +1136,11 @@ pub async fn run_session<E: SessionEvents>(
         tx: tx.clone(),
     };
     if events.settled(&link).await == Flow::End {
-        state.lock().await.deregister_outbound(&miner_id);
+        state
+            .lock()
+            .await
+            .sessions_mut()
+            .deregister_outbound(&miner_id);
         return;
     }
 
@@ -1109,6 +1157,7 @@ pub async fn run_session<E: SessionEvents>(
     state
         .lock()
         .await
+        .sessions_mut()
         .register_wakeup(&miner_id, grants.clone());
     let _dispatcher = {
         let events = Arc::clone(&events);
@@ -1181,13 +1230,17 @@ pub async fn run_session<E: SessionEvents>(
         }
     }
 
-    state.lock().await.deregister_outbound(&miner_id);
+    state
+        .lock()
+        .await
+        .sessions_mut()
+        .deregister_outbound(&miner_id);
 }
 
 /// The production work behind a session: route jobs, validate results, and
 /// settle proofs on the chain.
 #[async_trait::async_trait]
-impl<C: ChainClient + 'static> SessionEvents for CoordinatorService<C> {
+impl<R: ResultSink + ?Sized + 'static> SessionEvents for CoordinatorService<R> {
     async fn joined(&self, miner_id: &str, caps: &Capabilities) {
         let miner_caps = MinerCaps::from_capabilities(caps);
         {
@@ -1234,7 +1287,7 @@ impl<C: ChainClient + 'static> SessionEvents for CoordinatorService<C> {
     }
 
     async fn result(&self, link: &SessionLink, result: quip_proto::v1::Result) -> Flow {
-        let (state, chain, submit_notify) = (&self.state, self.chain.as_ref(), &self.submit_notify);
+        let (state, sink, submit_notify) = (&self.state, self.sink.as_ref(), &self.submit_notify);
         let miner_id = link.miner_id.as_str();
         let is_lease = state
             .lock()
@@ -1243,7 +1296,7 @@ impl<C: ChainClient + 'static> SessionEvents for CoordinatorService<C> {
             .get(&result.job_id)
             .is_some_and(crate::lease::is_lease);
         if is_lease {
-            handle_lease_result(chain, state, submit_notify, miner_id, result).await;
+            handle_lease_result(sink, state, submit_notify, miner_id, result).await;
             return Flow::Continue;
         }
         let (job, salt, topo, best, gates, generation, round_log) = {
@@ -1279,7 +1332,7 @@ impl<C: ChainClient + 'static> SessionEvents for CoordinatorService<C> {
             // applies to it.
             Some(job) if job.provenance.as_ref().is_some_and(|p| !p.is_pow) => {
                 submit_mempool_result(
-                    chain,
+                    sink,
                     state,
                     &job,
                     &result.solutions,
@@ -1299,7 +1352,7 @@ impl<C: ChainClient + 'static> SessionEvents for CoordinatorService<C> {
                 let validated = validate_result(ising, &result.solutions, &gates, &topo);
                 log_validation(miner_id, &result.job_id, started.elapsed());
                 settle_pow_result(
-                    chain,
+                    sink,
                     state,
                     submit_notify,
                     PowOutcome {
@@ -1445,8 +1498,8 @@ fn log_validation(miner_id: &str, job_id: &[u8], elapsed: Duration) {
 /// the gates, or a solution the chain refuses, leaves the order answered. Only
 /// a delivery failure forgets it, so the feeder stages it again while it is
 /// still open.
-async fn submit_mempool_result<C: ChainClient>(
-    chain: &C,
+async fn submit_mempool_result<R: ResultSink + ?Sized>(
+    sink: &R,
     state: &Arc<Mutex<CoordinatorState>>,
     job: &quip_proto::v1::Job,
     solutions: &[quip_proto::v1::Solution],
@@ -1490,7 +1543,7 @@ async fn submit_mempool_result<C: ChainClient>(
         salt: Vec::new(),
         device_access_time_us,
     };
-    match chain.submit_solution(&proof).await.map(|r| r.action) {
+    match sink.submit_solution(&proof).await.map(|r| r.action) {
         Ok(SubmitAction::Success) => tracing::info!(
             order = %order,
             best_energy_milli = proof.best_energy_milli,
@@ -1553,9 +1606,10 @@ pub async fn serve_one_session_expecting(
 
     let mut st = CoordinatorState::new();
     let _ = st
+        .sessions
         .expected_tokens
         .insert(miner_id.into(), coord_token.into());
-    let _ = st.configure.insert(
+    let _ = st.sessions.configure.insert(
         miner_id.into(),
         Configure {
             queue_depth: 3,
@@ -1590,7 +1644,7 @@ pub async fn serve_one_session_expecting(
 
     let svc = CoordinatorService {
         state: Arc::clone(&state),
-        chain,
+        sink: chain,
         submit_notify: Arc::new(Mutex::new(None)),
     };
     let server = tokio::spawn(async move {
@@ -1763,7 +1817,7 @@ mod tests {
     ) -> Arc<CoordinatorService<FakeChain>> {
         Arc::new(CoordinatorService {
             state: Arc::clone(state),
-            chain,
+            sink: chain,
             submit_notify: notify(),
         })
     }
@@ -2350,17 +2404,17 @@ mod tests {
         let mut st = CoordinatorState::new();
         let (tx, _rx) = mpsc::channel::<Result<CoordMsg, Status>>(1);
         let (grants, _grant_rx) = mpsc::channel::<u32>(1);
-        st.register_outbound("cpu-0", tx);
-        st.register_wakeup("cpu-0", grants);
-        assert!(st.outbound.contains_key("cpu-0"));
-        assert!(st.wakeups.contains_key("cpu-0"));
-        st.deregister_outbound("cpu-0");
-        assert!(!st.outbound.contains_key("cpu-0"));
+        st.sessions.register_outbound("cpu-0", tx);
+        st.sessions.register_wakeup("cpu-0", grants);
+        assert!(st.sessions.outbound.contains_key("cpu-0"));
+        assert!(st.sessions.wakeups.contains_key("cpu-0"));
+        st.sessions.deregister_outbound("cpu-0");
+        assert!(!st.sessions.outbound.contains_key("cpu-0"));
         assert!(
-            !st.wakeups.contains_key("cpu-0"),
+            !st.sessions.wakeups.contains_key("cpu-0"),
             "a dead session must not be woken"
         );
-        st.wake_dispatcher("cpu-0");
+        st.sessions.wake_dispatcher("cpu-0");
     }
 
     /// A miner that grants its credits before any job is staged must still
@@ -2379,7 +2433,7 @@ mod tests {
         {
             let mut st = state.lock().await;
             st.router.register_miner("cpu-0", caps());
-            st.register_wakeup("cpu-0", grants);
+            st.sessions.register_wakeup("cpu-0", grants);
         }
 
         let dispatched = |st: &CoordinatorState| st.metrics.global().contexts_dispatched;
@@ -2399,7 +2453,7 @@ mod tests {
         {
             let mut st = state.lock().await;
             assert!(st.router.stage_on("cpu-0", job(b"late")));
-            st.wake_dispatcher("cpu-0");
+            st.sessions.wake_dispatcher("cpu-0");
         }
 
         // The wakeup carries no credits: the balance from the first grant stands.
@@ -2424,6 +2478,7 @@ mod tests {
 
         let mut st = CoordinatorState::new();
         let _ = st
+            .sessions
             .expected_tokens
             .insert("m".to_owned(), "token".to_owned());
         st.dispatch_inflight("m", job(b"already-dispatched"));
@@ -2551,6 +2606,7 @@ mod tests {
 
         let mut st = CoordinatorState::new();
         let _ = st
+            .sessions
             .expected_tokens
             .insert("m".to_owned(), "token".to_owned());
         let state = Arc::new(Mutex::new(st));
@@ -2601,7 +2657,7 @@ mod tests {
         for id in jobs {
             assert!(st.router.stage_on("m", job(id)));
         }
-        st.wake_dispatcher("m");
+        st.sessions.wake_dispatcher("m");
     }
 
     /// `Ready` grants nothing. A budgeted miner, such as a QPU that sends no
@@ -2717,6 +2773,7 @@ mod tests {
             .state
             .lock()
             .await
+            .sessions
             .cancel_timings
             .get("m")
             .cloned()

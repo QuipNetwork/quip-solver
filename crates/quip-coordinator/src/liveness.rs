@@ -216,7 +216,7 @@ mod tests {
 
         let state = Arc::new(Mutex::new(CoordinatorState::new()));
         let (tx, mut rx) = mpsc::channel(4);
-        state.lock().await.register_outbound("cpu-0", tx);
+        state.lock().await.sessions.register_outbound("cpu-0", tx);
 
         let n = ping_once(&state).await;
         assert_eq!(n, 1);

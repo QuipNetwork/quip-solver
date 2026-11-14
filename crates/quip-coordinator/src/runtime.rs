@@ -6,24 +6,19 @@
 //! stash) is layered on top by the live-mining epic; a coordinator built from
 //! this alone serves sessions and supervises miners but stages no work yet.
 
-use crate::chain::sync::{wait_until_synced, SyncOutcome, SyncSource};
-use crate::chain::{ChainClient, JobOrder};
-use crate::types::snapshot::MiningSnapshot;
-
-use crate::config::{DescriptorParams, LaunchEntry};
+use crate::app::Environment;
+use crate::config::LaunchEntry;
+use crate::coordinator::{ResultSink, WorkSource};
 use crate::decay::{DecayAlgorithm, DecayModel, EnergyCurve};
-use crate::funding::{ensure_funded, BalanceSource, Faucet};
 use crate::logging::LogLevel;
 use crate::pool_watch::PoolObservation;
 use crate::producer::{derive_pow_job, job_order_to_job};
-use crate::readiness::{
-    build_faucet, declare_round_participation, file_round_descriptor, register_round_miner,
-    ReadinessError,
-};
 use crate::round::log::RoundLog;
 use crate::round::{RoundEvent, RoundState};
 use crate::session::{coord, CoordinatorService, CoordinatorState};
 use crate::supervisor::{supervise_miner, BackoffPolicy};
+use crate::types::order::JobOrder;
+use crate::types::snapshot::MiningSnapshot;
 use crate::types::topology::Topology;
 use crate::validate::QualityGates;
 use quip_proto::v1::miner_service_server::MinerServiceServer;
@@ -31,7 +26,6 @@ use quip_proto::v1::{coord_msg, SetTarget};
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UnixListener;
@@ -69,17 +63,6 @@ pub struct RuntimeParams {
     /// coordinator stdio, so their own subscriber needs this flag to match
     /// coordinator verbosity.
     pub log_level: LogLevel,
-    /// Account-funding knobs reused on every round, not only at process start.
-    pub funding: crate::funding::FundingParams,
-    /// Node identity and miner list for `set_descriptor`.
-    pub descriptor: DescriptorParams,
-    /// Set after the first `DescriptorFiled` walk in this process.
-    pub descriptor_filed: Arc<AtomicBool>,
-    /// Set once `QuantumPow.Miners` is known to hold the signing account.
-    pub miner_registered: Arc<AtomicBool>,
-    /// Set once `QuantumComputeMempool.Solvers` holds the signing account with
-    /// the configured type. Mempool orders are staged only after this.
-    pub solver_registered: Arc<AtomicBool>,
     /// Chain identity advertised on `/api/v1/status`. Empty when the process
     /// holds no usable signer key.
     pub identity: crate::metrics::Identity,
@@ -97,17 +80,6 @@ pub struct FeederParams {
     pub buffer_depth: usize,
     /// How often the feeder polls the chain head and tops up buffers.
     pub poll_interval: Duration,
-    /// Account-funding knobs reused on every round, not only at process start.
-    pub funding: crate::funding::FundingParams,
-    /// Node identity and miner list for `set_descriptor`.
-    pub descriptor: DescriptorParams,
-    /// Set after the first `DescriptorFiled` walk in this process.
-    pub descriptor_filed: Arc<AtomicBool>,
-    /// Set once `QuantumPow.Miners` is known to hold the signing account.
-    pub miner_registered: Arc<AtomicBool>,
-    /// Set once `QuantumComputeMempool.Solvers` holds the signing account with
-    /// the configured type. Mempool orders are staged only after this.
-    pub solver_registered: Arc<AtomicBool>,
     /// Consecutive failed submissions of one proof, inside one quantum block,
     /// before the coordinator stops retrying it.
     pub max_submit_attempts: u32,
@@ -230,7 +202,7 @@ struct MinerThroughput {
 async fn broadcast_set_target(state: &Arc<Mutex<CoordinatorState>>, target: SetTarget) {
     let senders: Vec<_> = {
         let st = state.lock().await;
-        st.outbound.values().cloned().collect()
+        st.sessions.outbound.values().cloned().collect()
     };
     for tx in senders {
         let _ = tx.send(Ok(coord(coord_msg::Msg::SetTarget(target)))).await;
@@ -245,7 +217,7 @@ async fn broadcast_set_target(state: &Arc<Mutex<CoordinatorState>>, target: SetT
 async fn broadcast_topology(state: &Arc<Mutex<CoordinatorState>>, topo: quip_proto::v1::Topology) {
     let senders: Vec<_> = {
         let st = state.lock().await;
-        st.outbound.values().cloned().collect()
+        st.sessions.outbound.values().cloned().collect()
     };
     for tx in senders {
         let _ = tx
@@ -265,9 +237,10 @@ async fn broadcast_topology(state: &Arc<Mutex<CoordinatorState>>, topo: quip_pro
 async fn broadcast_cancel(state: &Arc<Mutex<CoordinatorState>>, max_generation: u64) -> usize {
     let senders: Vec<_> = {
         let st = state.lock().await;
-        st.outbound
+        st.sessions
+            .outbound
             .iter()
-            .map(|(id, tx)| (tx.clone(), st.cancel_timings.get(id).cloned()))
+            .map(|(id, tx)| (tx.clone(), st.sessions.cancel_timings.get(id).cloned()))
             .collect()
     };
     let n = senders.len();
@@ -354,6 +327,12 @@ async fn await_round_step<T>(
     }
 }
 
+/// Why the next qblock's requirements could not be loaded, as the readiness
+/// walk reports it.
+fn requirements_error(reason: &str) -> String {
+    format!("cannot load next qblock requirements: {reason}")
+}
+
 /// Drive [`RoundState`] from `machine` until [`RoundState::StartMining`].
 ///
 /// The caller logs the entry into the first state and bumps `generation`.
@@ -364,19 +343,14 @@ async fn await_round_step<T>(
     clippy::too_many_lines,
     reason = "one match arm per round state plus retry"
 )]
-async fn drive_to_mining<C, F>(
+async fn drive_to_mining<W: WorkSource + ?Sized>(
     mut machine: RoundState,
-    chain: &C,
+    work: &W,
     coord: &Arc<Mutex<CoordinatorState>>,
     params: &FeederParams,
-    faucet: Option<&F>,
     generation: u64,
     stop: &mut watch::Receiver<bool>,
-) -> Option<(MiningSnapshot, usize, usize)>
-where
-    C: ChainClient + SyncSource + BalanceSource,
-    F: Faucet + ?Sized,
-{
+) -> Option<(MiningSnapshot, usize, usize)> {
     let mut cancelled_jobs = 0usize;
     let mut miners_told = 0usize;
     let mut snap: Option<MiningSnapshot> = None;
@@ -394,17 +368,12 @@ where
                 RoundEvent::Succeeded
             }
             RoundState::ValidatorSynced => {
-                let outcome = await_round_step(
-                    machine,
-                    generation,
-                    &mut hold,
-                    stop,
-                    wait_until_synced(chain, tokio::time::sleep),
-                )
-                .await?;
+                let outcome =
+                    await_round_step(machine, generation, &mut hold, stop, work.wait_synced())
+                        .await?;
                 match outcome {
-                    SyncOutcome::Synced => RoundEvent::Succeeded,
-                    SyncOutcome::Unknown(reason) => {
+                    Ok(()) => RoundEvent::Succeeded,
+                    Err(reason) => {
                         tracing::warn!(
                             reason = %reason,
                             "cannot confirm the validator has caught up; continuing, but funding and \
@@ -415,25 +384,14 @@ where
                 }
             }
             RoundState::AccountFunded => {
-                let result = await_round_step(
-                    machine,
-                    generation,
-                    &mut hold,
-                    stop,
-                    ensure_funded(
-                        chain,
-                        faucet,
-                        params.miner_account,
-                        &params.funding,
-                        tokio::time::sleep,
-                    ),
-                )
-                .await?;
+                let result =
+                    await_round_step(machine, generation, &mut hold, stop, work.ensure_funded())
+                        .await?;
                 match result {
-                    Ok(_) => RoundEvent::Succeeded,
+                    Ok(()) => RoundEvent::Succeeded,
                     Err(e) => {
                         tracing::warn!(
-                            error = %ReadinessError::Funding(e),
+                            error = %e,
                             generation,
                             "round readiness failed; holding off mining"
                         );
@@ -447,7 +405,7 @@ where
                     generation,
                     &mut hold,
                     stop,
-                    register_round_miner(chain, params.miner_registered.as_ref()),
+                    work.ensure_miner_registered(),
                 )
                 .await?;
                 if registered {
@@ -459,14 +417,9 @@ where
                 }
             }
             RoundState::RequirementsDownloaded => {
-                let result = await_round_step(
-                    machine,
-                    generation,
-                    &mut hold,
-                    stop,
-                    chain.fetch_mining_snapshot(None, params.miner_account, None),
-                )
-                .await?;
+                let result =
+                    await_round_step(machine, generation, &mut hold, stop, work.mining_snapshot())
+                        .await?;
                 match result {
                     Ok(Some(s)) => {
                         snap = Some(s);
@@ -474,9 +427,7 @@ where
                     }
                     Ok(None) => {
                         tracing::warn!(
-                            error = %ReadinessError::Snapshot(
-                                "chain has no mining snapshot".into()
-                            ),
+                            error = %requirements_error("chain has no mining snapshot"),
                             generation,
                             "round readiness failed; holding off mining"
                         );
@@ -484,7 +435,7 @@ where
                     }
                     Err(e) => {
                         tracing::warn!(
-                            error = %ReadinessError::Snapshot(e.to_string()),
+                            error = %requirements_error(&e),
                             generation,
                             "round readiness failed; holding off mining"
                         );
@@ -493,13 +444,7 @@ where
                 }
             }
             RoundState::DescriptorFiled => {
-                file_round_descriptor(
-                    chain,
-                    params.descriptor_filed.as_ref(),
-                    &params.descriptor,
-                    params.miner_account,
-                )
-                .await;
+                work.file_descriptor().await;
                 RoundEvent::Succeeded
             }
             RoundState::StartMining => {
@@ -560,15 +505,14 @@ fn order_gates(order: &JobOrder) -> QualityGates {
 ///
 /// Returns whether the orders were read. With no miner connected, nothing is
 /// read: routing would drop every order for good.
-async fn stage_mempool_orders<C: ChainClient>(
-    chain: &C,
+async fn stage_mempool_orders<W: WorkSource + ?Sized>(
+    work: &W,
     state: &Arc<Mutex<CoordinatorState>>,
-    miner_account: [u8; 32],
 ) -> bool {
     if state.lock().await.router.miner_ids().is_empty() {
         return false;
     }
-    let orders = match chain.fetch_mempool_orders(miner_account).await {
+    let orders = match work.mempool_orders().await {
         Ok(orders) => orders,
         Err(e) => {
             tracing::debug!(error = %e, "feeder: mempool order read failed");
@@ -595,7 +539,7 @@ async fn stage_mempool_orders<C: ChainClient>(
         };
         if let Some(miner) = st.router.route(job) {
             tracing::info!(order = %id, miner = %miner, nodes = order.nodes.len(), "feeder: staged mempool order");
-            st.wake_dispatcher(&miner);
+            st.sessions.wake_dispatcher(&miner);
         } else {
             tracing::warn!(
                 order = %id,
@@ -623,14 +567,12 @@ async fn stage_mempool_orders<C: ChainClient>(
     clippy::too_many_lines,
     reason = "single feeder loop: reseed, top-up, win-time submit"
 )]
-pub async fn feeder_loop<C>(
-    chain: Arc<C>,
+pub async fn feeder_loop<E: WorkSource + ResultSink + ?Sized>(
+    env: Arc<E>,
     state: Arc<Mutex<CoordinatorState>>,
     params: FeederParams,
     mut stop: watch::Receiver<bool>,
-) where
-    C: ChainClient + SyncSource + BalanceSource,
-{
+) {
     let mut current_head: Option<[u8; 32]> = None;
     let mut last_block_number: u64 = 0;
     let mut generation: u64 = 0;
@@ -656,7 +598,6 @@ pub async fn feeder_loop<C>(
     // The next heartbeat reports the delta from this map so the line does not
     // depend on which poll it lands on.
     let mut last_finished: HashMap<String, (u64, u64)> = HashMap::new();
-    let faucet = build_faucet(params.funding.faucet_url.as_deref());
     let mut round: Option<RoundState> = None;
     // Participation bookkeeping. `last_declared` is the candidate qblock the
     // chain has an answer for; `declared_generation` is the round that answer
@@ -664,7 +605,8 @@ pub async fn feeder_loop<C>(
     let mut last_declared: Option<u64> = None;
     let mut declared_generation: Option<u64> = None;
     // Consecutive failed submits of one proof in one quantum block.
-    let mut submit_ledger = crate::chain::SubmitLedger::new(params.max_submit_attempts);
+    let mut submit_ledger =
+        crate::coordinator::ledger::SubmitLedger::new(params.max_submit_attempts);
     // Round of the last solver-registration attempt, and the block the open
     // mempool orders were last read at.
     let mut solver_attempted: Option<u64> = None;
@@ -674,10 +616,7 @@ pub async fn feeder_loop<C>(
     let mut round_log: Option<Arc<Mutex<RoundLog>>> = None;
 
     loop {
-        let (snap, state_now) = match chain
-            .fetch_mining_snapshot(None, params.miner_account, None)
-            .await
-        {
+        let (snap, state_now) = match env.mining_snapshot().await {
             Ok(Some(s)) => (Some(s), FeedState::Ready),
             Ok(None) => (None, FeedState::Empty),
             Err(e) => {
@@ -724,7 +663,7 @@ pub async fn feeder_loop<C>(
             // so it is refreshed on a round turnover only, not on every poll.
             let refresh_miner_info = current_head != Some(snap.last_proof_block_hash);
             let miner_info = if refresh_miner_info {
-                match chain.fetch_miner_info(params.miner_account).await {
+                match env.miner_info().await {
                     Ok(info) => info,
                     Err(e) => {
                         tracing::debug!(error = %e, "feeder: miner info read failed");
@@ -751,9 +690,9 @@ pub async fn feeder_loop<C>(
                     round,
                     Some(RoundState::StartMining | RoundState::AwaitingQBlock)
                 ) {
-                match chain.fetch_pending_proofs().await {
+                match env.pending_proofs().await {
                     Ok(pending) => {
-                        let clearing = pool_watch.scan(&pending, &snap);
+                        let clearing = pool_watch.scan(&pending, &snap, |p, s| env.judge(p, s));
                         let observed = if clearing.is_some() {
                             PoolObservation::Clearing
                         } else {
@@ -809,10 +748,9 @@ pub async fn feeder_loop<C>(
 
                 let Some((fresh, cancelled_jobs, miners_told)) = drive_to_mining(
                     machine,
-                    chain.as_ref(),
+                    env.as_ref(),
                     &state,
                     &params,
-                    faucet.as_ref(),
                     generation,
                     &mut stop,
                 )
@@ -834,7 +772,7 @@ pub async fn feeder_loop<C>(
                 // which is the chain's. A family topology hash also covers the
                 // descriptor, so the value sets alone cannot rebuild it.
                 topo.hash.clone_from(&snap.topology_hash);
-                let qblock_id = match chain.fetch_latest_qblock_id().await {
+                let qblock_id = match env.latest_qblock_id().await {
                     Ok(id) => id,
                     Err(e) => {
                         tracing::warn!(error = %e, "feeder: qblock id read failed; attempt logs lose the qblock key");
@@ -842,7 +780,7 @@ pub async fn feeder_loop<C>(
                     }
                 };
                 let decay = match <[u8; 32]>::try_from(snap.topology_hash.as_slice()) {
-                    Ok(h) => match chain.fetch_decay_params(h).await {
+                    Ok(h) => match env.decay_params(h).await {
                         Ok(dp) => dp,
                         Err(e) => {
                             tracing::warn!(error = %e, "feeder: decay params read failed; running without decay projection");
@@ -956,12 +894,7 @@ pub async fn feeder_loop<C>(
                     }
                     // Declare after Cancel: inclusion can wait, but miners must stop first.
                     if owed {
-                        let settled = declare_round_participation(
-                            chain.as_ref(),
-                            &mut last_declared,
-                            params.miner_account,
-                        )
-                        .await;
+                        let settled = env.declare_participation(&mut last_declared).await;
                         if !settled {
                             tracing::warn!(
                                 generation,
@@ -1008,12 +941,7 @@ pub async fn feeder_loop<C>(
             // else. `declare_round_participation` deduplicates per candidate
             // qblock, so a reseed of the same qblock does not submit again.
             if declared_generation != Some(generation) && state.lock().await.round_mined() {
-                let settled = declare_round_participation(
-                    chain.as_ref(),
-                    &mut last_declared,
-                    params.miner_account,
-                )
-                .await;
+                let settled = env.declare_participation(&mut last_declared).await;
                 if settled {
                     declared_generation = Some(generation);
                 }
@@ -1167,7 +1095,7 @@ pub async fn feeder_loop<C>(
                 // first snapshot arrives, so that grant drained an empty queue
                 // and the dispatcher parked. Without this the miner waits for a
                 // job and the coordinator waits for a request, forever.
-                st.wake_dispatcher(&id);
+                st.sessions.wake_dispatcher(&id);
                 let completed_total = st.router.jobs_completed(&id);
                 let rejected_total = st.router.jobs_rejected(&id);
                 let (completed_before, rejected_before) =
@@ -1215,15 +1143,11 @@ pub async fn feeder_loop<C>(
             // per block after it succeeds: `submit_solution` refuses anyone else.
             if solver_attempted != Some(generation) {
                 solver_attempted = Some(generation);
-                let _ = crate::readiness::register_round_solver(
-                    chain.as_ref(),
-                    params.solver_registered.as_ref(),
-                )
-                .await;
+                env.ensure_solver_registered().await;
             }
-            if params.solver_registered.load(Ordering::Relaxed)
+            if env.solver_registered()
                 && snap.block_number > orders_read_at
-                && stage_mempool_orders(chain.as_ref(), &state, params.miner_account).await
+                && stage_mempool_orders(env.as_ref(), &state).await
             {
                 orders_read_at = snap.block_number;
             }
@@ -1304,7 +1228,7 @@ pub async fn feeder_loop<C>(
                 if let Some(log) = &round_log {
                     log.lock().await.submission_started();
                 }
-                let receipt = chain.submit_proof(&proof).await;
+                let receipt = env.submit_proof(&proof).await;
                 if let Some(log) = &round_log {
                     log.lock().await.submission_finished(
                         receipt.as_ref().ok(),
@@ -1426,15 +1350,15 @@ async fn spawn_dashboard(
 ///
 /// # Errors
 /// Returns an I/O error if the UDS socket cannot be bound.
-pub async fn run_runtime<C, S>(
+pub async fn run_runtime<E, S>(
     launch: Vec<LaunchEntry>,
-    chain: Arc<C>,
+    env: Arc<E>,
     state: Arc<Mutex<CoordinatorState>>,
     params: RuntimeParams,
     shutdown: S,
 ) -> std::io::Result<()>
 where
-    C: ChainClient + SyncSource + BalanceSource + 'static,
+    E: Environment,
     S: Future<Output = ()>,
 {
     let _ = std::fs::remove_file(&params.sock_path);
@@ -1449,7 +1373,10 @@ where
     {
         let mut st = state.lock().await;
         for e in &launch {
-            let _ = st.configure.insert(e.miner_id.clone(), e.configure.clone());
+            let _ = st
+                .sessions
+                .configure
+                .insert(e.miner_id.clone(), e.configure.clone());
             let _ = st.miner_types.insert(
                 e.miner_id.clone(),
                 crate::metrics::miner_type_label(&e.backend),
@@ -1473,7 +1400,7 @@ where
 
     let svc = CoordinatorService {
         state: Arc::clone(&state),
-        chain: Arc::clone(&chain),
+        sink: Arc::clone(&env),
         submit_notify: Arc::new(Mutex::new(None)),
     };
     let server = tokio::spawn(
@@ -1499,18 +1426,13 @@ where
 
     // The replenished feeder follows the chain head and keeps buffers full.
     let feeder = tokio::spawn(feeder_loop(
-        Arc::clone(&chain),
+        Arc::clone(&env),
         Arc::clone(&state),
         FeederParams {
             miner_identity: params.miner_identity,
             miner_account: params.miner_account,
             buffer_depth: params.buffer_depth,
             poll_interval: Duration::from_millis(params.poll_interval_ms),
-            funding: params.funding,
-            descriptor: params.descriptor,
-            descriptor_filed: params.descriptor_filed,
-            miner_registered: params.miner_registered,
-            solver_registered: params.solver_registered,
             max_submit_attempts: params.max_submit_attempts,
             metrics: Arc::clone(&metrics),
         },
@@ -1548,12 +1470,12 @@ mod tests {
     use super::{
         adaptive_depth, order_gates, stage_ceiling, MAX_STAGE_BYTES_PER_MINER, WINDOW_HEADROOM,
     };
-    use crate::chain::JobOrder;
+    use crate::types::order::JobOrder;
 
     fn order(min_energy: Option<i64>, min_diversity: Option<u32>) -> JobOrder {
         JobOrder {
             order_id: 5u64.to_le_bytes().to_vec(),
-            mode: crate::chain::scale_types::JobMode::Open,
+            mode: crate::types::order::JobMode::Open,
             nodes: vec![0, 1],
             edges: vec![(0, 1)],
             h_milli: vec![0, 0],

@@ -7,7 +7,8 @@
 //! position-resolved graph ([`ResolvedTopo`]) with no node-id lookup.
 //! `quantum_validation::energy_of_solution` is retained as a debug golden check.
 
-use crate::types::proof::SpinRow;
+use crate::types::proof::{SpinRow, Validated};
+
 use quantum_validation::{calculate_diversity, select_diverse, MilliValue};
 
 use quip_proto::v1::{ising_problem, IsingProblem, Solution};
@@ -37,36 +38,6 @@ pub struct QualityGates {
     pub min_diversity_milli: u32,
     /// Minimum count of unique energy-valid solutions.
     pub min_solutions: u32,
-}
-
-/// Outcome of coordinator-side result revalidation for miner gating.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Validated {
-    /// Minimum recomputed energy after the energy gate, Z2 deduplication, and
-    /// diversity selection. `i64::MAX` when no row clears the energy gate.
-    /// A finite value does not imply `accepted`.
-    pub best_energy_milli: i64,
-    /// Diversity (milli) of the diverse-selected subset.
-    pub diversity_milli: u32,
-    /// Count of unique energy-valid solutions after Z2 dedup.
-    pub n_valid: u32,
-    /// Whether `n_valid` and diversity clear the advertised gates.
-    pub accepted: bool,
-    /// The diverse-selected *gate-passing* solutions to submit now
-    /// (≤ [`MAX_PROOF_SOLUTIONS`]). Empty when no rows cleared the energy gate.
-    /// Packed into the immediate-submit proof instead of the raw result rows so
-    /// submissions stay within the pallet's bound.
-    pub selected_solutions: Vec<SpinRow>,
-    /// Minimum recomputed energy over all shape-valid returned rows, before the
-    /// energy gate, Z2 deduplication, and diversity selection. `i64::MAX` when
-    /// no shape-valid row exists. The decay-ratchet stash uses this minimum to
-    /// project when an easing gate can admit a returned solution.
-    pub raw_best_energy_milli: i64,
-    /// The deduped rows (≤ [`MAX_PROOF_SOLUTIONS`]) the stash retains for a
-    /// future, eased-ceiling submission, chosen regardless of the current gate.
-    /// Ordered by ascending energy and pruned so that every prefix of them
-    /// still clears the chain's diversity gate.
-    pub stash_solutions: Vec<SpinRow>,
 }
 
 /// Outcome of replaying the chain's proof gates over an already-scored row set.

@@ -17,9 +17,11 @@
 mod common;
 
 use ising_generators::random::derive_nonce;
-use quip_coordinator::chain::{FakeChain, JobOrder, PendingProof};
-use quip_coordinator::types::snapshot::MiningSnapshot;
+use quip_coordinator::chain::FakeChain;
+use quip_coordinator::types::order::JobOrder;
+use quip_coordinator::types::snapshot::{MiningSnapshot, PendingProof};
 
+use quip_coordinator::app::chain_env::{ChainEnv, ChainEnvParams};
 use quip_coordinator::config::LaunchEntry;
 use quip_coordinator::router::MinerCaps;
 use quip_coordinator::runtime::{feeder_loop, run_runtime, FeederParams, RuntimeParams};
@@ -93,7 +95,7 @@ fn gated_snapshot(max_energy_milli: i64) -> MiningSnapshot {
 fn mempool_order() -> JobOrder {
     JobOrder {
         order_id: 7u64.to_le_bytes().to_vec(),
-        mode: quip_coordinator::chain::scale_types::JobMode::Open,
+        mode: quip_coordinator::types::order::JobMode::Open,
         nodes: vec![0, 1, 2, 3],
         edges: vec![(0, 1), (1, 2), (2, 3), (0, 3)],
         h_milli: vec![0; 4],
@@ -125,25 +127,40 @@ fn lease_caps() -> MinerCaps {
     }
 }
 
-fn feeder_params(buffer_depth: usize, poll_ms: u64) -> FeederParams {
-    FeederParams {
-        max_submit_attempts: 5,
-        miner_identity: [0u8; 32],
+/// The feeder's own knobs and the chain environment it runs against.
+struct Params {
+    feeder: FeederParams,
+    chain: ChainEnvParams,
+}
+
+fn chain_env_params() -> ChainEnvParams {
+    ChainEnvParams {
         miner_account: [0u8; 32],
-        buffer_depth,
-        poll_interval: Duration::from_millis(poll_ms),
         funding: quip_coordinator::funding::FundingParams::default(),
         descriptor: quip_coordinator::config::DescriptorParams::default(),
         descriptor_filed: Arc::new(AtomicBool::new(false)),
         miner_registered: Arc::new(AtomicBool::new(false)),
         solver_registered: Arc::new(AtomicBool::new(false)),
-        metrics: Arc::new(quip_coordinator::metrics::CoordinatorMetrics::new(&[])),
     }
 }
 
-fn named_feeder_params(buffer_depth: usize, poll_ms: u64) -> FeederParams {
+fn feeder_params(buffer_depth: usize, poll_ms: u64) -> Params {
+    Params {
+        feeder: FeederParams {
+            max_submit_attempts: 5,
+            miner_identity: [0u8; 32],
+            miner_account: [0u8; 32],
+            buffer_depth,
+            poll_interval: Duration::from_millis(poll_ms),
+            metrics: Arc::new(quip_coordinator::metrics::CoordinatorMetrics::new(&[])),
+        },
+        chain: chain_env_params(),
+    }
+}
+
+fn named_feeder_params(buffer_depth: usize, poll_ms: u64) -> Params {
     let mut params = feeder_params(buffer_depth, poll_ms);
-    params.descriptor = quip_coordinator::config::DescriptorParams {
+    params.chain.descriptor = quip_coordinator::config::DescriptorParams {
         node_name: Some("Tesla".into()),
         public_host: Some("96.233.112.201".into()),
         rpc_endpoints: vec!["ws://127.0.0.1:9944".into()],
@@ -173,7 +190,7 @@ fn clearing_pending_proof(snap: &MiningSnapshot, account: [u8; 32]) -> PendingPr
     use quantum_validation::packed::pack_solution;
     use quantum_validation::{derive_nonce, AllowedValueSpec};
     use quip_coordinator::chain::extrinsic::account_identity_bytes;
-    use quip_coordinator::chain::scale_types::QuantumProof;
+    use quip_coordinator::types::proof::QuantumProof;
 
     let salt = [3u8; 32];
     let nonce = derive_nonce(
@@ -267,19 +284,19 @@ struct Feeder {
 
 impl Feeder {
     /// Spawn the feeder with `miners` registered in the router.
-    async fn spawn(chain: FakeChain, params: FeederParams, miners: Vec<(&str, MinerCaps)>) -> Self {
+    async fn spawn(chain: FakeChain, params: Params, miners: Vec<(&str, MinerCaps)>) -> Self {
         Self::start(chain, params, miners, false).await
     }
 
     /// Like [`Self::spawn`], with `cpu-0` holding a live outbound channel so
     /// the test can read the feeder's broadcasts.
-    async fn spawn_with_outbound(chain: FakeChain, params: FeederParams) -> Self {
+    async fn spawn_with_outbound(chain: FakeChain, params: Params) -> Self {
         Self::start(chain, params, vec![("cpu-0", ising_caps())], true).await
     }
 
     async fn start(
         chain: FakeChain,
-        params: FeederParams,
+        params: Params,
         miners: Vec<(&str, MinerCaps)>,
         outbound: bool,
     ) -> Self {
@@ -293,17 +310,13 @@ impl Feeder {
             }
             if outbound {
                 let (tx, receiver) = mpsc::channel(64);
-                st.register_outbound("cpu-0", tx);
+                st.sessions.register_outbound("cpu-0", tx);
                 rx = Some(receiver);
             }
         }
         let (stop_tx, stop_rx) = watch::channel(false);
-        let task = tokio::spawn(feeder_loop(
-            Arc::clone(&chain),
-            Arc::clone(&state),
-            params,
-            stop_rx,
-        ));
+        let env = Arc::new(ChainEnv::new(Arc::clone(&chain), params.chain));
+        let task = tokio::spawn(feeder_loop(env, Arc::clone(&state), params.feeder, stop_rx));
         Self {
             chain,
             state,
@@ -443,8 +456,9 @@ async fn feeder_stages_per_salt_jobs_and_leases_from_the_identity() {
     let depth = quip_coordinator::lease::LEASE_STAGE_DEPTH;
 
     let mut params = feeder_params(4, 30);
-    params.miner_identity = IDENTITY;
-    params.miner_account = ACCOUNT;
+    params.feeder.miner_identity = IDENTITY;
+    params.feeder.miner_account = ACCOUNT;
+    params.chain.miner_account = ACCOUNT;
     let f = Feeder::spawn(
         FakeChain::new(snapshot_with_head(HEAD), None),
         params,
@@ -1091,8 +1105,9 @@ async fn feeder_reaches_mining_when_node_name_is_missing() {
     let chain = FakeChain::new(snapshot_with_head([1u8; 32]), None);
     chain.set_qblock_id(Some(10));
     let mut params = named_feeder_params(1, 40);
-    params.descriptor.node_name = None;
-    params.miner_account = [0xab; 32];
+    params.chain.descriptor.node_name = None;
+    params.feeder.miner_account = [0xab; 32];
+    params.chain.miner_account = [0xab; 32];
     let f = Feeder::spawn(chain, params, vec![("cpu-0", ising_caps())]).await;
 
     assert!(
@@ -1378,11 +1393,6 @@ async fn runtime_submits_a_lease_winner_answers_an_order_and_shuts_down_clean() 
         poll_interval_ms: 50,
         dashboard: None,
         log_level: quip_coordinator::logging::LogLevel::Info,
-        funding: quip_coordinator::funding::FundingParams::default(),
-        descriptor: quip_coordinator::config::DescriptorParams::default(),
-        descriptor_filed: Arc::new(AtomicBool::new(false)),
-        miner_registered: Arc::new(AtomicBool::new(false)),
-        solver_registered: Arc::new(AtomicBool::new(false)),
         identity: quip_coordinator::metrics::Identity::default(),
     };
     let entry = LaunchEntry {
@@ -1402,7 +1412,7 @@ async fn runtime_submits_a_lease_winner_answers_an_order_and_shuts_down_clean() 
     let (trigger_tx, trigger_rx) = oneshot::channel::<()>();
     let run = tokio::spawn(run_runtime(
         vec![entry],
-        Arc::clone(&chain),
+        Arc::new(ChainEnv::new(Arc::clone(&chain), chain_env_params())),
         Arc::new(Mutex::new(CoordinatorState::new())),
         params,
         async move {

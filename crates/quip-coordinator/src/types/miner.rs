@@ -80,3 +80,39 @@ impl MinerKind {
         }
     }
 }
+
+/// SCALE tag order must match `pallet_quantum_compute_mempool::MinerType`.
+///
+/// Not [`MinerKind`]: the mempool pallet has no `Metal` tag, so encoding a
+/// `MinerKind::Metal` here would fail to decode on chain.
+#[derive(Clone, Copy, Debug, Encode, Decode, PartialEq, Eq)]
+pub enum SolverType {
+    /// CPU sampler.
+    Cpu,
+    /// GPU sampler, discrete or Apple Metal.
+    Gpu,
+    /// D-Wave QPU.
+    QpuDwave,
+    /// IBM QPU.
+    QpuIbm,
+    /// `IonQ` QPU.
+    QpuIonq,
+    /// Pasqal QPU.
+    QpuPasqal,
+    /// ASIC sampler.
+    Asic,
+}
+
+impl From<MinerKind> for SolverType {
+    fn from(kind: MinerKind) -> Self {
+        match kind {
+            MinerKind::Cpu => Self::Cpu,
+            MinerKind::Gpu | MinerKind::Metal => Self::Gpu,
+            MinerKind::QpuDwave => Self::QpuDwave,
+            MinerKind::QpuIbm => Self::QpuIbm,
+            MinerKind::QpuIonq => Self::QpuIonq,
+            MinerKind::QpuPasqal => Self::QpuPasqal,
+            MinerKind::Asic => Self::Asic,
+        }
+    }
+}

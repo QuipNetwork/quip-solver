@@ -1,6 +1,33 @@
-//! Mempool job-order types and solver eligibility.
+//! Mempool job orders and the pallet's solver access rule.
 
-use super::scale_types::{JobMode, SolverType};
+// SCALE `Encode` for multi-field enum variants emits `index as u8` in a
+// derived impl; the lint span points at the variant but attributes on the
+// enum do not cover the sibling impl, so suppress at module scope.
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "SCALE Encode writes enum discriminants as u8; pallet enums are tiny"
+)]
+
+use crate::types::miner::SolverType;
+use parity_scale_codec::{Decode, Encode};
+
+/// Runtime `QuantumMaxSolutions`: the most rows one `submit_solution` carries.
+/// Smaller than the `PoW` bound, and checked before any energy filtering.
+pub const MAX_ORDER_SOLUTIONS: usize = 20;
+
+/// Job mode enum. Bid carries optional account / miner-type filters.
+#[derive(Clone, Debug, Encode, Decode, PartialEq, Eq)]
+pub enum JobMode {
+    /// Any registered miner may answer.
+    Open,
+    /// Restricted bid with optional miner and type filters.
+    Bid {
+        /// Allowed miner account ids (`AccountId32` raw bytes).
+        miners: Option<Vec<[u8; 32]>>,
+        /// Allowed miner-type tags.
+        miner_types: Option<Vec<u8>>,
+    },
+}
 
 /// A mempool job order ready for conversion to a wire `Job`.
 #[derive(Debug, Clone)]
@@ -63,8 +90,8 @@ impl JobOrder {
 
 #[cfg(test)]
 mod tests {
-    use super::JobOrder;
-    use crate::chain::scale_types::{JobMode, SolverType};
+    use super::{JobMode, JobOrder};
+    use crate::types::miner::SolverType;
 
     fn order(mode: JobMode) -> JobOrder {
         JobOrder {

@@ -2,6 +2,7 @@
 //! that fill it when the chain leaves a value unset.
 
 use crate::types::family::ChallengeFamily;
+use crate::types::proof::QuantumProof;
 use crate::types::topology::{topology_hash_sets, DEFAULT_SPIN_SET};
 
 /// Round length the chain targets: fixed in runtimes 118 and 119, and the
@@ -150,6 +151,41 @@ pub fn snapshot_topology_hash(snap: &MiningSnapshot) -> Vec<u8> {
             spin,
         )
         .to_vec()
+    }
+}
+
+/// A `QuantumPow.submit_proof` waiting in the pool.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingProof {
+    /// `blake2_256` of the extrinsic bytes. Keys the per-round verdict cache.
+    pub extrinsic_hash: [u8; 32],
+    /// The signing `AccountId32`.
+    pub account: [u8; 32],
+    /// The proof as submitted.
+    pub proof: QuantumProof,
+}
+
+/// Why a pending proof does or does not end the round.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    /// The pallet will mint a qblock from this proof at its inclusion block.
+    Clears {
+        /// Lowest energy among the rows under the ceiling, in milli-units.
+        best_energy_milli: i64,
+    },
+    /// The nonce derives from another root, or the topology differs.
+    OtherRound,
+    /// Fails the energy, count, or diversity gate at the current difficulty.
+    BelowGates,
+    /// Bytes the pallet rejects before scoring: bad packing or a zero spin.
+    Malformed(String),
+}
+
+impl Verdict {
+    /// Whether the proof ends the round.
+    #[must_use]
+    pub const fn clears(&self) -> bool {
+        matches!(self, Self::Clears { .. })
     }
 }
 

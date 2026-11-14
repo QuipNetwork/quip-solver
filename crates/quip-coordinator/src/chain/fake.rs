@@ -2,9 +2,12 @@
 
 use super::sync::{SyncSource, SyncStatus};
 use super::{
-    ChainClient, ChainError, DescriptorOutcome, JobOrder, NodeDescriptorV2Input,
-    ParticipationOutcome, PendingProof, RegistrationOutcome,
+    ChainClient, ChainError, DescriptorOutcome, NodeDescriptorV2Input, ParticipationOutcome,
+    RegistrationOutcome,
 };
+use crate::types::order::JobOrder;
+use crate::types::snapshot::PendingProof;
+
 use crate::funding::BalanceSource;
 use crate::types::miner::MinerInfo;
 use crate::types::proof::{Proof, SubmitAction, SubmitReceipt};

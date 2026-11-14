@@ -1,4 +1,8 @@
-//! A validated proof, its solution rows, and what submitting it produced.
+//! A validated proof, its solution rows, the pallet form it is submitted in,
+//! and what submitting it produced.
+
+use parity_scale_codec::{Decode, Encode};
+use sp_core::{H256, U256};
 
 /// One decoded solution: spins in node order and the energy this coordinator
 /// scored for them. The internal form of a proof row. Wire solutions are
@@ -82,4 +86,54 @@ impl SubmitReceipt {
             block_number: None,
         }
     }
+}
+
+/// Outcome of coordinator-side result revalidation for miner gating.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Validated {
+    /// Minimum recomputed energy after the energy gate, Z2 deduplication, and
+    /// diversity selection. `i64::MAX` when no row clears the energy gate.
+    /// A finite value does not imply `accepted`.
+    pub best_energy_milli: i64,
+    /// Diversity (milli) of the diverse-selected subset.
+    pub diversity_milli: u32,
+    /// Count of unique energy-valid solutions after Z2 dedup.
+    pub n_valid: u32,
+    /// Whether `n_valid` and diversity clear the advertised gates.
+    pub accepted: bool,
+    /// The diverse-selected *gate-passing* solutions to submit now
+    /// (≤ `MAX_PROOF_SOLUTIONS`). Empty when no rows cleared the energy gate.
+    /// Packed into the immediate-submit proof instead of the raw result rows so
+    /// submissions stay within the pallet's bound.
+    pub selected_solutions: Vec<SpinRow>,
+    /// Minimum recomputed energy over all shape-valid returned rows, before the
+    /// energy gate, Z2 deduplication, and diversity selection. `i64::MAX` when
+    /// no shape-valid row exists. The decay-ratchet stash uses this minimum to
+    /// project when an easing gate can admit a returned solution.
+    pub raw_best_energy_milli: i64,
+    /// The deduped rows (≤ `MAX_PROOF_SOLUTIONS`) the stash retains for a
+    /// future, eased-ceiling submission, chosen regardless of the current gate.
+    /// Ordered by ascending energy and pruned so that every prefix of them
+    /// still clears the chain's diversity gate.
+    pub stash_solutions: Vec<SpinRow>,
+}
+
+/// Proof payload for `QuantumPow.submit_proof` (pallet index 10, call index 4).
+///
+/// Energies / diversity are **not** sent — the chain recomputes them.
+/// `solutions` is a list of bit-packed spin vectors. `device_access_time_us`
+/// is miner-reported compute time in microseconds (self-reported
+/// observability, unverifiable; `0` = unreported).
+#[derive(Clone, Debug, Encode, Decode, PartialEq, Eq)]
+pub struct QuantumProof {
+    /// Topology the proof was mined for.
+    pub topology_hash: H256,
+    /// Derived `PoW` nonce.
+    pub nonce: U256,
+    /// 32-byte salt used in nonce derivation.
+    pub salt: [u8; 32],
+    /// Bit-packed spin vectors.
+    pub solutions: Vec<Vec<u8>>,
+    /// Miner-reported device access time in microseconds (`0` = unreported).
+    pub device_access_time_us: u64,
 }

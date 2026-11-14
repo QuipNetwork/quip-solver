@@ -5,9 +5,7 @@ pub mod account;
 pub mod dryrun;
 pub mod extrinsic;
 pub mod fake;
-pub mod mempool;
 pub mod orders;
-pub mod outcome;
 pub mod pool;
 pub mod preflight;
 pub mod proof_encode;
@@ -25,12 +23,10 @@ pub use account::{free_from_account_bytes, system_account_storage_key};
 pub use dryrun::{decode_dispatch_error, describe_module_error, ModuleError};
 pub use extrinsic::RuntimeTxContext;
 pub use fake::FakeChain;
-pub use mempool::JobOrder;
 pub use orders::{job_orders_prefix, order_id_from_key};
-pub use outcome::{SubmitLedger, QBLOCK_RETENTION};
-pub use pool::{decode_pending_proof, PendingProof};
+pub use pool::decode_pending_proof;
 pub use real::RealChainClient;
-pub use scale_types::{MinerInfoScale, NodeDescriptorV2Input, SolverType, MAX_ORDER_SOLUTIONS};
+pub use scale_types::{MinerInfoScale, NodeDescriptorV2Input};
 pub use seed::{
     apply_family, dimer_1200, family_root_calls, plan_family, register_topology_call, seed_chain,
     ss58, twisted_dimer, twisted_dimer_params, ExistingDefault, FamilyOutcome, FamilyPlan,
@@ -46,8 +42,9 @@ pub use transport_jsonrpsee::JsonrpseeTransport;
 pub use watch::{parse_tx_status, TxStatus};
 
 use crate::types::miner::MinerInfo;
+use crate::types::order::JobOrder;
 use crate::types::proof::{Proof, SubmitReceipt};
-use crate::types::snapshot::{DecayParams, MiningSnapshot};
+use crate::types::snapshot::{DecayParams, MiningSnapshot, PendingProof};
 use async_trait::async_trait;
 
 /// Errors from chain I/O (RPC, decode, submit).
@@ -117,7 +114,7 @@ pub trait ChainClient: Send + Sync {
     /// order named by `proof.order_id` (8 bytes, little-endian).
     ///
     /// `proof.solutions` must already respect the pallet bound
-    /// ([`MAX_ORDER_SOLUTIONS`] rows).
+    /// ([`crate::types::order::MAX_ORDER_SOLUTIONS`] rows).
     async fn submit_solution(&self, proof: &Proof) -> Result<SubmitReceipt, ChainError>;
 
     /// Hybrid-sign and submit `MinerRegistry.set_descriptor`.

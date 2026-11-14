@@ -7,9 +7,10 @@
 //! stash captures solutions that don't clear the *current* (already-decayed)
 //! threshold yet but will after enough decay, so they aren't discarded.
 
+use crate::attempt::{CandidateSummary, StashSummary};
 use crate::decay::{DecayAlgorithm, DecayModel};
 use crate::types::proof::SpinRow;
-use serde::Serialize;
+
 use std::fmt::Write as _;
 
 /// How far ahead of the last proof the stash projects: 256 epochs of 100
@@ -199,54 +200,6 @@ impl WinStash {
                 .collect(),
         }
     }
-}
-
-/// Serializable stash summary written to `attempts.json`.
-#[derive(Debug, Clone, Serialize)]
-pub struct StashSummary {
-    /// Generation the stash is armed for.
-    pub generation: u64,
-    /// Last proof block used as the projection origin.
-    pub last_proof_block: u64,
-    /// Blocks per decay step.
-    pub epoch_length: u64,
-    /// Decay rule the projection ran under: `stepwise`, `continuous`,
-    /// `gated`, or `none` without a model.
-    pub decay_algorithm: &'static str,
-    /// Round-length target the gated rule waits out, or 0 without a model.
-    pub target_proof_blocks: u64,
-    /// Top-K candidates currently held.
-    pub candidates: Vec<CandidateSummary>,
-}
-
-impl StashSummary {
-    /// Worst and best retained energies, in milli-units.
-    ///
-    /// A new candidate must beat the worst to displace it once the stash is
-    /// full. `None` when the stash holds nothing.
-    #[must_use]
-    pub fn retained_band_milli(&self) -> Option<(i64, i64)> {
-        let best = self.candidates.first()?.best_energy_milli;
-        let worst = self.candidates.last()?.best_energy_milli;
-        Some((worst, best))
-    }
-}
-
-/// One candidate's annotation in the stash summary.
-#[derive(Debug, Clone, Serialize)]
-pub struct CandidateSummary {
-    /// Job id (nonce) hex.
-    pub job_id: String,
-    /// Best energy in milli-units.
-    pub best_energy_milli: i64,
-    /// Diversity in milli-units.
-    pub diversity_milli: u32,
-    /// Gate-passing solution count.
-    pub n_valid: u32,
-    /// Projected block at which this candidate becomes viable.
-    pub viability_block: Option<u64>,
-    /// Whether already submitted.
-    pub submitted: bool,
 }
 
 fn hex(bytes: &[u8]) -> String {

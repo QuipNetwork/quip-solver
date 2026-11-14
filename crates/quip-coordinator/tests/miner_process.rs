@@ -57,8 +57,11 @@ mod protocol_version {
         let sock = format!("/tmp/quip-proto-{}.sock", std::process::id());
         let _ = std::fs::remove_file(&sock);
         let mut st = CoordinatorState::new();
-        let _ = st.expected_tokens.insert("cpu-0".into(), "tok".into());
-        let _ = st.configure.insert(
+        let _ = st
+            .sessions
+            .expected_tokens
+            .insert("cpu-0".into(), "tok".into());
+        let _ = st.sessions.configure.insert(
             "cpu-0".into(),
             Configure {
                 queue_depth: 1,
@@ -78,7 +81,7 @@ mod protocol_version {
         ));
         let svc = CoordinatorService {
             state: Arc::new(Mutex::new(st)),
-            chain,
+            sink: chain,
             submit_notify: Arc::new(Mutex::new(None)),
         };
         let incoming = UnixListenerStream::new(UnixListener::bind(&sock).expect("bind"));

@@ -14,9 +14,13 @@
 
 use parity_scale_codec::{Decode, Encode};
 use quantum_validation::AllowedValueSpec;
-use sp_core::{H256, U256};
+use sp_core::H256;
 
 use crate::types::hex::hex_encode;
+use crate::types::miner::SolverType;
+use crate::types::order::JobMode;
+use crate::types::proof::QuantumProof;
+
 use crate::types::host::{RuntimeInfoScale, SystemInfoScale};
 use crate::types::miner::{MinerKind, MinerSpecScale, NodeLogLevel};
 
@@ -204,26 +208,6 @@ impl TopologyMetaScale {
     }
 }
 
-/// Proof payload for `QuantumPow.submit_proof` (pallet index 10, call index 4).
-///
-/// Energies / diversity are **not** sent — the chain recomputes them.
-/// `solutions` is a list of bit-packed spin vectors. `device_access_time_us`
-/// is miner-reported compute time in microseconds (self-reported
-/// observability, unverifiable; `0` = unreported).
-#[derive(Clone, Debug, Encode, Decode, PartialEq, Eq)]
-pub struct QuantumProof {
-    /// Topology the proof was mined for.
-    pub topology_hash: H256,
-    /// Derived `PoW` nonce.
-    pub nonce: U256,
-    /// 32-byte salt used in nonce derivation.
-    pub salt: [u8; 32],
-    /// Bit-packed spin vectors.
-    pub solutions: Vec<Vec<u8>>,
-    /// Miner-reported device access time in microseconds (`0` = unreported).
-    pub device_access_time_us: u64,
-}
-
 /// Ising params nested in a mempool `JobOrder`.
 #[derive(Clone, Debug, Encode, Decode, PartialEq, Eq)]
 pub struct IsingParams {
@@ -277,20 +261,6 @@ pub enum RewardResolution {
     TopNEqual {
         /// Number of top solutions that share the reward.
         n: u32,
-    },
-}
-
-/// Job mode enum. Bid carries optional account / miner-type filters.
-#[derive(Clone, Debug, Encode, Decode, PartialEq, Eq)]
-pub enum JobMode {
-    /// Any registered miner may answer.
-    Open,
-    /// Restricted bid with optional miner and type filters.
-    Bid {
-        /// Allowed miner account ids (`AccountId32` raw bytes).
-        miners: Option<Vec<[u8; 32]>>,
-        /// Allowed miner-type tags.
-        miner_types: Option<Vec<u8>>,
     },
 }
 
@@ -445,9 +415,6 @@ pub const REGISTER_SOLVER_CALL_INDEX: u8 = 0;
 pub const DEREGISTER_SOLVER_CALL_INDEX: u8 = 1;
 /// `QuantumComputeMempool::submit_solution(order_id, solutions)` call index.
 pub const SUBMIT_SOLUTION_CALL_INDEX: u8 = 4;
-/// Runtime `QuantumMaxSolutions`: the most rows one `submit_solution` carries.
-/// Smaller than the `PoW` bound, and checked before any energy filtering.
-pub const MAX_ORDER_SOLUTIONS: usize = 20;
 
 /// Pallet `MaxNodeIdBytes`.
 pub const MAX_NODE_ID_BYTES: usize = 64;
@@ -467,42 +434,6 @@ pub const MAX_MINER_LABEL_BYTES: usize = 64;
 pub const MAX_MINER_BACKEND_BYTES: usize = 32;
 /// Pallet `MaxMinerDeviceIdBytes`.
 pub const MAX_MINER_DEVICE_ID_BYTES: usize = 128;
-
-/// SCALE tag order must match `pallet_quantum_compute_mempool::MinerType`.
-///
-/// Not [`MinerKind`]: the mempool pallet has no `Metal` tag, so encoding a
-/// `MinerKind::Metal` here would fail to decode on chain.
-#[derive(Clone, Copy, Debug, Encode, Decode, PartialEq, Eq)]
-pub enum SolverType {
-    /// CPU sampler.
-    Cpu,
-    /// GPU sampler, discrete or Apple Metal.
-    Gpu,
-    /// D-Wave QPU.
-    QpuDwave,
-    /// IBM QPU.
-    QpuIbm,
-    /// `IonQ` QPU.
-    QpuIonq,
-    /// Pasqal QPU.
-    QpuPasqal,
-    /// ASIC sampler.
-    Asic,
-}
-
-impl From<MinerKind> for SolverType {
-    fn from(kind: MinerKind) -> Self {
-        match kind {
-            MinerKind::Cpu => Self::Cpu,
-            MinerKind::Gpu | MinerKind::Metal => Self::Gpu,
-            MinerKind::QpuDwave => Self::QpuDwave,
-            MinerKind::QpuIbm => Self::QpuIbm,
-            MinerKind::QpuIonq => Self::QpuIonq,
-            MinerKind::QpuPasqal => Self::QpuPasqal,
-            MinerKind::Asic => Self::Asic,
-        }
-    }
-}
 
 /// SCALE mirror of `QuantumComputeMempool.Solvers[account]`
 /// (`SolverInfo<AccountId32, u128, u32>`). Field order is the pallet's.
@@ -611,7 +542,7 @@ pub fn encode_deregister_solver_call() -> Vec<u8> {
 ///
 /// Each row is one `±1` spin per node, in node order. A `BoundedVec` encodes
 /// like a `Vec`, so the bounds are the caller's to respect
-/// ([`MAX_ORDER_SOLUTIONS`] rows).
+/// ([`crate::types::order::MAX_ORDER_SOLUTIONS`] rows).
 #[must_use]
 pub fn encode_submit_solution_call(order_id: u64, solutions: &[Vec<i8>]) -> Vec<u8> {
     let mut out = vec![
@@ -687,6 +618,7 @@ mod tests {
     use super::*;
     use crate::types::host::{CpuInfoScale, OsInfoScale};
     use crate::types::topology_spec::{parse_topology_spec, preset_spec};
+    use sp_core::U256;
 
     #[test]
     fn register_solver_call_is_the_dispatch_indices_and_the_type_tag() {

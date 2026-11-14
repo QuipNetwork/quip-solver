@@ -1,6 +1,6 @@
 //! Convert mempool `JobOrder`s to wire `Job`s with inline `EdgeList`.
 
-use crate::chain::mempool::JobOrder;
+use crate::types::order::JobOrder;
 use crate::types::problem::milli_problem;
 use quip_proto::v1::{ising_problem, EdgeList, Job, JobKind, Provenance};
 use std::collections::HashMap;
@@ -77,7 +77,7 @@ mod tests {
     fn sample_order() -> JobOrder {
         JobOrder {
             order_id: b"order-1".to_vec(),
-            mode: crate::chain::scale_types::JobMode::Open,
+            mode: crate::types::order::JobMode::Open,
             nodes: vec![0, 1],
             edges: vec![(0, 1)],
             h_milli: vec![1000, -1000],

@@ -14,14 +14,14 @@ use super::extrinsic::{
     solvers_storage_key, target_proof_blocks_override_storage_key, topology_curve_c_storage_key,
     topology_energy_band_storage_key, RuntimeTxContext, SignedExtensionContext,
 };
-use super::pool::{decode_pending_proof, PendingProof};
+use super::pool::decode_pending_proof;
 use super::proof_encode::{build_quantum_proof, ProofBuildContext, WitnessFormat};
 use super::scale_types::{
     encode_deregister_solver_call, encode_participate_call, encode_register_miner_call,
     encode_register_solver_call, encode_set_descriptor_call, encode_submit_proof_call,
     encode_submit_solution_call, require_set_values, CurveCScale, DifficultyConfig,
     EnergyBandScale, FamilyDescriptorScale, FoundationVotesScale, JobOrderScale, JobSolutionScale,
-    MinerInfoScale, NodeDescriptorV2Input, OrderStatus, OrderTiming, SolverInfoScale, SolverType,
+    MinerInfoScale, NodeDescriptorV2Input, OrderStatus, OrderTiming, SolverInfoScale,
     TopologyMetaScale, WeightScale,
 };
 use super::submit::{
@@ -31,10 +31,12 @@ use super::submit::{
 use super::transport::RpcTransport;
 use super::transport_jsonrpsee::JsonrpseeTransport;
 use super::watch::{parse_tx_status, TxStatus};
-use super::{ChainClient, ChainError, JobOrder};
+use super::{ChainClient, ChainError};
 use crate::types::hex::{hex_decode, hex_encode};
-use crate::types::miner::{MinerInfo, MinerKind};
+use crate::types::miner::{MinerInfo, MinerKind, SolverType};
+use crate::types::order::{JobMode, JobOrder};
 use crate::types::proof::{Proof, SubmitAction, SubmitReceipt};
+use crate::types::snapshot::PendingProof;
 
 use crate::types::snapshot::{
     DecayParams, MiningSnapshot, DEFAULT_BASE_MAX_ENERGY_MILLI, DEFAULT_C_EASY_MILLI,
@@ -1582,8 +1584,8 @@ impl ChainClient for RealChainClient {
                 deadline_ms,
             };
             let eligible = match &order.mode {
-                super::scale_types::JobMode::Open => true,
-                super::scale_types::JobMode::Bid { .. } => self
+                JobMode::Open => true,
+                JobMode::Bid { .. } => self
                     .registered_solver_type(miner_account, head_hex)
                     .await?
                     .is_some_and(|solver_type| order.is_eligible_for(&miner_account, solver_type)),
@@ -2859,7 +2861,8 @@ mod tests {
 
     fn pool_entry(genesis_hash: [u8; 32], spec_version: u32, transaction_version: u32) -> String {
         use crate::chain::extrinsic::{build_hybrid_signed_extrinsic, SignedExtensionContext};
-        use crate::chain::scale_types::{encode_submit_proof_call, QuantumProof};
+        use crate::chain::scale_types::encode_submit_proof_call;
+        use crate::types::proof::QuantumProof;
         let pair = HybridPair::from_string("//Alice", None).expect("alice");
         let call = encode_submit_proof_call(&QuantumProof {
             topology_hash: sp_core::H256::repeat_byte(1),
@@ -2962,9 +2965,12 @@ mod tests {
             job_orders_storage_key, signer_account_bytes, solvers_storage_key,
         };
         use crate::chain::scale_types::{
-            IsingParams, JobMode, JobOrderScale, OrderStatus, OrderTiming, ResultDelivery,
-            RewardResolution, SolverInfoScale, SolverType,
+            IsingParams, JobOrderScale, OrderStatus, OrderTiming, ResultDelivery, RewardResolution,
+            SolverInfoScale,
         };
+        use crate::types::miner::SolverType;
+        use crate::types::order::JobMode;
+
         use crate::chain::{
             BoxStream, ChainClient, ChainError, RealChainClient, RegistrationOutcome, RpcTransport,
         };

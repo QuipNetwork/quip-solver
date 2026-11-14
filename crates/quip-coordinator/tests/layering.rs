@@ -16,6 +16,8 @@ use std::path::{Path, PathBuf};
 /// The layer each top-level module of `src/` belongs to.
 const LAYER_OF: &[(&str, &str)] = &[
     ("types", "types"),
+    ("app", "app"),
+    ("coordinator", "coordinator"),
     ("attempt", "observe"),
     ("logging", "observe"),
     ("metrics", "observe"),
@@ -38,7 +40,6 @@ const LAYER_OF: &[(&str, &str)] = &[
     ("validate", "coordinator"),
     ("dashboard", "dashboard"),
     ("drive", "app"),
-    ("readiness", "app"),
     ("runtime", "app"),
     ("keygen", "cli"),
 ];
@@ -80,11 +81,8 @@ const EXCEPTIONS: &[(&str, &str, &str)] = &[(
 /// layout change removes. Each entry must still exist, so the list shrinks as
 /// the edges go.
 const PENDING: &[(&str, &str)] = &[
-    ("attempt", "stash"),
-    ("attempt", "validate"),
-    ("pool_watch", "chain"),
-    ("producer", "chain"),
     ("session", "chain"),
+    ("session", "coordinator"),
     ("session", "lease"),
     ("session", "round"),
     ("session", "router"),

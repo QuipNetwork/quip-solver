@@ -237,7 +237,7 @@ pub fn verify_and_select(
     topology: &LeaseTopology,
     target: &quip_proto::v1::SetTarget,
     result: &quip_proto::v1::Result,
-) -> Result<(Verified, crate::validate::Validated), String> {
+) -> Result<(Verified, crate::types::proof::Validated), String> {
     let (verified, num_nodes) = if generator.algorithm == GeneratorAlgorithm::FamilyChacha8V1 as i32
     {
         verify_family_result(generator, topology, result)?

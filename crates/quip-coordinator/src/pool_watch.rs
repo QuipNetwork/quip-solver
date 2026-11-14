@@ -1,166 +1,13 @@
-//! Decide whether a proof pending in the pool ends the current round.
+//! Decide whether a proof pending in the pool ends the current round, and
+//! hold the miners until the block that includes it.
 //!
-//! The judge replays the pallet's `submit_proof` checks
-//! (`quip-validator/pallets/quantum-pow/src/lib.rs`, `validate_proof`) with
-//! the same `quantum_validation` functions, against the snapshot the feeder is
-//! mining. Difficulty eases every block until a win, so a proof that clears
-//! now also clears at its inclusion block.
+//! The judge that replays the pallet's checks is the caller's: the chain
+//! supplies it (`chain::pool::judge_pending_proof`). This module caches its
+//! verdicts per root and runs the wait for the qblock.
 
 use std::collections::{HashMap, HashSet};
 
-use crate::chain::extrinsic::account_identity_bytes;
-use crate::chain::proof_encode::decode_family_witnesses;
-use crate::chain::scale_types::QuantumProof;
-use crate::chain::PendingProof;
-use crate::types::snapshot::MiningSnapshot;
-
-use quantum_validation::{
-    calculate_diversity, derive_nonce, energy_of_solution_indexed, generate_ising_model_indexed,
-    select_diverse, unpack_solution, AllowedValueSpec, TopologyIndex,
-};
-
-/// Why a pending proof does or does not end the round.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Verdict {
-    /// The pallet will mint a qblock from this proof at its inclusion block.
-    Clears {
-        /// Lowest energy among the rows under the ceiling, in milli-units.
-        best_energy_milli: i64,
-    },
-    /// The nonce derives from another root, or the topology differs.
-    OtherRound,
-    /// Fails the energy, count, or diversity gate at the current difficulty.
-    BelowGates,
-    /// Bytes the pallet rejects before scoring: bad packing or a zero spin.
-    Malformed(String),
-}
-
-impl Verdict {
-    /// Whether the proof ends the round.
-    #[must_use]
-    pub const fn clears(&self) -> bool {
-        matches!(self, Self::Clears { .. })
-    }
-}
-
-/// Replay the pallet's `submit_proof` checks against `snap`.
-///
-/// Registration of the signer is not checked. The pool already ran the signed
-/// extensions. A clearing proof from an unregistered account is included, fails,
-/// and leaves the pool without a qblock. The feeder then resumes and ignores
-/// that proof, by signer and nonce, for the rest of the root, so a resubmission
-/// cannot stop the miners again.
-#[must_use]
-pub fn judge_pending_proof(pending: &PendingProof, snap: &MiningSnapshot) -> Verdict {
-    if pending.proof.topology_hash.as_bytes() != snap.topology_hash.as_slice() {
-        return Verdict::OtherRound;
-    }
-    let identity = account_identity_bytes(&pending.account);
-    let expected = derive_nonce(&snap.last_proof_block_hash, &identity, &pending.proof.salt);
-    if pending.proof.nonce != expected {
-        return Verdict::OtherRound;
-    }
-    match score(&pending.proof, snap) {
-        Ok(verdict) => verdict,
-        Err(reason) => Verdict::Malformed(reason),
-    }
-}
-
-/// Score every row, and apply the gates. `Err` is the pallet's pre-scoring
-/// rejection.
-fn score(proof: &QuantumProof, snap: &MiningSnapshot) -> Result<Verdict, String> {
-    let scored = match &snap.family {
-        None => legacy_rows(proof, snap)?,
-        Some(family) => family_rows(proof, snap, family)?,
-    };
-    let valid: Vec<(i64, Vec<i8>)> = scored
-        .into_iter()
-        .filter(|(energy, _)| *energy < snap.max_energy_milli)
-        .collect();
-
-    let Some(best_energy_milli) = valid.iter().map(|(e, _)| *e).min() else {
-        return Ok(Verdict::BelowGates);
-    };
-    let rows: Vec<&[i8]> = valid.iter().map(|(_, s)| s.as_slice()).collect();
-    let target = rows
-        .len()
-        .min(usize::try_from(snap.min_solutions.max(1)).unwrap_or(usize::MAX));
-    let selected_idx = select_diverse(&rows, target).map_err(|e| format!("select: {e:?}"))?;
-    let selected: Vec<&[i8]> = selected_idx
-        .iter()
-        .filter_map(|&i| rows.get(i).copied())
-        .collect();
-    let diversity = calculate_diversity(&selected).map_err(|e| format!("diversity: {e:?}"))?;
-    let n_valid = u32::try_from(rows.len()).unwrap_or(u32::MAX);
-
-    if n_valid >= snap.min_solutions && diversity >= snap.min_diversity_milli {
-        Ok(Verdict::Clears { best_energy_milli })
-    } else {
-        Ok(Verdict::BelowGates)
-    }
-}
-
-/// Each row's spins and energy on the legacy model the nonce draws, as the
-/// pallet's `validate_proof` computes them.
-fn legacy_rows(proof: &QuantumProof, snap: &MiningSnapshot) -> Result<Vec<(i64, Vec<i8>)>, String> {
-    let index =
-        TopologyIndex::new(&snap.nodes, &snap.edges).map_err(|e| format!("topology: {e:?}"))?;
-    let (h, j) = generate_ising_model_indexed(
-        proof.nonce,
-        &snap.nodes,
-        &snap.edges,
-        &AllowedValueSpec::Set(snap.allowed_h_milli.as_slice()),
-        &AllowedValueSpec::Set(snap.allowed_j_milli.as_slice()),
-        &index,
-    )
-    .map_err(|e| format!("model: {e:?}"))?;
-    let mut rows = Vec::with_capacity(proof.solutions.len());
-    for spins in unpack_rows(proof, snap)? {
-        let energy = energy_of_solution_indexed(&spins, &h, &snap.edges, &j, &index)
-            .map_err(|e| format!("energy: {e:?}"))?;
-        rows.push((energy, spins));
-    }
-    Ok(rows)
-}
-
-/// Each row's spins and energy on the family instance the nonce regenerates,
-/// as the pallet's `validate_family_proof` computes them: the validator's own
-/// `FamilyChallenge::decode_witnesses` over the compact codec bytes. A skipped
-/// nonce or one bad witness rejects the whole proof, as it does on chain.
-fn family_rows(
-    proof: &QuantumProof,
-    snap: &MiningSnapshot,
-    family: &crate::types::family::ChallengeFamily,
-) -> Result<Vec<(i64, Vec<i8>)>, String> {
-    decode_family_witnesses(
-        family,
-        &snap.nodes,
-        &snap.edges,
-        proof.nonce.to_big_endian(),
-        &proof.solutions,
-    )
-}
-
-/// Unpack every row to one sign per topology node under the snapshot's spin set.
-fn unpack_rows(proof: &QuantumProof, snap: &MiningSnapshot) -> Result<Vec<Vec<i8>>, String> {
-    let num_spins = snap.nodes.len();
-    let spin_spec = AllowedValueSpec::Set(snap.allowed_spin_milli.as_slice());
-    let mut rows = Vec::with_capacity(proof.solutions.len());
-    for packed in &proof.solutions {
-        let milli =
-            unpack_solution(packed, num_spins, &spin_spec).map_err(|e| format!("unpack: {e:?}"))?;
-        let mut spins = Vec::with_capacity(milli.len());
-        for value in milli {
-            spins.push(match value.signum() {
-                1 => 1i8,
-                -1 => -1i8,
-                _ => return Err("zero spin".into()),
-            });
-        }
-        rows.push(spins);
-    }
-    Ok(rows)
-}
+use crate::types::snapshot::{MiningSnapshot, PendingProof, Verdict};
 
 /// Consecutive polls with no clearing proof before the round resumes. One
 /// poll can race the block import that prunes the proof from the pool.
@@ -234,10 +81,15 @@ impl PoolWatch {
         Self::default()
     }
 
-    /// Judge every pending proof against `snap`. Returns the clearing proof
-    /// with the lowest energy, if any clears. Verdicts are cached by
-    /// extrinsic hash for the life of the root, except `BelowGates`.
-    pub fn scan(&mut self, pending: &[PendingProof], snap: &MiningSnapshot) -> Option<Clearing> {
+    /// Judge every pending proof against `snap` with `judge`. Returns the
+    /// clearing proof with the lowest energy, if any clears. Verdicts are
+    /// cached by extrinsic hash for the life of the root, except `BelowGates`.
+    pub fn scan(
+        &mut self,
+        pending: &[PendingProof],
+        snap: &MiningSnapshot,
+        judge: impl Fn(&PendingProof, &MiningSnapshot) -> Verdict,
+    ) -> Option<Clearing> {
         if self.root != Some(snap.last_proof_block_hash) {
             self.root = Some(snap.last_proof_block_hash);
             self.verdicts.clear();
@@ -251,7 +103,7 @@ impl PoolWatch {
             let verdict = if let Some(verdict) = self.verdicts.get(&p.extrinsic_hash) {
                 *verdict
             } else {
-                let verdict = match judge_pending_proof(p, snap) {
+                let verdict = match judge(p, snap) {
                     Verdict::Clears { best_energy_milli } => Some(Clearing {
                         account: p.account,
                         nonce: p.proof.nonce,
@@ -322,6 +174,10 @@ impl PoolWatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chain::extrinsic::account_identity_bytes;
+    use crate::chain::pool::judge_pending_proof;
+    use crate::types::proof::QuantumProof;
+    use quantum_validation::derive_nonce;
     use quantum_validation::packed::pack_solution;
     use quantum_validation::{
         energy_of_solution_indexed, generate_ising_model_indexed, AllowedValueSpec, TopologyIndex,
@@ -572,7 +428,7 @@ mod tests {
         let pending = pending_with(&snap, &[spins], SALT);
         let mut watch = PoolWatch::new();
         let first = watch
-            .scan(std::slice::from_ref(&pending), &snap)
+            .scan(std::slice::from_ref(&pending), &snap, judge_pending_proof)
             .expect("clears");
         assert_eq!(first.account, ACCOUNT);
         assert_eq!(first.best_energy_milli, energy);
@@ -580,10 +436,12 @@ mod tests {
         // hash still reports the cached verdict.
         let mut same_hash = pending.clone();
         same_hash.proof.solutions = vec![Vec::new()];
-        assert!(watch.scan(&[same_hash], &snap).is_some());
+        assert!(watch
+            .scan(&[same_hash], &snap, judge_pending_proof)
+            .is_some());
         // Verdicts are forgotten when the root changes.
         snap.last_proof_block_hash = [8u8; 32];
-        assert!(watch.scan(&[pending], &snap).is_none());
+        assert!(watch.scan(&[pending], &snap, judge_pending_proof).is_none());
     }
 
     #[test]
@@ -593,9 +451,11 @@ mod tests {
         snap.max_energy_milli = energy;
         let pending = pending_with(&snap, &[spins], SALT);
         let mut watch = PoolWatch::new();
-        assert!(watch.scan(std::slice::from_ref(&pending), &snap).is_none());
+        assert!(watch
+            .scan(std::slice::from_ref(&pending), &snap, judge_pending_proof)
+            .is_none());
         snap.max_energy_milli = energy + 1;
-        assert!(watch.scan(&[pending], &snap).is_some());
+        assert!(watch.scan(&[pending], &snap, judge_pending_proof).is_some());
     }
 
     #[test]
@@ -605,23 +465,29 @@ mod tests {
         snap.max_energy_milli = energy + 1;
         let pending = pending_with(&snap, &[spins], SALT);
         let mut watch = PoolWatch::new();
-        assert!(watch.scan(std::slice::from_ref(&pending), &snap).is_some());
+        assert!(watch
+            .scan(std::slice::from_ref(&pending), &snap, judge_pending_proof)
+            .is_some());
         watch.stopped(100);
         assert_eq!(
             watch.resume_reason(PoolObservation::Clearing, 102),
             Some(ResumeReason::BlocksElapsed)
         );
         watch.expire_clearing();
-        assert!(watch.scan(std::slice::from_ref(&pending), &snap).is_none());
+        assert!(watch
+            .scan(std::slice::from_ref(&pending), &snap, judge_pending_proof)
+            .is_none());
         let mut resubmitted = pending;
         resubmitted.extrinsic_hash = [2u8; 32];
-        assert!(watch.scan(&[resubmitted], &snap).is_none());
+        assert!(watch
+            .scan(&[resubmitted], &snap, judge_pending_proof)
+            .is_none());
 
         snap.last_proof_block_hash = [8u8; 32];
         let (energy, spins) = ground_state(&snap, SALT);
         snap.max_energy_milli = energy + 1;
         let pending = pending_with(&snap, &[spins], SALT);
-        assert!(watch.scan(&[pending], &snap).is_some());
+        assert!(watch.scan(&[pending], &snap, judge_pending_proof).is_some());
     }
 
     #[test]
@@ -631,7 +497,9 @@ mod tests {
         snap.max_energy_milli = energy + 1;
         let mut pending = pending_with(&snap, &[spins], SALT);
         let mut watch = PoolWatch::new();
-        assert!(watch.scan(std::slice::from_ref(&pending), &snap).is_some());
+        assert!(watch
+            .scan(std::slice::from_ref(&pending), &snap, judge_pending_proof)
+            .is_some());
         watch.stopped(100);
         assert_eq!(watch.resume_reason(PoolObservation::Clear, 100), None);
         assert_eq!(
@@ -640,13 +508,13 @@ mod tests {
         );
         watch.expire_clearing();
         pending.extrinsic_hash = [2u8; 32];
-        assert!(watch.scan(&[pending], &snap).is_none());
+        assert!(watch.scan(&[pending], &snap, judge_pending_proof).is_none());
 
         let salt = [4u8; 32];
         let (energy, spins) = ground_state(&snap, salt);
         snap.max_energy_milli = energy + 1;
         let pending = pending_with(&snap, &[spins], salt);
-        assert!(watch.scan(&[pending], &snap).is_some());
+        assert!(watch.scan(&[pending], &snap, judge_pending_proof).is_some());
     }
 
     #[test]
@@ -665,11 +533,13 @@ mod tests {
         second.extrinsic_hash = [2u8; 32];
         let mut watch = PoolWatch::new();
         let mut pending = [first, second];
-        let best = watch.scan(&pending, &snap).expect("both proofs clear");
+        let best = watch
+            .scan(&pending, &snap, judge_pending_proof)
+            .expect("both proofs clear");
         assert_eq!(best.best_energy_milli, first_energy.min(second_energy));
         pending.reverse();
         let best = watch
-            .scan(&pending, &snap)
+            .scan(&pending, &snap, judge_pending_proof)
             .expect("both proofs still clear");
         assert_eq!(best.best_energy_milli, first_energy.min(second_energy));
     }

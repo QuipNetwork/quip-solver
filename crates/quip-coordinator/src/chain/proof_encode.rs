@@ -1,7 +1,6 @@
 //! Build a chain `QuantumProof` from a coordinator `Proof` + mining context.
 
-use super::scale_types::QuantumProof;
-use crate::types::proof::Proof;
+use crate::types::proof::{Proof, QuantumProof};
 
 use crate::types::family::ChallengeFamily;
 use parity_scale_codec::Encode;
@@ -189,7 +188,6 @@ pub fn encode_quantum_proof(proof: &QuantumProof) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::proof::Proof;
     use parity_scale_codec::Decode;
 
     fn binary_ctx() -> ProofBuildContext {

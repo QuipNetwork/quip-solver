@@ -503,8 +503,12 @@ pub async fn run_drive(p: DriveManyParams<'_>) -> DriveManyReport {
     let incoming = UnixListenerStream::new(uds);
 
     let mut st = CoordinatorState::new();
-    let _ = st.expected_tokens.insert(miner_id.into(), p.token.into());
     let _ = st
+        .sessions
+        .expected_tokens
+        .insert(miner_id.into(), p.token.into());
+    let _ = st
+        .sessions
         .configure
         .insert(miner_id.into(), p.entry.configure.clone());
     // Resolves the position-indexed scoring topology once (a run constant);
@@ -618,9 +622,10 @@ mod tests {
             let listener = UnixListener::bind(&socket).expect("test socket is bound");
             let mut st = CoordinatorState::new();
             let _ = st
+                .sessions
                 .expected_tokens
                 .insert("m".to_owned(), "token".to_owned());
-            let _ = st.configure.insert(
+            let _ = st.sessions.configure.insert(
                 "m".to_owned(),
                 Configure {
                     queue_depth: 3,

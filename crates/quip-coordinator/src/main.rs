@@ -1,6 +1,7 @@
 //! quip-coordinator binary: CLI, runtime wiring, graceful shutdown.
 
 use clap::{Parser, Subcommand, ValueEnum};
+use quip_coordinator::app::chain_env::{ChainEnv, ChainEnvParams};
 use quip_coordinator::chain::extrinsic::{
     load_hybrid_pair, miner_identity_bytes, signer_account_bytes,
 };
@@ -689,7 +690,7 @@ fn run_config_path(config: Option<PathBuf>, log_level: LogLevel) -> StdExitCode 
         miner_account,
         &funding,
         &descriptor,
-        &quip_coordinator::readiness::ProcessLatches {
+        &quip_coordinator::app::chain_env::readiness::ProcessLatches {
             descriptor_filed: descriptor_filed.as_ref(),
             miner_registered: miner_registered.as_ref(),
         },
@@ -714,13 +715,19 @@ fn run_config_path(config: Option<PathBuf>, log_level: LogLevel) -> StdExitCode 
             .as_ref()
             .map(|d| (d.listen.clone(), PathBuf::from(&d.data_dir))),
         log_level,
-        funding,
-        descriptor,
-        descriptor_filed,
-        miner_registered,
-        solver_registered: Arc::new(AtomicBool::new(false)),
         identity,
     };
+    let env = Arc::new(ChainEnv::new(
+        chain,
+        ChainEnvParams {
+            miner_account,
+            funding,
+            descriptor,
+            descriptor_filed,
+            miner_registered,
+            solver_registered: Arc::new(AtomicBool::new(false)),
+        },
+    ));
     tracing::info!(
         miners = cfg.launch.len(),
         ids = ?cfg.launch.iter().map(|e| e.miner_id.as_str()).collect::<Vec<_>>(),
@@ -728,9 +735,10 @@ fn run_config_path(config: Option<PathBuf>, log_level: LogLevel) -> StdExitCode 
         "serving miner session socket"
     );
 
-    let result = rt.block_on(async move {
-        run_runtime(cfg.launch, chain, state, params, shutdown_signal()).await
-    });
+    let result =
+        rt.block_on(
+            async move { run_runtime(cfg.launch, env, state, params, shutdown_signal()).await },
+        );
     match result {
         Ok(()) => {
             tracing::info!("quip-coordinator stopped cleanly");
@@ -824,7 +832,7 @@ fn identity_from_keys(
             ss58_address,
             account_id_hex: hex_encode(&account),
             node_id: node_id.map_or_else(
-                || quip_coordinator::readiness::node_id_from_account(&account),
+                || quip_coordinator::app::chain_env::readiness::node_id_from_account(&account),
                 str::to_string,
             ),
         },
@@ -841,10 +849,11 @@ fn run_startup_prepare(
     miner_account: [u8; 32],
     funding: &quip_coordinator::funding::FundingParams,
     descriptor: &quip_coordinator::config::DescriptorParams,
-    latches: &quip_coordinator::readiness::ProcessLatches<'_>,
+    latches: &quip_coordinator::app::chain_env::readiness::ProcessLatches<'_>,
 ) -> Option<StdExitCode> {
-    let faucet = quip_coordinator::readiness::build_faucet(funding.faucet_url.as_deref());
-    match rt.block_on(quip_coordinator::readiness::prepare_round(
+    let faucet =
+        quip_coordinator::app::chain_env::readiness::build_faucet(funding.faucet_url.as_deref());
+    match rt.block_on(quip_coordinator::app::chain_env::readiness::prepare_round(
         chain,
         faucet.as_ref(),
         miner_account,
@@ -854,11 +863,11 @@ fn run_startup_prepare(
         latches,
     )) {
         Ok(_) => None,
-        Err(quip_coordinator::readiness::ReadinessError::Funding(e)) => {
+        Err(quip_coordinator::app::chain_env::readiness::ReadinessError::Funding(e)) => {
             tracing::error!(error = %e, "miner account is not funded; refusing to start");
             Some(StdExitCode::from(ExitCode::ConfigInvalid as u8))
         }
-        Err(quip_coordinator::readiness::ReadinessError::Snapshot(e)) => {
+        Err(quip_coordinator::app::chain_env::readiness::ReadinessError::Snapshot(e)) => {
             tracing::warn!(
                 error = %e,
                 "no mining snapshot at startup; feeder will retry"
