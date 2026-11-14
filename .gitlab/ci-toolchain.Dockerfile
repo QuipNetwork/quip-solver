@@ -1,5 +1,6 @@
 # CI toolchain image for the Linux test jobs: Rust 1.97.1 with clippy and
-# rustfmt, and shellcheck for the fetch-miners.sh lint.
+# rustfmt, cargo-nextest as the test runner, and shellcheck for the
+# fetch-miners.sh lint.
 #
 # The `build-toolchain-image` job in `.gitlab-ci.yml` builds and pushes this
 # image. It runs automatically on a branch push that changes this file and is
@@ -21,7 +22,13 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends shellcheck \
     && rm -rf /var/lib/apt/lists/*
 
+# Pinned. Nothing watches this pin: check crates.io on a rebuild, and keep the
+# crate's minimum Rust version at or below the channel in rust-toolchain.toml.
+RUN cargo install cargo-nextest --locked --version 0.9.151 \
+    && rm -rf "$CARGO_HOME/registry" "$CARGO_HOME/git"
+
 # Fail the image build here, not in a CI job.
 RUN cargo --version && cargo clippy --version && cargo fmt --version \
+    && cargo nextest --version | head -1 \
     && shellcheck --version | head -2 \
     && command -v curl wget

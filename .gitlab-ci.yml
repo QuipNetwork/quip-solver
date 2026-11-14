@@ -98,14 +98,24 @@ build-toolchain-image:
 # CI; this workspace consumes it from crates.io. Coverage here is `rust:` (the
 # workspace) and `coordinator:`.
 
+# The test jobs cancel when a newer pipeline starts on the same ref, stop after
+# 20 minutes, and write a JUnit report. nextest prints the time of every test,
+# so the slowest tests show in the job log. The workspace has no doctests, so
+# nextest alone runs every test.
 rust:
   extends: .toolchain
   stage: test
   tags: [linux, amd64]
+  interruptible: true
+  timeout: 20m
   script:
     - cargo fmt --all --check
     - cargo clippy --workspace --exclude quip-coordinator --all-targets -- -D warnings
-    - cargo test --workspace --exclude quip-coordinator
+    - cargo nextest run --profile ci --workspace --exclude quip-coordinator
+  artifacts:
+    when: always
+    reports:
+      junit: target/nextest/ci/junit.xml
   rules:
     - if: $CI_COMMIT_TAG
       when: never
@@ -120,9 +130,15 @@ coordinator:
   extends: .toolchain
   stage: test
   tags: [linux, amd64]
+  interruptible: true
+  timeout: 20m
   script:
     - cargo clippy -p quip-coordinator --all-targets -- -D warnings
-    - cargo test -p quip-coordinator
+    - cargo nextest run --profile ci -p quip-coordinator
+  artifacts:
+    when: always
+    reports:
+      junit: target/nextest/ci/junit.xml
   rules:
     - if: $CI_COMMIT_TAG
       when: never
@@ -142,6 +158,8 @@ verify-fetch-miners:
   stage: test
   image: $TOOLCHAIN_IMAGE
   tags: [linux, amd64]
+  interruptible: true
+  timeout: 20m
   script:
     - shellcheck crates/quip-coordinator/tools/fetch-miners.sh
     - |
@@ -289,7 +307,7 @@ verify-fetch-miners:
 .kaniko-image:
   stage: build
   image:
-    name: gcr.io/kaniko-project/executor:v1.23.2-debug
+    name: gcr.io/kaniko-project/executor:v1.23.2-debug@sha256:c3109d5926a997b100c4343944e06c6b30a6804b2f9abe0994d3de6ef92b028e
     entrypoint: [""]
   timeout: 90m
   before_script:
@@ -534,7 +552,7 @@ bundle-darwin-arm64:
 # newest version from Releases, so this job is required, not cosmetic.
 release-binaries:
   stage: release
-  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  image: registry.gitlab.com/gitlab-org/release-cli:v0.24.0@sha256:3f52d526f48e8d10625c722fa6d6423ee82aadeae1b1aa91f07b62551d96dacf
   tags: [linux, amd64]
   rules:
     # Canonical tags only. quip-node-manager's native (macOS) updater offers

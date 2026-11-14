@@ -1,0 +1,11 @@
+# cargo-nextest settings. CI runs `cargo nextest run --profile ci`.
+
+[profile.ci]
+# Run every test even after a failure, so one report lists all of them.
+fail-fast = false
+# A test that runs 30 seconds is marked SLOW in the log. Nothing is killed.
+slow-timeout = { period = "30s" }
+
+[profile.ci.junit]
+# Written to target/nextest/ci/junit.xml, which the CI jobs upload.
+path = "junit.xml"
