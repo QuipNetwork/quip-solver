@@ -50,8 +50,11 @@ use quantum_validation::{
 use quip_coordinator::chain::codec::extrinsic::{
     build_hybrid_signed_extrinsic, miner_identity_bytes, miners_storage_key, SignedExtensionContext,
 };
-use quip_coordinator::chain::codec::scale_types::{
-    encode_register_miner_call, IsingParams, MiningSnapshotScale, ResultDelivery, RewardResolution,
+use quip_coordinator::chain::codec::quantum_compute_mempool::{
+    IsingParams, ResultDelivery, RewardResolution,
+};
+use quip_coordinator::chain::codec::quantum_pow::{
+    encode_register_miner_call, MiningSnapshotScale,
 };
 use quip_coordinator::chain::{ChainClient, RealChainClient};
 use quip_coordinator::types::order::{JobMode, JobOrder};

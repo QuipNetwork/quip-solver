@@ -1,7 +1,7 @@
 //! Startup compatibility check against the configured validator.
 //!
 //! The coordinator talks to the chain through hand-mirrored SCALE types
-//! (`codec::scale_types`), a hardcoded pallet/call index, and the `QuantumPowApi`
+//! (the `codec` pallet modules), a hardcoded pallet/call index, and the `QuantumPowApi`
 //! runtime API. All three are pinned to a runtime version. Against a validator
 //! that predates them, every one of those reads fails — and the failure
 //! surfaces deep inside the feeder loop, one poll at a time, as an opaque

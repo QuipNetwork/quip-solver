@@ -9,7 +9,7 @@
 //! A funding failure at startup is fatal. A missing snapshot is not: the
 //! caller warns and the feeder retries after miners connect.
 
-use crate::chain::codec::scale_types::{
+use crate::chain::codec::miner_registry::{
     MAX_NODE_ID_BYTES, MAX_NODE_NAME_BYTES, MAX_PUBLIC_HOST_BYTES, MAX_RPC_ENDPOINTS,
     MAX_RPC_ENDPOINT_BYTES,
 };
@@ -678,7 +678,7 @@ token = "{SENTINEL}"
             ..DescriptorParams::from_config(&cfg)
         };
         let payload = build_descriptor_payload(&params, account()).expect("payload");
-        let bytes = crate::chain::codec::scale_types::encode_set_descriptor_call(&payload);
+        let bytes = crate::chain::codec::miner_registry::encode_set_descriptor_call(&payload);
         assert!(
             !bytes
                 .windows(SENTINEL.len())

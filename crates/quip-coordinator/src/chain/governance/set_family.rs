@@ -10,7 +10,7 @@
 //! mineable whitelist (see [`family_root_calls`]).
 
 use crate::chain::client::RealChainClient;
-use crate::chain::codec::scale_types::{
+use crate::chain::codec::quantum_pow::{
     DifficultyConfig, EnergyBandScale, FamilyDescriptorScale, ADD_MINEABLE_TOPOLOGY_CALL_INDEX,
     REMOVE_MINEABLE_TOPOLOGY_CALL_INDEX, SET_DEFAULT_TOPOLOGY_CALL_INDEX,
     SET_DIFFICULTY_CALL_INDEX, SET_TOPOLOGY_ENERGY_BAND_CALL_INDEX,
@@ -425,7 +425,7 @@ pub async fn apply_family(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chain::codec::scale_types::{
+    use crate::chain::codec::quantum_pow::{
         ADD_MINEABLE_TOPOLOGY_CALL_INDEX, QUANTUM_POW_PALLET_INDEX, REGISTER_TOPOLOGY_CALL_INDEX,
         REMOVE_MINEABLE_TOPOLOGY_CALL_INDEX, SET_DEFAULT_TOPOLOGY_CALL_INDEX,
         SET_DIFFICULTY_CALL_INDEX, SET_TOPOLOGY_ENERGY_BAND_CALL_INDEX,

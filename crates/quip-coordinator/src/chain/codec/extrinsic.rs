@@ -480,7 +480,7 @@ pub fn extrinsic_hash(ext: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chain::codec::scale_types::encode_submit_proof_call;
+    use crate::chain::codec::quantum_pow::encode_submit_proof_call;
     use crate::types::proof::QuantumProof;
     use quip_transaction_crypto_core::{HYBRID_PUBLIC_LEN, HYBRID_SIGNATURE_LEN};
 

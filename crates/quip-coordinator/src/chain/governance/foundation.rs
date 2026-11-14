@@ -15,7 +15,7 @@ use crate::chain::codec::extrinsic::{
     foundation_members_storage_key, foundation_voting_storage_key, mineable_topologies_prefix,
     registered_topologies_storage_key,
 };
-use crate::chain::codec::scale_types::{FoundationVotesScale, WeightScale};
+use crate::chain::codec::foundation::{FoundationVotesScale, WeightScale};
 use crate::chain::governance::seed::SeedParams;
 use crate::chain::governance::set_family::FamilyOutcome;
 use crate::chain::ChainError;
@@ -23,9 +23,12 @@ use crate::types::hex::{hex_decode, hex_encode};
 use parity_scale_codec::Decode;
 use serde_json::Value;
 
-use crate::chain::codec::scale_types::{
-    BATCH_ALL_CALL_INDEX, CLOSE_CALL_INDEX, DISPATCH_AS_ROOT_CALL_INDEX, FOUNDATION_PALLET_INDEX,
-    PROPOSE_CALL_INDEX, UTILITY_PALLET_INDEX, VALIDATOR_ADMISSION_PALLET_INDEX, VOTE_CALL_INDEX,
+use crate::chain::codec::foundation::{
+    CLOSE_CALL_INDEX, FOUNDATION_PALLET_INDEX, PROPOSE_CALL_INDEX, VOTE_CALL_INDEX,
+};
+use crate::chain::codec::utility::{BATCH_ALL_CALL_INDEX, UTILITY_PALLET_INDEX};
+use crate::chain::codec::validator_admission::{
+    DISPATCH_AS_ROOT_CALL_INDEX, VALIDATOR_ADMISSION_PALLET_INDEX,
 };
 use crate::chain::sign::submit::{Confirmation, SignedCallOutcome};
 

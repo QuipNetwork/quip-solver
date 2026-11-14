@@ -3,7 +3,8 @@
 use crate::chain::client::RealChainClient;
 use crate::chain::codec::extrinsic::{miner_identity_bytes, signer_account_bytes};
 use crate::chain::codec::proof_encode::{build_quantum_proof, ProofBuildContext};
-use crate::chain::codec::scale_types::{encode_submit_proof_call, encode_submit_solution_call};
+use crate::chain::codec::quantum_compute_mempool::encode_submit_solution_call;
+use crate::chain::codec::quantum_pow::encode_submit_proof_call;
 use crate::chain::mining::family::witness_format;
 use crate::chain::sign::submit::{classify_receipt, Confirmation, SignedCallOutcome};
 use crate::chain::ChainError;

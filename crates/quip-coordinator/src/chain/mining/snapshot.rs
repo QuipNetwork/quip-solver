@@ -31,7 +31,7 @@ use crate::chain::codec::extrinsic::{
     last_proof_block_storage_key, miners_storage_key, target_proof_blocks_override_storage_key,
     topology_curve_c_storage_key, topology_energy_band_storage_key,
 };
-use crate::chain::codec::scale_types::{
+use crate::chain::codec::quantum_pow::{
     require_set_values, CurveCScale, DifficultyConfig, EnergyBandScale, MinerInfoScale,
     TopologyMetaScale,
 };
@@ -479,7 +479,7 @@ mod tests {
 mod default_topology_tests {
     use super::RealChainClient;
     use crate::chain::codec::extrinsic::default_topology_storage_key;
-    use crate::chain::codec::scale_types::TopologyMetaScale;
+    use crate::chain::codec::quantum_pow::TopologyMetaScale;
     use crate::chain::{BoxStream, ChainError, RpcTransport};
     use crate::types::hex::hex_encode;
     use crate::types::miner::MinerKind;

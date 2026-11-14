@@ -18,7 +18,7 @@ use crate::chain::codec::extrinsic::{
     encode_additional, extrinsic_hash, signing_payload, RuntimeTxContext,
 };
 use crate::chain::codec::proof_encode::decode_family_witnesses;
-use crate::chain::codec::scale_types::{QUANTUM_POW_PALLET_INDEX, SUBMIT_PROOF_CALL_INDEX};
+use crate::chain::codec::quantum_pow::{QUANTUM_POW_PALLET_INDEX, SUBMIT_PROOF_CALL_INDEX};
 use crate::types::family::ChallengeFamily;
 use crate::types::proof::QuantumProof;
 use crate::types::snapshot::{MiningSnapshot, PendingProof, Verdict};
@@ -295,7 +295,7 @@ mod tests {
     use crate::chain::codec::extrinsic::{
         build_hybrid_signed_extrinsic, signer_account_bytes, SignedExtensionContext,
     };
-    use crate::chain::codec::scale_types::{encode_register_miner_call, encode_submit_proof_call};
+    use crate::chain::codec::quantum_pow::{encode_register_miner_call, encode_submit_proof_call};
     use parity_scale_codec::Encode;
     use sp_core::{H256, U256};
     use sp_crypto_hashing::blake2_256;
@@ -575,7 +575,7 @@ mod fetch_tests {
         use crate::chain::codec::extrinsic::{
             build_hybrid_signed_extrinsic, SignedExtensionContext,
         };
-        use crate::chain::codec::scale_types::encode_submit_proof_call;
+        use crate::chain::codec::quantum_pow::encode_submit_proof_call;
         use crate::types::proof::QuantumProof;
         let pair = HybridPair::from_string("//Alice", None).expect("alice");
         let call = encode_submit_proof_call(&QuantumProof {

@@ -15,7 +15,8 @@ pub use client::transport::{BoxStream, RpcTransport};
 pub use client::watch::{parse_tx_status, TxStatus};
 pub use client::RealChainClient;
 pub use codec::extrinsic::RuntimeTxContext;
-pub use codec::scale_types::{MinerInfoScale, NodeDescriptorV2Input};
+pub use codec::miner_registry::NodeDescriptorV2Input;
+pub use codec::quantum_pow::MinerInfoScale;
 pub use governance::seed::{
     register_topology_call, seed_chain, ss58, SeedParams, SeedTopology, DEFAULT_ENERGY_BAND,
     DEFAULT_SEED_DIFFICULTY, MIN_SEED_SPEC_VERSION,

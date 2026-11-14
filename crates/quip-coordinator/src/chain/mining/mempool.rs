@@ -42,7 +42,7 @@ pub fn order_id_from_key(key: &[u8]) -> Option<u64> {
 use crate::chain::client::storage::parse_block_number;
 use crate::chain::client::RealChainClient;
 use crate::chain::codec::extrinsic::job_orders_storage_key;
-use crate::chain::codec::scale_types::{JobOrderScale, OrderStatus, OrderTiming};
+use crate::chain::codec::quantum_compute_mempool::{JobOrderScale, OrderStatus, OrderTiming};
 use crate::chain::ChainError;
 use crate::types::hex::{hex_decode, hex_encode};
 use crate::types::order::{JobMode, JobOrder};
@@ -277,7 +277,7 @@ mod fetch_tests {
         use crate::chain::codec::extrinsic::{
             job_orders_storage_key, signer_account_bytes, solvers_storage_key,
         };
-        use crate::chain::codec::scale_types::{
+        use crate::chain::codec::quantum_compute_mempool::{
             IsingParams, JobOrderScale, OrderStatus, OrderTiming, ResultDelivery, RewardResolution,
             SolverInfoScale,
         };

@@ -12,7 +12,8 @@
 //! Nothing in this module may influence a `SubmitAction` or any other
 //! control-flow decision. It produces log text only.
 
-use crate::chain::codec::scale_types::{MINER_REGISTRY_PALLET_INDEX, QUANTUM_POW_PALLET_INDEX};
+use crate::chain::codec::miner_registry::MINER_REGISTRY_PALLET_INDEX;
+use crate::chain::codec::quantum_pow::QUANTUM_POW_PALLET_INDEX;
 
 /// A dispatch error localised to one pallet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

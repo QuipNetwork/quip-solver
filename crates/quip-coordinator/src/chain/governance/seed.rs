@@ -8,7 +8,7 @@
 //! carries them is in [`super::foundation`]. Runtimes before 120 are refused.
 
 use crate::chain::client::RealChainClient;
-use crate::chain::codec::scale_types::{
+use crate::chain::codec::quantum_pow::{
     DifficultyConfig, EnergyBandScale, FamilyDescriptorScale, QUANTUM_POW_PALLET_INDEX,
     REGISTER_TOPOLOGY_CALL_INDEX,
 };

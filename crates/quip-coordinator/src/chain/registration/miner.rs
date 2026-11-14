@@ -4,10 +4,10 @@ use crate::chain::client::RealChainClient;
 use crate::chain::codec::extrinsic::{
     miners_storage_key, signer_account_bytes, solvers_storage_key,
 };
-use crate::chain::codec::scale_types::{
-    encode_deregister_solver_call, encode_register_miner_call, encode_register_solver_call,
-    SolverInfoScale,
+use crate::chain::codec::quantum_compute_mempool::{
+    encode_deregister_solver_call, encode_register_solver_call, SolverInfoScale,
 };
+use crate::chain::codec::quantum_pow::encode_register_miner_call;
 use crate::chain::sign::submit::{
     classify_registration, Confirmation, RegistrationOutcome, SignedCallOutcome,
 };

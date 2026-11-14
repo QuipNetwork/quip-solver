@@ -263,7 +263,9 @@ JSON-RPC. `FakeChain` (`testing/fake_chain.rs`) backs the tests. The client's
 operations live in the `chain` folders by concern. `chain/client/` holds the
 transport and storage reads. `chain/codec/` holds `extrinsic` (H4 hybrid
 sr25519 + FN-DSA-512 signing, `load_hybrid_pair`, `miner_identity_bytes`,
-`signer_account_bytes`), `proof_encode`, and `scale_types`. `chain/sign/`
+`signer_account_bytes`), `proof_encode`, and one module per pallet (`quantum_pow`,
+`quantum_compute_mempool`, `miner_registry`, `foundation`, `validator_admission`,
+`utility`) with that pallet's SCALE types, indices and call encoders. `chain/sign/`
 holds submission and `classify_receipt`. `chain/registration/`,
 `chain/mining/`, `chain/governance/`, and `chain/startup/` hold the rest. The
 plain data (`MiningSnapshot`, `DecayParams`, `JobOrder`, `Proof`,

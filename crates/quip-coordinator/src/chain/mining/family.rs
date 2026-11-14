@@ -3,7 +3,7 @@
 
 use crate::chain::client::RealChainClient;
 use crate::chain::codec::proof_encode::WitnessFormat;
-use crate::chain::codec::scale_types::{FamilyDescriptorScale, TopologyMetaScale};
+use crate::chain::codec::quantum_pow::{FamilyDescriptorScale, TopologyMetaScale};
 use crate::chain::ChainError;
 use crate::types::hex::hex_encode;
 use crate::types::snapshot::MiningSnapshot;
@@ -174,7 +174,7 @@ mod tests {
         topology_meta_calls: std::sync::Mutex<Vec<[u8; 32]>>,
         api_version: u32,
         meta: Option<TopologyMetaScale>,
-        band: Option<crate::chain::codec::scale_types::EnergyBandScale>,
+        band: Option<crate::chain::codec::quantum_pow::EnergyBandScale>,
     }
 
     impl SnapshotValidator {
@@ -194,7 +194,7 @@ mod tests {
         fn encode_meta(&self, meta: &TopologyMetaScale) -> Vec<u8> {
             use parity_scale_codec::Encode as _;
             let mut out = vec![1];
-            if self.api_version >= crate::chain::codec::scale_types::FAMILY_API_VERSION {
+            if self.api_version >= crate::chain::codec::quantum_pow::FAMILY_API_VERSION {
                 out.extend(meta.encode());
             } else {
                 out.extend(
@@ -311,7 +311,7 @@ mod tests {
                     hash.copy_from_slice(&hex_decode(&arg(1)).expect("hash hex"));
                     match arg(0).as_str() {
                         "QuantumPowApi_difficulty_for" => {
-                            hex(&Some(crate::chain::codec::scale_types::DifficultyConfig {
+                            hex(&Some(crate::chain::codec::quantum_pow::DifficultyConfig {
                                 min_solutions: 1,
                                 max_energy_milli: -5_000,
                                 min_diversity_milli: 0,
@@ -424,7 +424,7 @@ mod tests {
         let hash = chain_family_hash(&meta);
         let mut validator = SnapshotValidator::new(hash, 3);
         validator.meta = Some(meta.clone());
-        validator.band = Some(crate::chain::codec::scale_types::EnergyBandScale {
+        validator.band = Some(crate::chain::codec::quantum_pow::EnergyBandScale {
             hard_milli: -900_000,
             easy_milli: -700_000,
         });

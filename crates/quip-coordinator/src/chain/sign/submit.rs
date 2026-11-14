@@ -142,7 +142,7 @@ use crate::chain::codec::extrinsic::{
     node_descriptors_storage_key, order_solutions_storage_key, participants_by_qblock_storage_key,
     signer_account_bytes, solvers_storage_key, RuntimeTxContext, SignedExtensionContext,
 };
-use crate::chain::codec::scale_types::{JobSolutionScale, SolverInfoScale};
+use crate::chain::codec::quantum_compute_mempool::{JobSolutionScale, SolverInfoScale};
 use crate::chain::ChainError;
 use crate::types::hex::{hex_decode, hex_encode};
 use crate::types::miner::SolverType;

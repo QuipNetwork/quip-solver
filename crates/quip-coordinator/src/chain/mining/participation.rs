@@ -2,7 +2,7 @@
 
 use crate::chain::client::RealChainClient;
 use crate::chain::codec::extrinsic::signer_account_bytes;
-use crate::chain::codec::scale_types::encode_participate_call;
+use crate::chain::codec::miner_registry::encode_participate_call;
 use crate::chain::sign::submit::{
     classify_participation, Confirmation, ParticipationOutcome, SignedCallOutcome,
 };

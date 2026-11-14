@@ -1,7 +1,7 @@
 //! The admin subcommands, `seed-chain` and `set-family`: their arguments and
 //! their output. The chain calls are in `chain::governance::seed`.
 
-use crate::chain::codec::scale_types::{DifficultyConfig, EnergyBandScale};
+use crate::chain::codec::quantum_pow::{DifficultyConfig, EnergyBandScale};
 use crate::chain::{
     apply_family, dimer_1200, plan_family, seed_chain, twisted_dimer, twisted_dimer_params,
     ExistingDefault, FamilyOutcome, FamilyPlan, SeedParams, SeedTopology, DEFAULT_ENERGY_BAND,
