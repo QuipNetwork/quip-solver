@@ -909,8 +909,9 @@ pub async fn feeder_loop<E: WorkSource + ResultSink + ?Sized>(
             // Win-time submission: observe the head for block estimation, pick
             // the best stashed candidate whose projected viability block is the
             // next block (and still improves on the current best), then submit it
-            // off-lock, so it is included in the first block whose bar admits it. `mark_submitted` + the `beats_current` guard keep this
-            // from double-submitting or regressing what the session path sent.
+            // off-lock, so it is included in the first block whose bar admits
+            // it. `mark_submitted` + the `beats_current` guard keep this from
+            // double-submitting or regressing what the session path sent.
             let now_mono = start.elapsed().as_secs_f64();
             let now_wall = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
