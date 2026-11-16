@@ -17,6 +17,9 @@ use std::fmt::Write as _;
 /// blocks. A candidate that does not clear inside this window is not held.
 pub const DECAY_HORIZON_BLOCKS: u64 = 25_600;
 
+/// Blocks between the head at submission and the earliest block that can include the proof.
+pub const SUBMIT_LEAD_BLOCKS: u64 = 1;
+
 /// A stashed candidate: a validated solution set awaiting its viability block.
 #[derive(Clone, Debug)]
 pub struct Candidate {
@@ -170,6 +173,20 @@ impl WinStash {
             .filter(|c| current_best.is_none_or(|b| c.best_energy_milli < b))
     }
 
+    /// The candidate to submit at chain head `head_block`: [`Self::due_improving`] for the block
+    /// after the head.
+    ///
+    /// The pallet checks a proof against the bar of the block that includes it, and a proof
+    /// submitted while `head_block` is the head is included at `head_block + 1` at the earliest.
+    /// Submitting only once the viability block is the head lands the proof one block late, after
+    /// any miner who submitted for that block, even with a lower energy. A proof that arrives early
+    /// is refused with `InsufficientEnergy`, which the win-time path treats as retryable, so the
+    /// candidate stays stashed and is offered again.
+    #[must_use]
+    pub fn due_for_submit(&self, head_block: u64, current_best: Option<i64>) -> Option<&Candidate> {
+        self.due_improving(head_block.saturating_add(SUBMIT_LEAD_BLOCKS), current_best)
+    }
+
     /// Mark a candidate submitted so the driver won't re-submit it.
     pub fn mark_submitted(&mut self, job_id: &[u8]) {
         if let Some(c) = self.candidates.iter_mut().find(|c| c.job_id == job_id) {
@@ -319,6 +336,11 @@ mod tests {
         assert!(s.due_improving(110, Some(-49_500)).is_none());
         // Current best weaker → submit.
         assert_eq!(s.due_improving(110, Some(-48_000)).map(job_byte), Some(1));
+
+        // `due_for_submit` asks one block ahead: a proof sent with head 109 lands at 110.
+        assert!(s.due_for_submit(108, None).is_none());
+        assert_eq!(s.due_for_submit(109, None).map(job_byte), Some(1));
+        assert!(s.due_for_submit(109, Some(-49_500)).is_none());
 
         // `due_at` returns the best arrived, unsubmitted candidate.
         assert!(s.due_at(109).is_none());
