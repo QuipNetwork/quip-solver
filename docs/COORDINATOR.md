@@ -539,15 +539,31 @@ neither starts a new generation.
 candidate's energy by binary search over 25,600 blocks. A candidate that
 does not clear inside that window is not held.
 
-At each poll the feeder calls `WinStash::submittable`. The call walks the due
-candidates from the lowest energy up. A candidate is due when its viability
-block has arrived, the feeder has not submitted it, and its energy beats the
-energy already sent. The call returns the first due candidate that clears the
-live gates: `min_solutions`, diversity, and the decayed energy threshold. A due
+At each poll the feeder calls `WinStash::win_time_check`. The call walks the
+due candidates from the lowest energy up. A candidate is due when its
+viability block has arrived by the block that a proof sent now lands in, the
+feeder has not submitted it, and its energy beats the energy already sent. The
+call returns the first due candidate that clears the gates of that block:
+`min_solutions`, diversity, and the projected energy threshold. A due
 candidate that fails the gates stays stashed, and the walk moves to the next
-one. If none clears the gates, the feeder submits nothing at that poll. The stash summary in
-`attempts.json` reports `decay_algorithm` and `target_proof_blocks` so an
+one. If none clears the gates, the call reports the best due candidate with
+its failed check. The feeder logs that check at debug level and submits
+nothing at that poll. The stash summary in `attempts.json` reports `decay_algorithm` and `target_proof_blocks` so an
 operator can confirm which rule and target a round ran under.
+
+The pallet checks a proof against the threshold of the block that includes
+it. A proof sent while block N is the head lands in block N + 1 at the
+earliest. `WinStash::win_time_check` therefore replays the chain's gates
+against the threshold of the block after the head
+(`WIN_TIME_LEAD_BLOCKS` = 1), not against the live target of the head. A
+held candidate goes out one block before its viability block and lands in
+the first block that admits it. `min_solutions` and `min_diversity_milli`
+do not decay; the solution count and the diversity are recomputed over the
+rows that the projected threshold admits. The projection applies only when
+the decay model reproduces the live threshold at the head exactly. When the
+two disagree, the feeder uses the live threshold, so a wrong model cannot
+spend submit attempts on early proofs. Set `WIN_TIME_LEAD_BLOCKS` to 0 to
+gate on the head's own threshold.
 
 ## Routing and credits
 

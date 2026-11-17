@@ -907,10 +907,11 @@ pub async fn feeder_loop<E: WorkSource + ResultSink + ?Sized>(
             }
 
             // Win-time submission: observe the head for block estimation, pick
-            // the best stashed candidate whose projected viability block has
-            // arrived (and still improves on the current best), then submit it
-            // off-lock. `mark_submitted` + the `beats_current` guard keep this
-            // from double-submitting or regressing what the session path sent.
+            // the best stashed candidate whose projected viability block is the
+            // block a proof sent now lands in (and still improves on the
+            // current best), then submit it off-lock. `mark_submitted` + the
+            // `beats_current` guard keep this from double-submitting or
+            // regressing what the session path sent.
             let now_mono = start.elapsed().as_secs_f64();
             let now_wall = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -922,18 +923,23 @@ pub async fn feeder_loop<E: WorkSource + ResultSink + ?Sized>(
                 .estimate_block(now_mono)
                 .unwrap_or(snap.block_number);
             let best = st.current_best_milli;
-            // The chain re-runs its gates against the difficulty live at the
-            // inclusion block: it filters the proof to the rows under that
-            // ceiling and scores diversity over only those. The ceiling moves
-            // between stashing and submission, so replay the gates against the
-            // freshest target and leave candidates that do not clear them
-            // stashed for a later window instead of spending a rejection.
+            // The chain re-runs its gates against the difficulty of the block
+            // that includes the proof: it filters the proof to the rows under
+            // that ceiling and scores diversity over only those. The live
+            // target is the head's; a proof sent now lands at the head plus
+            // `WIN_TIME_LEAD_BLOCKS` at the earliest, so replay the gates
+            // against the projected ceiling of that block and leave a
+            // candidate that does not clear them stashed for a later window
+            // instead of spending a rejection on it.
             let live_gates =
                 crate::coordinator::scoring::validate::gates_from_target(Some(&target));
-            let due = st
-                .stash
-                .submittable(current_block, best, &live_gates)
-                .cloned();
+            let win_time = st.stash.win_time_check(
+                snap.block_number,
+                current_block,
+                best,
+                &live_gates,
+                crate::coordinator::round::stash::WIN_TIME_LEAD_BLOCKS,
+            );
             let validated = st.results_validated;
             drop(st);
 
@@ -984,6 +990,22 @@ pub async fn feeder_loop<E: WorkSource + ResultSink + ?Sized>(
                 }
                 last_heartbeat = std::time::Instant::now();
             }
+
+            let due = win_time.and_then(|w| {
+                if !w.check.accepted {
+                    tracing::debug!(
+                        job = %crate::types::hex::hex_encode(&w.candidate.job_id),
+                        head = snap.block_number,
+                        n_valid = w.check.n_valid,
+                        diversity_milli = w.check.diversity_milli,
+                        min_solutions = w.gates.min_solutions,
+                        min_diversity_milli = w.gates.min_diversity_milli,
+                        max_energy = %crate::observe::logging::energy_units(w.gates.min_energy_milli),
+                        "win-time candidate does not clear the next block's difficulty; leaving stashed"
+                    );
+                }
+                w.check.accepted.then_some(w.candidate)
+            });
 
             if let Some(cand) = due {
                 use crate::types::proof::SubmitAction;

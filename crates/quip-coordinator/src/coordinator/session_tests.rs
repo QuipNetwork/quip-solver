@@ -362,11 +362,14 @@ async fn lease_result_above_target_is_stashed_and_marks_round_mined() {
     );
     let candidate = st
         .stash
-        .submittable(
+        .win_time_check(
+            u64::MAX,
             u64::MAX,
             None,
             &crate::coordinator::scoring::validate::gates_from_target(None),
+            0,
         )
+        .map(|w| w.candidate)
         .expect("the single stashed candidate becomes due within the horizon");
     assert_eq!(
         candidate.job_id, expected_nonce,
