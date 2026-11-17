@@ -252,6 +252,7 @@ fn due_candidate() -> quip_coordinator::coordinator::round::stash::Candidate {
         is_pow: true,
         order_id: vec![],
         device_access_time_us: 0,
+        topology_hash: vec![9u8; 32],
         submitted: false,
     }
 }

@@ -30,7 +30,8 @@ pub const WIN_TIME_LEAD_BLOCKS: u64 = 1;
 /// replay of the chain's gates for the block a proof sent now would land in.
 #[derive(Clone, Debug)]
 pub struct WinTimeCheck {
-    /// The best due, improving, unsubmitted candidate.
+    /// The best due, improving, unsubmitted candidate that clears `gates`,
+    /// or the best due one with its failed check when none does.
     pub candidate: Candidate,
     /// Gates of the including block: the live gates with the projected ceiling.
     pub gates: QualityGates,
@@ -61,6 +62,8 @@ pub struct Candidate {
     pub order_id: Vec<u8>,
     /// Device access time reported by the miner, in microseconds.
     pub device_access_time_us: u64,
+    /// Topology hash the job was mined on; empty for a mempool order.
+    pub topology_hash: Vec<u8>,
     /// Whether this candidate has already been submitted.
     pub submitted: bool,
 }
@@ -164,33 +167,6 @@ impl WinStash {
         self.candidates.iter().any(|c| c.job_id == job_id)
     }
 
-    /// The best (lowest-energy) unsubmitted candidate whose viability block has
-    /// arrived at `current_block`, if any. Candidates are best-first, so this
-    /// returns the strongest due one.
-    #[must_use]
-    pub fn due_at(&self, current_block: u64) -> Option<&Candidate> {
-        self.candidates.iter().find(|c| {
-            !c.submitted
-                && self
-                    .viability_block(c.best_energy_milli)
-                    .is_some_and(|b| b <= current_block)
-        })
-    }
-
-    /// The candidate to submit now: the best due (viability block arrived,
-    /// unsubmitted) candidate that also strictly improves on `current_best`
-    /// (or when there is none). Mirrors [`crate::coordinator::scoring::validate::beats_current`], so
-    /// the win-time path never regresses what the session path already sent.
-    #[must_use]
-    pub fn due_improving(
-        &self,
-        current_block: u64,
-        current_best: Option<i64>,
-    ) -> Option<&Candidate> {
-        self.due_at(current_block)
-            .filter(|c| current_best.is_none_or(|b| c.best_energy_milli < b))
-    }
-
     /// The `max_energy_milli` of block `head_block + lead`, from the model,
     /// when the model reproduces `live_ceiling` (the chain's value at
     /// `head_block`) exactly. A model that disagrees with the chain at the head
@@ -217,12 +193,21 @@ impl WinStash {
     /// The win-time decision at chain head `head_block`, whose live gates are
     /// `live` (`QuantumPowApi_difficulty_for` at the head). A proof sent now is
     /// included at `head_block + lead` at the earliest, where the threshold is
-    /// at least the projected one, so the best due improving candidate (due by
-    /// that block or by `estimated_block`, whichever is later) is replayed
-    /// against the live gates with the projected ceiling. `min_solutions` and
-    /// `min_diversity_milli` do not decay; `n_valid` and diversity are
-    /// recomputed over the rows the projected ceiling admits. `None` when no
-    /// candidate is due.
+    /// at least the projected one, so the gates are the live gates with the
+    /// projected ceiling. `min_solutions` and `min_diversity_milli` do not
+    /// decay; `n_valid` and diversity are recomputed over the rows the
+    /// projected ceiling admits.
+    ///
+    /// The due candidates are the unsubmitted ones whose viability block has
+    /// arrived by that landing block or by `estimated_block`, whichever is
+    /// later, and that strictly improve on `current_best` (or when there is
+    /// none), mirroring
+    /// [`crate::coordinator::scoring::validate::beats_current`] so the
+    /// win-time path never regresses what the session path sent. They are
+    /// replayed best-first and the first that clears the gates is returned
+    /// with an accepted check. When none clears them, the best due candidate
+    /// is returned with its failed check, so the caller can report why it
+    /// stays stashed. `None` when no candidate is due.
     #[must_use]
     pub fn win_time_check(
         &self,
@@ -232,20 +217,33 @@ impl WinStash {
         live: &QualityGates,
         lead: u64,
     ) -> Option<WinTimeCheck> {
-        let landing = head_block.saturating_add(lead);
-        let candidate = self
-            .due_improving(estimated_block.max(landing), current_best)?
-            .clone();
+        let due_by = estimated_block.max(head_block.saturating_add(lead));
         let gates = QualityGates {
             min_energy_milli: self.projected_ceiling(head_block, live.min_energy_milli, lead),
             ..*live
         };
-        let check = check_proof_gates(&candidate.solutions, &gates);
-        Some(WinTimeCheck {
-            candidate,
-            gates,
-            check,
-        })
+        let mut best_failed: Option<WinTimeCheck> = None;
+        for candidate in self.candidates.iter().filter(|c| {
+            !c.submitted
+                && self
+                    .viability_block(c.best_energy_milli)
+                    .is_some_and(|b| b <= due_by)
+                && current_best.is_none_or(|b| c.best_energy_milli < b)
+        }) {
+            let check = check_proof_gates(&candidate.solutions, &gates);
+            let decision = WinTimeCheck {
+                candidate: candidate.clone(),
+                gates,
+                check,
+            };
+            if decision.check.accepted {
+                return Some(decision);
+            }
+            if best_failed.is_none() {
+                best_failed = Some(decision);
+            }
+        }
+        best_failed
     }
 
     /// Mark a candidate submitted so the driver won't re-submit it.
@@ -315,6 +313,14 @@ mod tests {
         s
     }
 
+    fn all_pass() -> QualityGates {
+        QualityGates {
+            min_energy_milli: 0,
+            min_diversity_milli: 0,
+            min_solutions: 0,
+        }
+    }
+
     fn cand(job_id: u8, energy: i64) -> Candidate {
         Candidate {
             job_id: vec![job_id],
@@ -323,10 +329,11 @@ mod tests {
             best_energy_milli: energy,
             diversity_milli: 200,
             n_valid: 5,
-            solutions: vec![],
+            solutions: vec![row(energy, vec![1, -1])],
             is_pow: true,
             order_id: vec![],
             device_access_time_us: 0,
+            topology_hash: vec![9; 32],
             submitted: false,
         }
     }
@@ -384,27 +391,76 @@ mod tests {
         assert_eq!(ids, vec![4, 1]); // best-first: -49900, -49000
     }
 
+    /// The candidate `win_time_check` returns at `block` with lead 0, which
+    /// gates on the live ceiling, and whether its check passed.
+    fn due_at(
+        s: &WinStash,
+        block: u64,
+        best: Option<i64>,
+        gates: &QualityGates,
+    ) -> Option<(u8, bool)> {
+        s.win_time_check(block, block, best, gates, 0)
+            .map(|w| (job_byte(&w.candidate), w.check.accepted))
+    }
+
     #[test]
     fn due_candidates_need_arrival_and_improvement() {
         let mut s = stash_with(Some(model()), 100, 4);
         let _ = s.insert(cand(1, -49_000)); // viable at block 110
         let _ = s.insert(cand(2, -47_000)); // viable at block 130
 
-        // `due_improving` requires arrival and improvement.
-        assert!(s.due_improving(109, None).is_none());
-        assert_eq!(s.due_improving(110, None).map(job_byte), Some(1));
+        let g = all_pass();
+        assert_eq!(due_at(&s, 109, None, &g), None);
+        assert_eq!(due_at(&s, 110, None, &g), Some((1, true)));
         // Current best already stronger → nothing improves.
-        assert!(s.due_improving(110, Some(-49_500)).is_none());
+        assert_eq!(due_at(&s, 110, Some(-49_500), &g), None);
         // Current best weaker → submit.
-        assert_eq!(s.due_improving(110, Some(-48_000)).map(job_byte), Some(1));
+        assert_eq!(due_at(&s, 110, Some(-48_000), &g), Some((1, true)));
 
-        // `due_at` returns the best arrived, unsubmitted candidate.
-        assert!(s.due_at(109).is_none());
-        assert_eq!(s.due_at(110).map(job_byte), Some(1));
         // At 135 both are due; cand 1 (-49000) is the stronger one.
-        assert_eq!(s.due_at(135).map(job_byte), Some(1));
+        assert_eq!(due_at(&s, 135, None, &g), Some((1, true)));
         s.mark_submitted(&[1]);
-        assert_eq!(s.due_at(135).map(job_byte), Some(2));
+        assert_eq!(due_at(&s, 135, None, &g), Some((2, true)));
+    }
+
+    #[test]
+    fn win_time_check_skips_a_due_candidate_that_fails_the_gates() {
+        let mut s = stash_with(Some(model()), 100, 4);
+        let mut a = cand(1, -49_000);
+        a.solutions = vec![
+            row(-49_000, vec![1, -1]),
+            row(-30_000, vec![1, -1]),
+            row(-30_000, vec![1, -1]),
+        ];
+        let mut b = cand(2, -48_000);
+        b.solutions = vec![
+            row(-48_000, vec![1, -1]),
+            row(-48_000, vec![1, -1]),
+            row(-48_000, vec![1, -1]),
+        ];
+        let _ = s.insert(a);
+        let _ = s.insert(b);
+        let gates = QualityGates {
+            min_energy_milli: -47_581,
+            min_diversity_milli: 0,
+            min_solutions: 3,
+        };
+        assert_eq!(due_at(&s, 135, None, &gates), Some((2, true)));
+    }
+
+    #[test]
+    fn win_time_check_reports_the_best_due_candidate_when_none_clears_the_gates() {
+        let mut s = stash_with(Some(model()), 100, 4);
+        let mut a = cand(1, -49_000);
+        // Two rows, min_solutions 3.
+        a.solutions = vec![row(-49_000, vec![1, -1]), row(-49_000, vec![1, -1])];
+        let _ = s.insert(a);
+        let gates = QualityGates {
+            min_energy_milli: -47_581,
+            min_diversity_milli: 0,
+            min_solutions: 3,
+        };
+        assert_eq!(due_at(&s, u64::MAX, None, &gates), Some((1, false)));
     }
 
     /// Gated rule, last proof 1000, epoch 10, target 100: flat through block

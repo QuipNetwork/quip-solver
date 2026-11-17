@@ -220,6 +220,7 @@ mod tests {
             generation: 1,
             salt: ctx.salt.to_vec(),
             device_access_time_us: 123_456,
+            topology_hash: ctx.topology_hash.to_vec(),
         };
         let qp = build_quantum_proof(&proof, &ctx).expect("build");
         assert_eq!(qp.topology_hash, H256::from(ctx.topology_hash));

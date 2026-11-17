@@ -247,6 +247,12 @@ compares the winner:
 | The signing account | The read raced the write | `StopRoundStale` |
 | Nothing | The pallet rejected the proof itself. Check diversity, energy, and registration. | `classify_receipt` |
 
+Before the client encodes or signs a proof, it compares the proof topology
+hash with the topology hash of the current snapshot. If they differ, the chain
+would refuse the proof. The client then returns `StopRoundStale` and makes no
+chain call. It logs this warning:
+"proof was mined on a topology the chain no longer uses; dropping it".
+
 A lost race is the one included-but-failed case that says nothing is wrong
 with the proof, so it must not appear as a rejection.
 
@@ -531,8 +537,18 @@ neither starts a new generation.
 
 `WinStash::viability_block` finds the first block whose threshold exceeds a
 candidate's energy by binary search over 25,600 blocks. A candidate that
-does not clear inside that window is not held. The stash summary in
-`attempts.json` reports `decay_algorithm` and `target_proof_blocks` so an
+does not clear inside that window is not held.
+
+At each poll the feeder calls `WinStash::win_time_check`. The call walks the
+due candidates from the lowest energy up. A candidate is due when its
+viability block has arrived by the block that a proof sent now lands in, the
+feeder has not submitted it, and its energy beats the energy already sent. The
+call returns the first due candidate that clears the gates of that block:
+`min_solutions`, diversity, and the projected energy threshold. A due
+candidate that fails the gates stays stashed, and the walk moves to the next
+one. If none clears the gates, the call reports the best due candidate with
+its failed check. The feeder logs that check at debug level and submits
+nothing at that poll. The stash summary in `attempts.json` reports `decay_algorithm` and `target_proof_blocks` so an
 operator can confirm which rule and target a round ran under.
 
 The pallet checks a proof against the threshold of the block that includes
@@ -580,7 +596,11 @@ apart from the `jobs_completed` count of finished work.
 
 On a reject with `UnsupportedKind`, the router records that the miner cannot
 serve that job kind and re-routes the job to another capable miner. On a miner
-crash, `reclaim` returns its staged and in-flight jobs for re-queue.
+crash, `reclaim` returns its staged and in-flight jobs for re-queue, and the
+miner stays registered while it restarts. When the supervisor stops restarting
+a miner, `retire_miner` returns the same jobs and removes the miner from the
+router. The jobs then go to the remaining miners. A reclaimed mempool order
+that no miner can take leaves `mempool_orders`. A later block stages it again.
 
 A miner with a native fingerprint receives hash jobs for the active session topology.
 The miner keeps its refusal or defect handling for those jobs.
@@ -741,7 +761,13 @@ Restarts follow the child's exit code (`restart_policy`):
   (`2^consecutive × base`, capped at `max`) under a failure budget. Too many
   crashes inside the window marks the miner unhealthy and stops respawning.
 
-On a crash the miner's staged and in-flight jobs are re-queued. When the runtime
+On a crash the miner's staged and in-flight jobs are re-queued. The miner
+stays registered while it restarts. If the policy does not respawn the miner
+(`Never` or `Unhealthy`) or the spawn fails, the supervisor removes the miner
+from the router. Its jobs go to the remaining miners. A mempool order that no
+miner can take leaves `mempool_orders`, so a later block stages it again.
+
+When the runtime
 stops, each live miner gets an in-band `Shutdown` first, then a hard kill after
 the grace period (`grace_ms`).
 

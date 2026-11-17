@@ -1003,6 +1003,7 @@ mod verification {
                 generation: 1,
                 salt: salt.to_vec(),
                 device_access_time_us: 0,
+                topology_hash: vec![0; 32],
             },
             &ProofBuildContext {
                 topology_hash: [0; 32],
