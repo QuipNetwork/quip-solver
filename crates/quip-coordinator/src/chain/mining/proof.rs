@@ -18,12 +18,19 @@ fn stale_receipt(proof: &Proof, current: &[u8]) -> Option<SubmitReceipt> {
     if proof.topology_hash == current {
         return None;
     }
-    tracing::warn!(
-        job = %crate::types::hex::hex_encode(&proof.job_id),
-        mined_on = %crate::types::hex::hex_encode(&proof.topology_hash),
-        current = %crate::types::hex::hex_encode(current),
-        "proof was mined on a topology the chain no longer uses; dropping it"
-    );
+    if proof.topology_hash.is_empty() {
+        tracing::warn!(
+            job = %crate::types::hex::hex_encode(&proof.job_id),
+            "proof carries no topology hash; dropping it"
+        );
+    } else {
+        tracing::warn!(
+            job = %crate::types::hex::hex_encode(&proof.job_id),
+            mined_on = %crate::types::hex::hex_encode(&proof.topology_hash),
+            current = %crate::types::hex::hex_encode(current),
+            "proof was mined on a topology the chain no longer uses; dropping it"
+        );
+    }
     Some(SubmitReceipt {
         action: SubmitAction::StopRoundStale,
         extrinsic_hash: None,
@@ -299,5 +306,25 @@ mod tests {
             topology_hash: vec![1; 32],
         };
         assert!(super::stale_receipt(&proof, &[1; 32]).is_none());
+    }
+
+    #[test]
+    fn a_proof_without_a_topology_hash_is_dropped() {
+        let proof = Proof {
+            job_id: vec![1],
+            best_energy_milli: -1,
+            diversity_milli: 0,
+            n_valid: 1,
+            solutions: vec![],
+            is_pow: true,
+            order_id: vec![],
+            generation: 1,
+            salt: vec![0; 32],
+            device_access_time_us: 0,
+            topology_hash: vec![],
+        };
+        let receipt = super::stale_receipt(&proof, &[1; 32]).expect("stale");
+        assert_eq!(receipt.action, SubmitAction::StopRoundStale);
+        assert_eq!(receipt.extrinsic_hash, None);
     }
 }
