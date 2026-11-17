@@ -314,11 +314,7 @@ mod tests {
     }
 
     fn all_pass() -> QualityGates {
-        QualityGates {
-            min_energy_milli: 0,
-            min_diversity_milli: 0,
-            min_solutions: 0,
-        }
+        crate::coordinator::scoring::validate::gates_from_target(None)
     }
 
     fn cand(job_id: u8, energy: i64) -> Candidate {
