@@ -53,6 +53,10 @@ pub trait SessionGate: Send + Sync {
     /// Return the in-flight and staged jobs of an exited miner for routing to
     /// the others.
     async fn reclaim(&self, miner_id: &str);
+    /// The supervisor gave up on `miner_id`: remove it from the router and
+    /// route its jobs to the miners that remain. A job nobody can take is
+    /// dropped, and a mempool order among them becomes stageable again.
+    async fn retire(&self, miner_id: &str);
 }
 
 /// Sends one coordinator message to every live miner session.

@@ -252,8 +252,23 @@ impl CoordinatorState {
 
     /// Reclaim every job a miner owned — its in-flight jobs plus its staged
     /// queue — so they can be re-routed after a crash. Also drops its outbound
-    /// channel.
+    /// channel. The miner stays registered in the router.
     pub fn reclaim_miner(&mut self, miner_id: &str) -> Vec<quip_proto::v1::Job> {
+        let mut jobs = self.drain_inflight(miner_id);
+        jobs.extend(self.router.reclaim(miner_id));
+        jobs
+    }
+
+    /// Like [`Self::reclaim_miner`], but for a miner the supervisor gave up
+    /// on: the router forgets it too, so no job is staged onto a dead queue.
+    pub fn retire_miner(&mut self, miner_id: &str) -> Vec<quip_proto::v1::Job> {
+        let mut jobs = self.drain_inflight(miner_id);
+        jobs.extend(self.router.remove_miner(miner_id));
+        jobs
+    }
+
+    /// Take the in-flight jobs `miner_id` owns and drop its session channels.
+    fn drain_inflight(&mut self, miner_id: &str) -> Vec<quip_proto::v1::Job> {
         let owned: Vec<Vec<u8>> = self
             .inflight_owner
             .iter()
@@ -268,7 +283,6 @@ impl CoordinatorState {
                 jobs.push(job);
             }
         }
-        jobs.extend(self.router.reclaim(miner_id));
         let _ = self.sessions.outbound.remove(miner_id);
         let _ = self.sessions.cancel_timings.remove(miner_id);
         jobs
@@ -337,6 +351,29 @@ impl crate::miner::SessionGate for Arc<Mutex<CoordinatorState>> {
         let jobs = st.reclaim_miner(miner_id);
         for job in jobs {
             let _ = st.router.route(job);
+        }
+    }
+    async fn retire(&self, miner_id: &str) {
+        let mut st = self.lock().await;
+        let jobs = st.retire_miner(miner_id);
+        for job in jobs {
+            let job_id = job.job_id.clone();
+            if st.router.route(job).is_some() {
+                continue;
+            }
+            if st.mempool_orders.remove(&job_id).is_some() {
+                tracing::warn!(
+                    miner = %miner_id,
+                    job = %crate::types::hex::hex_encode(&job_id),
+                    "no miner can take a reclaimed mempool order; releasing it for restaging"
+                );
+            } else {
+                tracing::debug!(
+                    miner = %miner_id,
+                    job = %crate::types::hex::hex_encode(&job_id),
+                    "no miner can take a reclaimed job; dropping it"
+                );
+            }
         }
     }
 }

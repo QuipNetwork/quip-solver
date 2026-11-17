@@ -598,6 +598,14 @@ impl Router {
         Vec::new()
     }
 
+    /// Remove a miner the supervisor has given up on, and return its staged
+    /// queue. An unknown id returns an empty list.
+    pub fn remove_miner(&mut self, miner_id: &str) -> Vec<Job> {
+        self.miners
+            .remove(miner_id)
+            .map_or_else(Vec::new, |q| q.staged.into_iter().collect())
+    }
+
     /// Capability envelope for a registered miner, if any.
     #[must_use]
     pub fn caps(&self, miner_id: &str) -> Option<&MinerCaps> {
@@ -988,6 +996,28 @@ mod tests {
         r.reset_round_salts();
         assert_eq!(r.round_salts("lease"), 0);
         assert_eq!(r.round_salts("unknown"), 0);
+    }
+
+    /// Removing a miner drops its entry and hands back its staged queue; the
+    /// next job goes to a remaining miner.
+    #[test]
+    fn remove_miner_drops_the_entry_and_returns_its_queue() {
+        let mut r = Router::new();
+        r.register_miner("cpu-0", caps_ising());
+        r.register_miner("cpu-1", caps_ising());
+        assert_eq!(
+            r.route(make_job(1, JobKind::IsingSample)).as_deref(),
+            Some("cpu-0")
+        );
+        let jobs = r.remove_miner("cpu-0");
+        let ids: Vec<Vec<u8>> = jobs.into_iter().map(|j| j.job_id).collect();
+        assert_eq!(ids, vec![b"g1".to_vec()]);
+        assert_eq!(r.miner_ids(), vec!["cpu-1".to_string()]);
+        assert_eq!(
+            r.route(make_job(2, JobKind::IsingSample)).as_deref(),
+            Some("cpu-1")
+        );
+        assert!(r.remove_miner("cpu-0").is_empty());
     }
 
     fn make_job(generation: u64, kind: JobKind) -> Job {

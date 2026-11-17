@@ -130,7 +130,8 @@ impl RestartTracker {
 
 /// Supervise one miner for the run: (re)spawn per the exit-code policy with
 /// backoff + failure budget, re-queue its in-flight + staged jobs to the router
-/// on a crash, and send an in-band `Shutdown` (then kill after grace) once
+/// on a crash, remove it from the router once it is given up on (`Never` or
+/// `Unhealthy`, or a failed spawn), and send an in-band `Shutdown` (then kill after grace) once
 /// `stop` flips true.
 pub async fn supervise_miner<G: SessionGate>(
     entry: LaunchEntry,
@@ -152,6 +153,7 @@ pub async fn supervise_miner<G: SessionGate>(
             Ok(c) => c,
             Err(e) => {
                 tracing::error!(miner = %entry.miner_id, binary = %entry.binary, error = %e, "miner spawn failed");
+                gate.retire(&entry.miner_id).await;
                 break;
             }
         };
@@ -190,18 +192,29 @@ pub async fn supervise_miner<G: SessionGate>(
             tracing::warn!(miner = %entry.miner_id, code, "miner exited");
         }
 
-        // Self-exit (crash or clean): return this miner's in-flight + staged
-        // jobs to the router. A clean exit (code 0) can still leave in-flight
-        // jobs — the Shutdown drain has a grace timeout — so reclaim regardless
-        // of code, or `inflight` leaks and any mempool order is silently lost.
-        gate.reclaim(&entry.miner_id).await;
-
         #[expect(
             clippy::cast_possible_truncation,
             reason = "elapsed ms since process start fits u64 for supervisor lifetime"
         )]
         let now_ms = start.elapsed().as_millis() as u64;
-        match tracker.on_exit(code, now_ms) {
+        let action = tracker.on_exit(code, now_ms);
+
+        // Self-exit (crash or clean): return this miner's in-flight + staged
+        // jobs to the router. A clean exit (code 0) can still leave in-flight
+        // jobs — the Shutdown drain has a grace timeout — so reclaim regardless
+        // of code, or `inflight` leaks and any mempool order is silently lost.
+        // A miner we will not restart also leaves the router, or work keeps
+        // staging onto a queue nobody drains.
+        match action {
+            RestartAction::Never | RestartAction::Unhealthy => {
+                gate.retire(&entry.miner_id).await;
+            }
+            RestartAction::OnDemand | RestartAction::Backoff(_) => {
+                gate.reclaim(&entry.miner_id).await;
+            }
+        }
+
+        match action {
             RestartAction::OnDemand => {
                 // Guard against a busy respawn loop on an immediate clean exit;
                 // the live loop (quip-agm) refines this to "respawn only when
