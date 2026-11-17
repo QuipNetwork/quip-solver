@@ -401,6 +401,58 @@ mod supervisor {
         assert_eq!(st.router.staged_len("cpu-1"), 2);
     }
 
+    /// A miner whose binary cannot spawn is given up on at once: it leaves the
+    /// router and its in-flight job goes to the miner that remains (QUI-2121).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_failure_retires_the_miner() {
+        use quip_coordinator::config::launch::LaunchEntry;
+        use quip_coordinator::coordinator::state::CoordinatorState;
+        use quip_coordinator::miner::supervisor::{supervise_miner, BackoffPolicy};
+        use quip_proto::v1::Configure;
+        use std::sync::Arc;
+        use std::time::Duration;
+        use tokio::sync::{watch, Mutex};
+
+        let state = Arc::new(Mutex::new(CoordinatorState::new()));
+        {
+            let mut st = state.lock().await;
+            st.router.register_miner("cpu-0", tiny_caps());
+            st.router.register_miner("cpu-1", tiny_caps());
+            st.dispatch_inflight("cpu-0", tiny_job("pow-1", 1, true));
+        }
+        let entry = LaunchEntry {
+            miner_id: "cpu-0".into(),
+            binary: "/nonexistent/quip-miner-binary".into(),
+            backend: "cpu".into(),
+            device: None,
+            configure: Configure::default(),
+        };
+        let policy = BackoffPolicy {
+            base_ms: 10,
+            max_ms: 10,
+            budget: 0,
+            window_ms: 60_000,
+        };
+        let (_stop_tx, stop_rx) = watch::channel(false);
+        let handle = tokio::spawn(supervise_miner(
+            entry,
+            "unix:///nonexistent.sock".into(),
+            Arc::clone(&state),
+            policy,
+            200,
+            quip_coordinator::types::log::LogLevel::Info,
+            stop_rx,
+        ));
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("supervisor returns after the spawn fails")
+            .expect("supervisor task");
+        let st = state.lock().await;
+        assert_eq!(st.router.miner_ids(), vec!["cpu-1".to_string()]);
+        assert_eq!(st.router.staged_len("cpu-1"), 1);
+    }
+
     /// With no miner left to take a reclaimed mempool order, its id leaves
     /// `mempool_orders` so the feeder stages the order again.
     #[cfg(unix)]
