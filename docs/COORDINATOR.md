@@ -535,6 +535,20 @@ does not clear inside that window is not held. The stash summary in
 `attempts.json` reports `decay_algorithm` and `target_proof_blocks` so an
 operator can confirm which rule and target a round ran under.
 
+The pallet checks a proof against the threshold of the block that includes
+it. A proof sent while block N is the head lands in block N + 1 at the
+earliest. `WinStash::win_time_check` therefore replays the chain's gates
+against the threshold of the block after the head
+(`WIN_TIME_LEAD_BLOCKS` = 1), not against the live target of the head. A
+held candidate goes out one block before its viability block and lands in
+the first block that admits it. `min_solutions` and `min_diversity_milli`
+do not decay; the solution count and the diversity are recomputed over the
+rows that the projected threshold admits. The projection applies only when
+the decay model reproduces the live threshold at the head exactly. When the
+two disagree, the feeder uses the live threshold, so a wrong model cannot
+spend submit attempts on early proofs. Set `WIN_TIME_LEAD_BLOCKS` to 0 to
+gate on the head's own threshold.
+
 ## Routing and credits
 
 `Router` (`coordinator/router/`) indexes miner capabilities and holds a staged queue per miner.

@@ -8,6 +8,7 @@
 //! threshold yet but will after enough decay, so they aren't discarded.
 
 use crate::coordinator::round::decay::{DecayAlgorithm, DecayModel};
+use crate::coordinator::scoring::validate::{check_proof_gates, ProofGates, QualityGates};
 use crate::observe::attempt::{CandidateSummary, StashSummary};
 use crate::types::proof::SpinRow;
 
@@ -16,6 +17,26 @@ use std::fmt::Write as _;
 /// How far ahead of the last proof the stash projects: 256 epochs of 100
 /// blocks. A candidate that does not clear inside this window is not held.
 pub const DECAY_HORIZON_BLOCKS: u64 = 25_600;
+
+/// Blocks between the chain head a win-time proof is sent at and the first
+/// block that can include it. The pallet checks a proof against the threshold
+/// of the including block, so the win-time path gates a held candidate on the
+/// projected threshold of `head + WIN_TIME_LEAD_BLOCKS` and sends it one block
+/// before its viability block. Zero restores the old behaviour: gate on the
+/// head's own threshold, which lands the proof one block after viability.
+pub const WIN_TIME_LEAD_BLOCKS: u64 = 1;
+
+/// The win-time decision for one feeder poll: the candidate that is due and the
+/// replay of the chain's gates for the block a proof sent now would land in.
+#[derive(Clone, Debug)]
+pub struct WinTimeCheck {
+    /// The best due, improving, unsubmitted candidate.
+    pub candidate: Candidate,
+    /// Gates of the including block: the live gates with the projected ceiling.
+    pub gates: QualityGates,
+    /// The candidate's solutions replayed against `gates`.
+    pub check: ProofGates,
+}
 
 /// A stashed candidate: a validated solution set awaiting its viability block.
 #[derive(Clone, Debug)]
@@ -168,6 +189,63 @@ impl WinStash {
     ) -> Option<&Candidate> {
         self.due_at(current_block)
             .filter(|c| current_best.is_none_or(|b| c.best_energy_milli < b))
+    }
+
+    /// The `max_energy_milli` of block `head_block + lead`, from the model,
+    /// when the model reproduces `live_ceiling` (the chain's value at
+    /// `head_block`) exactly. A model that disagrees with the chain at the head
+    /// (a council difficulty change mid-round, a rule the coordinator does not
+    /// know) is not trusted one block ahead: the live ceiling is returned, as
+    /// it is without a model or with `lead` zero. An early proof would cost a
+    /// fee and one of the submit attempts, and a wrong model could repeat that
+    /// until the attempts run out.
+    #[must_use]
+    pub fn projected_ceiling(&self, head_block: u64, live_ceiling: i64, lead: u64) -> i64 {
+        let Some(model) = self.model.as_ref() else {
+            return live_ceiling;
+        };
+        if lead == 0 {
+            return live_ceiling;
+        }
+        let at = |block: u64| model.threshold_at(block.saturating_sub(self.last_proof_block));
+        if at(head_block) != live_ceiling {
+            return live_ceiling;
+        }
+        at(head_block.saturating_add(lead)).max(live_ceiling)
+    }
+
+    /// The win-time decision at chain head `head_block`, whose live gates are
+    /// `live` (`QuantumPowApi_difficulty_for` at the head). A proof sent now is
+    /// included at `head_block + lead` at the earliest, where the threshold is
+    /// at least the projected one, so the best due improving candidate (due by
+    /// that block or by `estimated_block`, whichever is later) is replayed
+    /// against the live gates with the projected ceiling. `min_solutions` and
+    /// `min_diversity_milli` do not decay; `n_valid` and diversity are
+    /// recomputed over the rows the projected ceiling admits. `None` when no
+    /// candidate is due.
+    #[must_use]
+    pub fn win_time_check(
+        &self,
+        head_block: u64,
+        estimated_block: u64,
+        current_best: Option<i64>,
+        live: &QualityGates,
+        lead: u64,
+    ) -> Option<WinTimeCheck> {
+        let landing = head_block.saturating_add(lead);
+        let candidate = self
+            .due_improving(estimated_block.max(landing), current_best)?
+            .clone();
+        let gates = QualityGates {
+            min_energy_milli: self.projected_ceiling(head_block, live.min_energy_milli, lead),
+            ..*live
+        };
+        let check = check_proof_gates(&candidate.solutions, &gates);
+        Some(WinTimeCheck {
+            candidate,
+            gates,
+            check,
+        })
     }
 
     /// Mark a candidate submitted so the driver won't re-submit it.
@@ -327,6 +405,139 @@ mod tests {
         assert_eq!(s.due_at(135).map(job_byte), Some(1));
         s.mark_submitted(&[1]);
         assert_eq!(s.due_at(135).map(job_byte), Some(2));
+    }
+
+    /// Gated rule, last proof 1000, epoch 10, target 100: flat through block
+    /// 1100, then easing every block.
+    fn gated_stash() -> WinStash {
+        let mut m = model();
+        m.algorithm = DecayAlgorithm::Gated;
+        m.target_proof_blocks = 100;
+        stash_with(Some(m), 1_000, 4)
+    }
+
+    /// The chain's live ceiling at `block`: `QuantumPowApi_difficulty_for` at
+    /// that head, which the pallet evaluates at the head's own number.
+    fn chain_ceiling(s: &WinStash, block: u64) -> i64 {
+        s.model
+            .as_ref()
+            .map_or(i64::MAX, |m| m.threshold_at(block.saturating_sub(1_000)))
+    }
+
+    fn live_gates(s: &WinStash, head: u64, min_solutions: u32) -> QualityGates {
+        QualityGates {
+            min_energy_milli: chain_ceiling(s, head),
+            min_diversity_milli: 0,
+            min_solutions,
+        }
+    }
+
+    fn row(energy_milli: i64, spins: Vec<i8>) -> SpinRow {
+        SpinRow {
+            spins,
+            energy_milli,
+        }
+    }
+
+    /// The feeder decision at heads V-2, V-1 and V for a held candidate whose
+    /// viability block is V: with the lead it goes out at V-1 (included at V,
+    /// the first block whose threshold admits it); without, at V (included at
+    /// V+1, one block late).
+    #[test]
+    fn win_time_check_sends_one_block_before_viability() {
+        let mut s = gated_stash();
+        // An energy that first clears 150 blocks after the last proof.
+        let energy = chain_ceiling(&s, 1_150) - 1;
+        let v = s.viability_block(energy).unwrap_or(0);
+        assert!(v > 1_100, "viability {v} past the gated target");
+        assert!(chain_ceiling(&s, v - 1) <= energy && energy < chain_ceiling(&s, v));
+        let mut c = cand(1, energy);
+        c.solutions = vec![row(energy, vec![1, -1, 1, -1])];
+        assert!(s.insert(c));
+
+        let decide = |s: &WinStash, head: u64, lead: u64| {
+            s.win_time_check(head, head, None, &live_gates(s, head, 1), lead)
+                .filter(|w| w.check.accepted)
+                .map(|w| (job_byte(&w.candidate), w.gates.min_energy_milli))
+        };
+        // With the lead: hold at V-2, send at V-1 against the ceiling of V.
+        assert_eq!(decide(&s, v - 2, WIN_TIME_LEAD_BLOCKS), None);
+        assert_eq!(
+            decide(&s, v - 1, WIN_TIME_LEAD_BLOCKS),
+            Some((1, chain_ceiling(&s, v)))
+        );
+        assert_eq!(decide(&s, v, WIN_TIME_LEAD_BLOCKS).map(|d| d.0), Some(1));
+        // The live gate alone at V-1 refuses it, so moving only the due test
+        // one block earlier would change nothing.
+        let at_head = s
+            .win_time_check(v - 1, v - 1, None, &live_gates(&s, v - 1, 1), 0)
+            .map(|w| w.check.accepted);
+        assert_eq!(at_head, None, "lead 0: not due at V-1");
+        let live_only = check_proof_gates(
+            &[row(energy, vec![1, -1, 1, -1])],
+            &live_gates(&s, v - 1, 1),
+        );
+        assert!(!live_only.accepted);
+        // Lead zero is the old behaviour: hold at V-1, send at V.
+        assert_eq!(decide(&s, v - 1, 0), None);
+        assert_eq!(decide(&s, v, 0), Some((1, chain_ceiling(&s, v))));
+
+        // `min_solutions` does not decay: one admitted row never clears two.
+        let two = s
+            .win_time_check(
+                v - 1,
+                v - 1,
+                None,
+                &live_gates(&s, v - 1, 2),
+                WIN_TIME_LEAD_BLOCKS,
+            )
+            .map(|w| (w.check.n_valid, w.check.accepted));
+        assert_eq!(two, Some((1, false)));
+
+        // A current best at or below the candidate's energy suppresses it.
+        let beaten = s.win_time_check(
+            v - 1,
+            v - 1,
+            Some(energy),
+            &live_gates(&s, v - 1, 1),
+            WIN_TIME_LEAD_BLOCKS,
+        );
+        assert!(beaten.is_none());
+        // Submitted candidates are not offered again.
+        s.mark_submitted(&[1]);
+        assert!(s
+            .win_time_check(
+                v - 1,
+                v - 1,
+                None,
+                &live_gates(&s, v - 1, 1),
+                WIN_TIME_LEAD_BLOCKS
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn projected_ceiling_trusts_the_model_only_where_it_matches_the_chain() {
+        let s = gated_stash();
+        // Flat inside the gated target: no easing over the lead.
+        assert_eq!(s.projected_ceiling(1_050, -50_000, 1), -50_000);
+        // Past the target, with the model matching the live value: the
+        // model's ceiling of the next block.
+        let live = chain_ceiling(&s, 1_150);
+        assert!(chain_ceiling(&s, 1_151) > live);
+        assert_eq!(
+            s.projected_ceiling(1_150, live, 1),
+            chain_ceiling(&s, 1_151)
+        );
+        assert_eq!(s.projected_ceiling(1_150, live, 0), live);
+        // A live value the model does not reproduce: no projection.
+        assert_eq!(s.projected_ceiling(1_150, live - 1, 1), live - 1);
+        assert_eq!(s.projected_ceiling(1_150, -40_000, 1), -40_000);
+        // No model: the live value.
+        assert_eq!(
+            stash_with(None, 1_000, 4).projected_ceiling(1_150, -40_000, 1),
+            -40_000
+        );
     }
 
     #[test]
