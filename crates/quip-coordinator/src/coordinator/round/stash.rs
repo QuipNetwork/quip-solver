@@ -41,6 +41,8 @@ pub struct Candidate {
     pub order_id: Vec<u8>,
     /// Device access time reported by the miner, in microseconds.
     pub device_access_time_us: u64,
+    /// Topology hash the job was mined on; empty for a mempool order.
+    pub topology_hash: Vec<u8>,
     /// Whether this candidate has already been submitted.
     pub submitted: bool,
 }
@@ -278,6 +280,7 @@ mod tests {
             is_pow: true,
             order_id: vec![],
             device_access_time_us: 0,
+            topology_hash: vec![9; 32],
             submitted: false,
         }
     }

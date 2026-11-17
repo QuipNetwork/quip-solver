@@ -999,6 +999,7 @@ pub async fn feeder_loop<E: WorkSource + ResultSink + ?Sized>(
                     generation: cand.generation,
                     salt: cand.salt.map(|s| s.to_vec()).unwrap_or_default(),
                     device_access_time_us: cand.device_access_time_us,
+                    topology_hash: cand.topology_hash.clone(),
                 };
                 let job_hex = crate::types::hex::hex_encode(&cand.job_id);
                 if let Some(log) = &round_log {

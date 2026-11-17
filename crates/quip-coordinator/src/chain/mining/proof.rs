@@ -11,6 +11,27 @@ use crate::types::hex::hex_decode;
 use crate::types::proof::{Proof, SubmitAction, SubmitReceipt};
 use quantum_validation::AllowedValueSpec;
 
+/// The receipt that drops a proof mined on a topology other than `current`,
+/// or `None` when the proof matches it. The chain refuses such a proof, so
+/// submitting it would only start a retry loop.
+fn stale_receipt(proof: &Proof, current: &[u8]) -> Option<SubmitReceipt> {
+    if proof.topology_hash == current {
+        return None;
+    }
+    tracing::warn!(
+        job = %crate::types::hex::hex_encode(&proof.job_id),
+        mined_on = %crate::types::hex::hex_encode(&proof.topology_hash),
+        current = %crate::types::hex::hex_encode(current),
+        "proof was mined on a topology the chain no longer uses; dropping it"
+    );
+    Some(SubmitReceipt {
+        action: SubmitAction::StopRoundStale,
+        extrinsic_hash: None,
+        block_hash: None,
+        block_number: None,
+    })
+}
+
 impl RealChainClient {
     /// Submit a proof; see `ChainClient::submit_proof`.
     pub(in crate::chain) async fn send_proof(
@@ -28,6 +49,9 @@ impl RealChainClient {
                     "submit_proof requires a prior fetch_mining_snapshot".into(),
                 )
             })?;
+        if let Some(stale) = stale_receipt(proof, &snap.topology_hash) {
+            return Ok(stale);
+        }
         let spin_spec = self
             .last_spin_spec
             .lock()
@@ -177,4 +201,103 @@ pub(in crate::chain) fn extract_salt(proof: &Proof) -> Option<[u8; 32]> {
     let mut s = [0u8; 32];
     s.copy_from_slice(&proof.salt);
     Some(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::chain::client::transport::{BoxStream, RpcTransport};
+    use crate::chain::{ChainError, RealChainClient};
+    use crate::types::miner::MinerKind;
+    use crate::types::proof::{Proof, SubmitAction};
+    use serde_json::Value as JsonValue;
+
+    /// Fails the test on any RPC: a stale proof must never reach the wire.
+    struct NoRpc;
+
+    #[async_trait::async_trait]
+    impl RpcTransport for NoRpc {
+        async fn request(
+            &self,
+            _url: &str,
+            _method: &str,
+            _params: JsonValue,
+        ) -> Result<JsonValue, ChainError> {
+            panic!("no RPC expected");
+        }
+
+        async fn subscribe(
+            &self,
+            _url: &str,
+            _sub: &str,
+            _params: JsonValue,
+            _unsub: &str,
+        ) -> Result<BoxStream<'static, Result<JsonValue, ChainError>>, ChainError> {
+            panic!("no RPC expected");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_proof_mined_on_another_topology_is_dropped_as_stale() {
+        let client = RealChainClient::with_transport(
+            vec!["ws://scripted".to_string()],
+            "//Alice".to_string(),
+            MinerKind::Cpu,
+            std::sync::Arc::new(NoRpc),
+        );
+        let snap = crate::types::snapshot::MiningSnapshot {
+            head_hash: [0; 32],
+            last_proof_block_hash: [0; 32],
+            topology_hash: vec![1; 32],
+            nodes: vec![0, 1],
+            edges: vec![(0, 1)],
+            allowed_h_milli: vec![0],
+            allowed_j_milli: vec![-1000, 1000],
+            allowed_spin_milli: vec![-1000, 1000],
+            min_solutions: 1,
+            max_energy_milli: 0,
+            min_diversity_milli: 0,
+            block_number: 1,
+            spec_version: 100,
+            target_proof_blocks: crate::types::snapshot::TARGET_PROOF_BLOCKS,
+            family: None,
+        };
+        *client.last_snapshot.lock().unwrap() = Some(snap);
+        let proof = Proof {
+            job_id: vec![1],
+            best_energy_milli: -1,
+            diversity_milli: 0,
+            n_valid: 1,
+            solutions: vec![],
+            is_pow: true,
+            order_id: vec![],
+            generation: 1,
+            salt: vec![0; 32],
+            device_access_time_us: 0,
+            topology_hash: vec![2; 32],
+        };
+        let receipt = client
+            .send_proof(&proof)
+            .await
+            .expect("dropped, not failed");
+        assert_eq!(receipt.action, SubmitAction::StopRoundStale);
+        assert_eq!(receipt.extrinsic_hash, None);
+    }
+
+    #[test]
+    fn a_proof_on_the_current_topology_is_not_stale() {
+        let proof = Proof {
+            job_id: vec![1],
+            best_energy_milli: -1,
+            diversity_milli: 0,
+            n_valid: 1,
+            solutions: vec![],
+            is_pow: true,
+            order_id: vec![],
+            generation: 1,
+            salt: vec![0; 32],
+            device_access_time_us: 0,
+            topology_hash: vec![1; 32],
+        };
+        assert!(super::stale_receipt(&proof, &[1; 32]).is_none());
+    }
 }
