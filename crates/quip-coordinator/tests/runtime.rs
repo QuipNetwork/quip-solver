@@ -1269,6 +1269,83 @@ async fn feeder_holds_a_stashed_candidate_until_the_live_difficulty_admits_it() 
     f.stop().await;
 }
 
+/// The pallet checks a proof against the threshold of the block that includes
+/// it, one block after the head it was sent at. With the lead, the feeder
+/// sends a held candidate at the head whose *next* block admits it, even though
+/// the head's own (live) ceiling still refuses it; one block earlier it holds.
+#[tokio::test]
+async fn feeder_sends_a_held_candidate_one_block_before_its_viability_block() {
+    use quip_coordinator::coordinator::round::decay::{DecayAlgorithm, DecayModel, EnergyCurve};
+
+    let gated = DecayModel {
+        base_max_energy_milli: -50_000,
+        curve: Some(EnergyCurve {
+            min_milli: -100_000,
+            knee_milli: -50_000,
+            max_milli: 0,
+        }),
+        epoch_length: 10,
+        algorithm: DecayAlgorithm::Gated,
+        target_proof_blocks: 100,
+    };
+    // The first elapsed count `k + 1` whose ceiling admits the worst row
+    // (-1000), so all three rows (and `min_solutions` 3) clear only from there.
+    let k = (0..25_600_u64)
+        .find(|&e| gated.threshold_at(e) <= -1000 && gated.threshold_at(e + 1) > -1000)
+        .expect("the curve eases past -1000");
+    let last_proof = 1_000_000_u64;
+    let viability = last_proof + k + 1;
+    let at_head = |head: u64| {
+        let mut snap = gated_snapshot(gated.threshold_at(head - last_proof));
+        snap.block_number = head;
+        snap.spec_version = 119;
+        snap.target_proof_blocks = 100;
+        snap
+    };
+
+    let f = Feeder::spawn(
+        FakeChain::new(at_head(viability - 2), None),
+        feeder_params(2, 40),
+        vec![],
+    )
+    .await;
+    assert!(
+        wait_until(40, 40, async || f.state.lock().await.target.is_some()).await,
+        "feeder never reseeded the round"
+    );
+    {
+        let mut st = f.state.lock().await;
+        let generation = st.generation;
+        st.stash.reset(generation, Some(gated.clone()), last_proof);
+        assert!(
+            st.stash.insert(due_candidate()),
+            "candidate must be stashed"
+        );
+    }
+
+    // Head V-2: the next block (V-1) still refuses the worst row.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(f.chain.submitted_count(), 0, "held at V-2");
+
+    // Head V-1: the live ceiling refuses the worst row, the next block admits it.
+    let head = at_head(viability - 1);
+    assert!(
+        head.max_energy_milli <= -1000,
+        "the live gate alone would hold it"
+    );
+    f.chain.set_snapshot(Some(head));
+    assert!(
+        wait_until(40, 40, async || f.chain.submitted_count() > 0).await,
+        "the candidate must go out at V-1 to be included at V"
+    );
+    let sent = f.chain.take_submitted();
+    assert_eq!(sent.len(), 1);
+    let proof = sent.first().expect("one recorded proof");
+    assert_eq!(proof.job_id, vec![0xaa]);
+    assert_eq!(proof.solutions.len(), 3);
+    f.stop().await;
+}
+
 /// A runtime upgrade takes effect mid-round. The feeder switches the stash
 /// projection on the poll that reports the new spec version (continuous at
 /// 118, gated at 119), keeps the stashed candidate, and reprojects it. At 120
