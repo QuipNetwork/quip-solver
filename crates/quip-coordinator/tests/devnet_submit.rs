@@ -595,6 +595,7 @@ async fn devnet_submit_proof_end_to_end() {
         generation: 0,
         salt: salt.to_vec(),
         device_access_time_us: 0,
+        topology_hash: snap.topology_hash.clone(),
     };
     let action = client.submit_proof(&proof).await;
     println!("  RealChainClient::submit_proof -> {action:?}");

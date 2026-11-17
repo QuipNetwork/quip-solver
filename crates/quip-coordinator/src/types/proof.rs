@@ -52,6 +52,9 @@ pub struct Proof {
     /// `SamplerMeta.device_access_time_us`. Plumbed into the on-chain
     /// `QuantumProof`; `0` = unreported.
     pub device_access_time_us: u64,
+    /// Topology hash the job was mined on; empty for a mempool order, whose
+    /// graph is inline.
+    pub topology_hash: Vec<u8>,
 }
 
 /// Action the fire-loop should take after a submit attempt.

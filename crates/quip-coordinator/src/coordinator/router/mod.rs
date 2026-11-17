@@ -845,19 +845,22 @@ fn native_compatible(caps: &MinerCaps, job: &Job, topology: Option<&RoutingTopol
     }
 }
 
+/// The topology hash a job names, or `None` when its graph is inline.
+pub(crate) fn job_topology_hash(job: &Job) -> Option<&[u8]> {
+    if job.kind == JobKind::IsingGenerate as i32 {
+        return Some(job.generator.as_ref()?.topology_hash.as_slice());
+    }
+    match job.ising.as_ref()?.graph.as_ref()? {
+        ising_problem::Graph::TopologyHash(hash) => Some(hash.as_slice()),
+        ising_problem::Graph::Edges(_) => None,
+    }
+}
+
 fn job_topology<'a>(
     job: &Job,
     topology: Option<&'a RoutingTopology>,
 ) -> Option<&'a RoutingTopology> {
-    let hash = if job.kind == JobKind::IsingGenerate as i32 {
-        job.generator.as_ref()?.topology_hash.as_slice()
-    } else {
-        let ising = job.ising.as_ref()?;
-        match ising.graph.as_ref()? {
-            ising_problem::Graph::TopologyHash(hash) => hash.as_slice(),
-            ising_problem::Graph::Edges(_) => return None,
-        }
-    };
+    let hash = job_topology_hash(job)?;
     topology.filter(|t| t.hash.as_slice() == hash)
 }
 
@@ -956,6 +959,38 @@ mod tests {
             4,
             1,
         )
+    }
+
+    #[test]
+    fn job_topology_hash_reads_generate_and_sample_jobs() {
+        assert_eq!(
+            job_topology_hash(&lease_job(1)),
+            Some([9u8; 32].as_slice()),
+            "a generate job names its topology in the generator"
+        );
+        let sample = Job {
+            kind: JobKind::IsingSample as i32,
+            ising: Some(crate::types::problem::milli_problem(
+                Some(ising_problem::Graph::TopologyHash(vec![5; 32])),
+                &[0; 2],
+                &[0; 1],
+            )),
+            ..Job::default()
+        };
+        assert_eq!(job_topology_hash(&sample), Some([5u8; 32].as_slice()));
+        let inline = Job {
+            kind: JobKind::IsingSample as i32,
+            ising: Some(crate::types::problem::milli_problem(
+                Some(ising_problem::Graph::Edges(quip_proto::v1::EdgeList {
+                    u: vec![0],
+                    v: vec![1],
+                })),
+                &[0; 2],
+                &[0; 1],
+            )),
+            ..Job::default()
+        };
+        assert_eq!(job_topology_hash(&inline), None);
     }
 
     /// A lease needs both the generate kind and the generator: neither a

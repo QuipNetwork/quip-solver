@@ -1,6 +1,7 @@
 //! Settle validated results: submit a winning proof, stash a near miss,
 //! answer a mempool order, and record every attempt.
 
+use crate::coordinator::router::job_topology_hash;
 use crate::coordinator::scoring::validate::{beats_current, validate_result, ResolvedTopo};
 use crate::coordinator::state::CoordinatorState;
 use crate::coordinator::ResultSink;
@@ -109,6 +110,9 @@ pub(crate) async fn settle_pow_result<R: ResultSink + ?Sized>(
             // RealChainClient submit requires 32 bytes.
             salt: salt.map_or_else(Vec::new, |s| s.to_vec()),
             device_access_time_us,
+            topology_hash: job_topology_hash(job)
+                .map(<[u8]>::to_vec)
+                .unwrap_or_default(),
         };
         let job_hex = crate::types::hex::hex_encode(job_id);
         if let Some(log) = &round_log {
@@ -206,6 +210,9 @@ pub(crate) async fn settle_pow_result<R: ResultSink + ?Sized>(
                     is_pow,
                     order_id,
                     device_access_time_us: device_us,
+                    topology_hash: job_topology_hash(job)
+                        .map(<[u8]>::to_vec)
+                        .unwrap_or_default(),
                     submitted: false,
                 });
             let decision = if stash_changed {
@@ -471,6 +478,7 @@ pub(crate) async fn submit_mempool_result<R: ResultSink + ?Sized>(
         generation: 0,
         salt: Vec::new(),
         device_access_time_us,
+        topology_hash: Vec::new(),
     };
     match sink.submit_solution(&proof).await.map(|r| r.action) {
         Ok(SubmitAction::Success) => tracing::info!(
