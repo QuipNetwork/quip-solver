@@ -767,9 +767,8 @@ stays registered while it restarts. If the policy does not respawn the miner
 from the router. Its jobs go to the remaining miners. A mempool order that no
 miner can take leaves `mempool_orders`, so a later block stages it again.
 
-When the runtime
-stops, each live miner gets an in-band `Shutdown` first, then a hard kill after
-the grace period (`grace_ms`).
+When the runtime stops, each live miner gets an in-band `Shutdown` first, then
+a hard kill after the grace period (`grace_ms`).
 
 ## Config to launch plan
 
