@@ -79,6 +79,9 @@ pub(crate) async fn settle_pow_result<R: ResultSink + ?Sized>(
         round_log,
         device_access_time_us,
     } = outcome;
+    let topology_hash = job_topology_hash(job)
+        .map(<[u8]>::to_vec)
+        .unwrap_or_default();
     let mut submitted = false;
     // Set when an accepted proof fails to submit for a
     // transient reason: keep it for the win-time retry loop
@@ -110,9 +113,7 @@ pub(crate) async fn settle_pow_result<R: ResultSink + ?Sized>(
             // RealChainClient submit requires 32 bytes.
             salt: salt.map_or_else(Vec::new, |s| s.to_vec()),
             device_access_time_us,
-            topology_hash: job_topology_hash(job)
-                .map(<[u8]>::to_vec)
-                .unwrap_or_default(),
+            topology_hash: topology_hash.clone(),
         };
         let job_hex = crate::types::hex::hex_encode(job_id);
         if let Some(log) = &round_log {
@@ -210,9 +211,7 @@ pub(crate) async fn settle_pow_result<R: ResultSink + ?Sized>(
                     is_pow,
                     order_id,
                     device_access_time_us: device_us,
-                    topology_hash: job_topology_hash(job)
-                        .map(<[u8]>::to_vec)
-                        .unwrap_or_default(),
+                    topology_hash,
                     submitted: false,
                 });
             let decision = if stash_changed {

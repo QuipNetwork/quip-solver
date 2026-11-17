@@ -282,4 +282,22 @@ mod tests {
         assert_eq!(receipt.action, SubmitAction::StopRoundStale);
         assert_eq!(receipt.extrinsic_hash, None);
     }
+
+    #[test]
+    fn a_proof_on_the_current_topology_is_not_stale() {
+        let proof = Proof {
+            job_id: vec![1],
+            best_energy_milli: -1,
+            diversity_milli: 0,
+            n_valid: 1,
+            solutions: vec![],
+            is_pow: true,
+            order_id: vec![],
+            generation: 1,
+            salt: vec![0; 32],
+            device_access_time_us: 0,
+            topology_hash: vec![1; 32],
+        };
+        assert!(super::stale_receipt(&proof, &[1; 32]).is_none());
+    }
 }
