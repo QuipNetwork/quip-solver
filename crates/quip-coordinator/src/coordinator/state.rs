@@ -371,7 +371,7 @@ impl crate::miner::SessionGate for Arc<Mutex<CoordinatorState>> {
                 tracing::debug!(
                     miner = %miner_id,
                     job = %crate::types::hex::hex_encode(&job_id),
-                    "no miner can take a reclaimed job; dropping it"
+                    "no miner can take a reclaimed job; parked as unroutable"
                 );
             }
         }

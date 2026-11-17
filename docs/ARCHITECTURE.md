@@ -136,10 +136,11 @@ the policy on top of it.
 
 `supervise_miner` (`miner/supervisor.rs`) starts each miner: it spawns the
 binary (`miner/process.rs`) with a fresh per-spawn session token and applies
-the exit-code restart policy (`restart_policy`, `miner/supervisor.rs`). Clean exits respawn on demand,
-operator and environment errors (64, 69, 77) never respawn, and crashes back off
-by `2^consecutive` within a failure budget. A clap usage error (2) also never
-respawns: the argv does not match the binary, and no retry can fix that.
+the exit-code restart policy (`restart_policy`, `miner/supervisor.rs`). Clean
+exits respawn on demand, operator and environment errors (64, 69, 77) never
+respawn, and crashes back off by `2^consecutive` within a failure budget. A clap
+usage error (2) also never respawns: the argv does not match the binary, and no
+retry can fix that.
 When a miner crashes, `supervise_miner` re-queues its jobs and keeps it
 registered with the router. When it gives up on a miner (`Never`, `Unhealthy`,
 or a failed spawn), it removes the miner from the router, and the jobs go to

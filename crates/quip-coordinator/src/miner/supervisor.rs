@@ -206,16 +206,8 @@ pub async fn supervise_miner<G: SessionGate>(
         // A miner we will not restart also leaves the router, or work keeps
         // staging onto a queue nobody drains.
         match action {
-            RestartAction::Never | RestartAction::Unhealthy => {
-                gate.retire(&entry.miner_id).await;
-            }
-            RestartAction::OnDemand | RestartAction::Backoff(_) => {
-                gate.reclaim(&entry.miner_id).await;
-            }
-        }
-
-        match action {
             RestartAction::OnDemand => {
+                gate.reclaim(&entry.miner_id).await;
                 // Guard against a busy respawn loop on an immediate clean exit;
                 // the live loop (quip-agm) refines this to "respawn only when
                 // jobs exist". Honour stop during the wait.
@@ -225,6 +217,7 @@ pub async fn supervise_miner<G: SessionGate>(
                 }
             }
             RestartAction::Backoff(delay) => {
+                gate.reclaim(&entry.miner_id).await;
                 tracing::info!(miner = %entry.miner_id, delay_ms = delay, "restarting miner after backoff");
                 tokio::select! {
                     () = tokio::time::sleep(Duration::from_millis(delay)) => {}
@@ -232,6 +225,7 @@ pub async fn supervise_miner<G: SessionGate>(
                 }
             }
             RestartAction::Never | RestartAction::Unhealthy => {
+                gate.retire(&entry.miner_id).await;
                 tracing::warn!(miner = %entry.miner_id, code, "miner not restarting");
                 break;
             }
