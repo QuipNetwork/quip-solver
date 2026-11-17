@@ -55,7 +55,8 @@ pub trait SessionGate: Send + Sync {
     async fn reclaim(&self, miner_id: &str);
     /// The supervisor gave up on `miner_id`: remove it from the router and
     /// route its jobs to the miners that remain. A job nobody can take is
-    /// dropped, and a mempool order among them becomes stageable again.
+    /// parked as unroutable, and a mempool order among them is also released
+    /// from `mempool_orders` so it becomes stageable again.
     async fn retire(&self, miner_id: &str);
 }
 
