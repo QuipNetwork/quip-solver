@@ -8,6 +8,7 @@
 //! threshold yet but will after enough decay, so they aren't discarded.
 
 use crate::coordinator::round::decay::{DecayAlgorithm, DecayModel};
+use crate::coordinator::scoring::validate::{check_proof_gates, QualityGates};
 use crate::observe::attempt::{CandidateSummary, StashSummary};
 use crate::types::proof::SpinRow;
 
@@ -143,31 +144,44 @@ impl WinStash {
         self.candidates.iter().any(|c| c.job_id == job_id)
     }
 
-    /// The best (lowest-energy) unsubmitted candidate whose viability block has
-    /// arrived at `current_block`, if any. Candidates are best-first, so this
-    /// returns the strongest due one.
-    #[must_use]
-    pub fn due_at(&self, current_block: u64) -> Option<&Candidate> {
-        self.candidates.iter().find(|c| {
-            !c.submitted
-                && self
-                    .viability_block(c.best_energy_milli)
-                    .is_some_and(|b| b <= current_block)
-        })
-    }
-
-    /// The candidate to submit now: the best due (viability block arrived,
-    /// unsubmitted) candidate that also strictly improves on `current_best`
-    /// (or when there is none). Mirrors [`crate::coordinator::scoring::validate::beats_current`], so
+    /// The candidate to submit now: the best unsubmitted candidate whose
+    /// viability block has arrived at `current_block`, that strictly improves
+    /// on `current_best` (or when there is none), and that clears `gates`.
+    /// Mirrors [`crate::coordinator::scoring::validate::beats_current`], so
     /// the win-time path never regresses what the session path already sent.
+    /// The gates are the live difficulty: a due candidate that fails them stays
+    /// stashed and the next one is tried.
     #[must_use]
-    pub fn due_improving(
+    pub fn submittable(
         &self,
         current_block: u64,
         current_best: Option<i64>,
+        gates: &QualityGates,
     ) -> Option<&Candidate> {
-        self.due_at(current_block)
-            .filter(|c| current_best.is_none_or(|b| c.best_energy_milli < b))
+        self.candidates
+            .iter()
+            .filter(|c| {
+                !c.submitted
+                    && self
+                        .viability_block(c.best_energy_milli)
+                        .is_some_and(|b| b <= current_block)
+                    && current_best.is_none_or(|b| c.best_energy_milli < b)
+            })
+            .find(|c| {
+                let check = check_proof_gates(&c.solutions, gates);
+                if !check.accepted {
+                    tracing::debug!(
+                        job = %crate::types::hex::hex_encode(&c.job_id),
+                        n_valid = check.n_valid,
+                        diversity_milli = check.diversity_milli,
+                        min_solutions = gates.min_solutions,
+                        min_diversity_milli = gates.min_diversity_milli,
+                        max_energy = %crate::observe::logging::energy_units(gates.min_energy_milli),
+                        "win-time candidate does not clear the live difficulty; leaving stashed"
+                    );
+                }
+                check.accepted
+            })
     }
 
     /// Mark a candidate submitted so the driver won't re-submit it.
@@ -237,6 +251,21 @@ mod tests {
         s
     }
 
+    fn row(energy: i64) -> SpinRow {
+        SpinRow {
+            energy_milli: energy,
+            spins: vec![1, -1],
+        }
+    }
+
+    fn all_pass() -> QualityGates {
+        QualityGates {
+            min_energy_milli: 0,
+            min_diversity_milli: 0,
+            min_solutions: 0,
+        }
+    }
+
     fn cand(job_id: u8, energy: i64) -> Candidate {
         Candidate {
             job_id: vec![job_id],
@@ -245,7 +274,7 @@ mod tests {
             best_energy_milli: energy,
             diversity_milli: 200,
             n_valid: 5,
-            solutions: vec![],
+            solutions: vec![row(energy)],
             is_pow: true,
             order_id: vec![],
             device_access_time_us: 0,
@@ -312,21 +341,49 @@ mod tests {
         let _ = s.insert(cand(1, -49_000)); // viable at block 110
         let _ = s.insert(cand(2, -47_000)); // viable at block 130
 
-        // `due_improving` requires arrival and improvement.
-        assert!(s.due_improving(109, None).is_none());
-        assert_eq!(s.due_improving(110, None).map(job_byte), Some(1));
+        let g = all_pass();
+        assert!(s.submittable(109, None, &g).is_none());
+        assert_eq!(s.submittable(110, None, &g).map(job_byte), Some(1));
         // Current best already stronger → nothing improves.
-        assert!(s.due_improving(110, Some(-49_500)).is_none());
+        assert!(s.submittable(110, Some(-49_500), &g).is_none());
         // Current best weaker → submit.
-        assert_eq!(s.due_improving(110, Some(-48_000)).map(job_byte), Some(1));
+        assert_eq!(s.submittable(110, Some(-48_000), &g).map(job_byte), Some(1));
 
-        // `due_at` returns the best arrived, unsubmitted candidate.
-        assert!(s.due_at(109).is_none());
-        assert_eq!(s.due_at(110).map(job_byte), Some(1));
         // At 135 both are due; cand 1 (-49000) is the stronger one.
-        assert_eq!(s.due_at(135).map(job_byte), Some(1));
+        assert_eq!(s.submittable(135, None, &g).map(job_byte), Some(1));
         s.mark_submitted(&[1]);
-        assert_eq!(s.due_at(135).map(job_byte), Some(2));
+        assert_eq!(s.submittable(135, None, &g).map(job_byte), Some(2));
+    }
+
+    #[test]
+    fn submittable_skips_a_due_candidate_that_fails_the_gates() {
+        let mut s = stash_with(Some(model()), 100, 4);
+        let mut a = cand(1, -49_000);
+        a.solutions = vec![row(-49_000), row(-30_000), row(-30_000)];
+        let mut b = cand(2, -48_000);
+        b.solutions = vec![row(-48_000), row(-48_000), row(-48_000)];
+        let _ = s.insert(a);
+        let _ = s.insert(b);
+        let gates = QualityGates {
+            min_energy_milli: -47_581,
+            min_diversity_milli: 0,
+            min_solutions: 3,
+        };
+        assert_eq!(s.submittable(135, None, &gates).map(job_byte), Some(2));
+    }
+
+    #[test]
+    fn submittable_is_none_when_no_due_candidate_clears_the_gates() {
+        let mut s = stash_with(Some(model()), 100, 4);
+        let mut a = cand(1, -49_000);
+        a.solutions = vec![row(-49_000), row(-49_000)]; // two rows, min_solutions 3
+        let _ = s.insert(a);
+        let gates = QualityGates {
+            min_energy_milli: -47_581,
+            min_diversity_milli: 0,
+            min_solutions: 3,
+        };
+        assert!(s.submittable(u64::MAX, None, &gates).is_none());
     }
 
     #[test]
