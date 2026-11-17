@@ -131,8 +131,8 @@ impl RestartTracker {
 /// Supervise one miner for the run: (re)spawn per the exit-code policy with
 /// backoff + failure budget, re-queue its in-flight + staged jobs to the router
 /// on a crash, remove it from the router once it is given up on (`Never` or
-/// `Unhealthy`, or a failed spawn), and send an in-band `Shutdown` (then kill after grace) once
-/// `stop` flips true.
+/// `Unhealthy`, or a failed spawn), and send an in-band `Shutdown` (then kill
+/// after grace) once `stop` flips true.
 pub async fn supervise_miner<G: SessionGate>(
     entry: LaunchEntry,
     sock_uri: String,
