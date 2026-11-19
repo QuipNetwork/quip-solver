@@ -338,6 +338,8 @@ image-quip-solver-arm64:
   timeout: 180m
   variables:
     KANIKO_EXTRA: "--compressed-caching=false"
+    FC_VCPUS: "8"
+    FC_MEM: "16384"
   script:
     - |
       TAG="${CI_COMMIT_TAG:-v0.3.0-rc2}"; IMAGE="$CI_REGISTRY_IMAGE/v0.3/quip-solver"
