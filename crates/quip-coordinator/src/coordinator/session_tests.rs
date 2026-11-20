@@ -105,6 +105,7 @@ fn winner(job: &Job, i: u64) -> WireResult {
     WireResult {
         job_id: job.job_id.clone(),
         solutions: vec![Solution {
+            values: vec![],
             spins: quip_protocol::wire::encode_spins_packed(&spins),
             energy_milli: energy,
         }],
@@ -486,6 +487,7 @@ fn family_state() -> (CoordinatorState, Job, WireResult) {
     let report = WireResult {
         job_id: job.job_id.clone(),
         solutions: vec![Solution {
+            values: vec![],
             spins: quip_protocol::wire::encode_spins_packed(&spins),
             energy_milli: energy,
         }],
@@ -628,6 +630,7 @@ fn reclaimed_lease_restages_with_same_range() {
 
 fn job(id: &[u8]) -> Job {
     Job {
+        iqm: None,
         job_id: id.to_vec(),
         generator: None,
         kind: JobKind::IsingSample as i32,
@@ -861,6 +864,80 @@ async fn capabilities_frames_replace_the_envelope_and_ignore_wrong_protocol() {
         Some(updated.features.as_slice())
     );
     assert!(st.inflight.contains_key(b"already-dispatched".as_slice()));
+}
+
+#[tokio::test]
+async fn calibrate_done_without_request_is_ignored() {
+    use quip_proto::v1::{CalibrateDone, CalibrateOutcome, Hello, JobRequest};
+
+    let mut st = CoordinatorState::new();
+    let _ = st
+        .sessions
+        .expected_tokens
+        .insert("m".to_owned(), "token".to_owned());
+    let state = Arc::new(Mutex::new(st));
+    let frame = |msg: miner_msg::Msg| MinerMsg { msg: Some(msg) };
+    let (in_tx, in_rx) = mpsc::channel::<Result<MinerMsg, Status>>(8);
+    let mut inbound = ReceiverStream::new(in_rx);
+    let (tx, mut rx) = mpsc::channel::<Result<CoordMsg, Status>>(8);
+    let session = {
+        let state = Arc::clone(&state);
+        let events = service(&state, Arc::new(FakeChain::new(lease_snapshot(), None)));
+        tokio::spawn(async move {
+            run_session(
+                &mut inbound,
+                &tx,
+                state,
+                events,
+                Arc::new(CancelTiming::default()),
+            )
+            .await;
+        })
+    };
+    let send = |msg: miner_msg::Msg| {
+        let in_tx = in_tx.clone();
+        async move { in_tx.send(Ok(frame(msg))).await.expect("session reads") }
+    };
+    send(miner_msg::Msg::Hello(Hello {
+        miner_id: "m".to_owned(),
+        session_token: "token".to_owned(),
+        capabilities: Some(Capabilities {
+            protocol_version: PROTOCOL_VERSION,
+            max_nodes: 100,
+            ..Capabilities::default()
+        }),
+    }))
+    .await;
+    // Welcome arrives once the handshake passes.
+    let welcome = rx.recv().await.expect("welcome").expect("ok");
+    assert!(matches!(welcome.msg, Some(coord_msg::Msg::Welcome(_))));
+    // Configure follows Welcome; the job is the first message after both.
+    let configure = rx.recv().await.expect("configure").expect("ok");
+    assert!(matches!(configure.msg, Some(coord_msg::Msg::Configure(_))));
+    {
+        let mut st = state.lock().await;
+        assert!(st.router.stage_on("m", job(b"after-calibrate")));
+    }
+
+    send(miner_msg::Msg::CalibrateDone(CalibrateDone {
+        outcome: CalibrateOutcome::Done as i32,
+        summary: None,
+    }))
+    .await;
+    send(miner_msg::Msg::JobRequest(JobRequest { credits: 1 })).await;
+
+    let sent = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("the job dispatches after the stray CalibrateDone")
+        .expect("session still open")
+        .expect("ok");
+    let Some(coord_msg::Msg::Job(j)) = sent.msg else {
+        panic!("expected a Job message");
+    };
+    assert_eq!(j.job_id, b"after-calibrate".to_vec());
+    assert!(!session.is_finished(), "the session stays open");
+    drop(in_tx);
+    session.await.expect("session ends cleanly");
 }
 
 #[test]
@@ -1122,6 +1199,7 @@ async fn cancel_timing_locates_queued_jobs_and_a_slow_result_reader() {
         .send(frame(miner_msg::Msg::Result(WireResult {
             job_id: b"j1".to_vec(),
             solutions: vec![Solution {
+                values: vec![],
                 spins: quip_protocol::wire::encode_spins_packed(&[1, 1]),
                 energy_milli: 0,
             }],

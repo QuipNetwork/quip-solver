@@ -347,6 +347,7 @@ mod supervisor {
     fn tiny_job(job_id: &str, generation: u64, is_pow: bool) -> quip_proto::v1::Job {
         use quip_proto::v1::{Job, JobKind, Provenance};
         Job {
+            iqm: None,
             job_id: job_id.as_bytes().to_vec(),
             generator: None,
             kind: JobKind::IsingSample as i32,

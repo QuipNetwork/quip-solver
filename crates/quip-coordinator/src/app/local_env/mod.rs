@@ -764,6 +764,7 @@ mod tests {
                 self.send(miner_msg::Msg::Result(JobResult {
                     job_id: job.job_id.clone(),
                     solutions: vec![Solution {
+                        values: vec![],
                         spins: encode_spins_packed(&vec![1; nodes]),
                         energy_milli: 0,
                     }],
@@ -1044,6 +1045,7 @@ mod tests {
 
     fn packed_solution(spins: &[i8]) -> Solution {
         Solution {
+            values: vec![],
             spins: encode_spins_packed(spins),
             // A wire energy claim must not determine either report metric.
             energy_milli: i64::MIN,
@@ -1154,6 +1156,7 @@ mod tests {
         let mut spec = report_spec().expect("report topology is valid");
         spec.max_energy_milli = -4000;
         let invalid = Solution {
+            values: vec![],
             // Bits 4 through 7 are padding for this four-node topology.
             spins: vec![0xff],
             energy_milli: i64::MIN,
@@ -1164,6 +1167,7 @@ mod tests {
             (Vec::new(), i64::MAX),
             (
                 vec![Solution {
+                    values: vec![],
                     spins: Vec::new(),
                     energy_milli: i64::MIN,
                 }],
@@ -1252,6 +1256,7 @@ mod tests {
 
     fn job(n: u64) -> Job {
         Job {
+            iqm: None,
             job_id: n.to_le_bytes().to_vec(),
             generator: None,
             kind: JobKind::IsingSample as i32,
