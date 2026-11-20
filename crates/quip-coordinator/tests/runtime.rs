@@ -1556,3 +1556,103 @@ async fn runtime_submits_a_lease_winner_answers_an_order_and_shuts_down_clean() 
     assert!(!first.is_pow);
     assert!(!first.solutions.is_empty());
 }
+
+/// A script that runs the mock miner with `--calibrate <mode>` in front of
+/// the arguments the supervisor passes. The supervisor has no per-entry
+/// argument list, so the mode travels in the wrapper.
+fn calibrating_mock_miner(mode: &str) -> String {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("calibrate-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("wrapper dir");
+    let path = dir.join(format!("mock-miner-{mode}"));
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\nexec '{}' --calibrate {mode} \"$@\"\n",
+            common::mock_miner()
+        ),
+    )
+    .expect("write wrapper");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    path.to_string_lossy().into_owned()
+}
+
+/// The supervisor spawns a mock miner that calibrates. It receives
+/// `Calibrate` before any job (the mock ends its session on a job that comes
+/// first, so no proof could land otherwise), answers `DONE`, and then mines:
+/// its proof reaches the chain well before the 30-minute deadline.
+#[tokio::test]
+async fn mock_miner_calibrates_then_mines() {
+    use quip_coordinator::coordinator::calibration::CalibrationPlan;
+    use quip_coordinator::types::calibration::ReferenceWinner;
+
+    let snap = ising_snapshot();
+    let topology_hash: [u8; 32] = snap.topology_hash.clone().try_into().expect("32 bytes");
+    let chain = Arc::new(FakeChain::new(snap, None));
+    let mut st = CoordinatorState::new();
+    st.calibration = Some(CalibrationPlan::prepare(
+        quip_proto::v1::FamilyDescriptor::default(),
+        topology_hash,
+        &[ReferenceWinner {
+            qblock_id: 41,
+            miner: [1; 32],
+            nonce: [2; 32],
+            energy_milli: -4000,
+            max_energy_milli: -3000,
+            topology_hash,
+            kind: None,
+        }],
+        1800,
+    ));
+    let state = Arc::new(Mutex::new(st));
+    let params = RuntimeParams {
+        max_submit_attempts: 5,
+        sock_path: format!("/tmp/quip-rt-cal-{}.sock", std::process::id()),
+        grace_ms: 500,
+        backoff: BackoffPolicy::default(),
+        miner_identity: [0u8; 32],
+        miner_account: [0u8; 32],
+        buffer_depth: 1,
+        poll_interval_ms: 50,
+        dashboard: None,
+        log_level: quip_coordinator::types::log::LogLevel::Info,
+        identity: quip_coordinator::observe::metrics::Identity::default(),
+    };
+    let entry = LaunchEntry {
+        miner_id: "cpu-0".into(),
+        binary: calibrating_mock_miner("done"),
+        backend: "cpu".into(),
+        device: None,
+        configure: Configure {
+            queue_depth: 3,
+            idle_timeout_s: 60,
+            heartbeat_s: 15,
+            reconnect_window_s: 60,
+            backend_toml: String::new(),
+        },
+    };
+    let (trigger_tx, trigger_rx) = oneshot::channel::<()>();
+    let run = tokio::spawn(run(
+        vec![entry],
+        Arc::new(ChainEnv::new(Arc::clone(&chain), chain_env_params())),
+        Arc::clone(&state),
+        params,
+        async move {
+            let _ = trigger_rx.await;
+        },
+    ));
+
+    let mined = wait_until(300, 50, async || chain.submitted_count() > 0).await;
+    trigger_tx.send(()).expect("send shutdown trigger");
+    tokio::time::timeout(Duration::from_secs(6), run)
+        .await
+        .expect("run_runtime did not return after shutdown")
+        .expect("run_runtime task panicked")
+        .expect("run_runtime returned an error");
+
+    assert!(mined, "the calibrated miner never landed a proof");
+    let st = state.lock().await;
+    let plan = st.calibration.as_ref().expect("plan");
+    assert!(!plan.pending("cpu-0"), "the calibration ended");
+}

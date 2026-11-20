@@ -5,7 +5,7 @@ Cross-tool instructions for AI coding assistants (Claude Code, Codex, Cursor, Ge
 QuIP v0.3 is a Rust workspace. The coordinator owns chain access and work routing.
 It spawns and supervises the miner subprocesses that do the sampling.
 The miner binaries ship from their own repos. The solver contract lives in
-`quip.network/quip-solver-core` and is consumed from crates.io at v0.0.14.
+`quip.network/quip-solver-core` and is consumed from crates.io at v0.0.17.
 It supplies the wire protocol, consensus primitives, and solver session loop.
 
 For deeper detail, see the companion guides: `docs/COORDINATOR.md` covers how the coordinator works, and `docs/NEWMINER.md` covers adding a new miner. The solver contract itself is specified in the quip-solver-core repo (`SPEC.md`).
@@ -26,7 +26,7 @@ For deeper detail, see the companion guides: `docs/COORDINATOR.md` covers how th
 - `docker/` — image builds (`Dockerfile.quip-solver`, `Dockerfile.quip-solver-cuda`), `entrypoint.sh`, and `config.toml`.
 - `docs/` — the guides: `ARCHITECTURE.md`, `COORDINATOR.md`, `NEWMINER.md`, `CHAINSTORAGE.md`, and `VERSIONING.md` (the release-tag standard).
 
-The miner binaries live in their own repos: `quip.network/quip-solver-{cpu,cuda,metal,dwave}`. The `quip-proto` (wire types), `quip-protocol` (consensus math), `quip-solver-core` (`Sampler` trait + session loop), and `ising-generators` crates come from crates.io at v0.0.14. Their source repo is `quip.network/quip-solver-core`, which also publishes the `quip-solver-core` Python wheel the D-Wave miner uses.
+The miner binaries live in their own repos: `quip.network/quip-solver-{cpu,cuda,metal,dwave}`. The `quip-proto` (wire types), `quip-protocol` (consensus math), `quip-solver-core` (`Sampler` trait + session loop), and `ising-generators` crates come from crates.io at v0.0.17. Their source repo is `quip.network/quip-solver-core`, which also publishes the `quip-solver-core` Python wheel the D-Wave miner uses.
 
 ## CUDA card support requirement
 
@@ -83,6 +83,10 @@ quip-coordinator drive --miner ./miners/quip-cpu-sa --source random \
 # Drive a miner with generated salt leases.
 quip-coordinator drive --miner ./miners/quip-cpu-sa --source lease \
   --topology-preset smoke --count 200 --lease-size 32 --seed 7
+
+# Calibrate one miner on the newest winners of a validator. Read-only, no signer.
+quip-coordinator calibrate --miner ./miners/quip-cpu-sa \
+  --validator ws://127.0.0.1:9944 --qblocks 40 --kinds cpu
 
 # Seed a fresh runtime-120 chain with the dimer1200 family topology.
 # Give exactly one of --sudo-key or --mnemonic-file.
@@ -168,6 +172,18 @@ selection. See `docs/COORDINATOR.md` for units, missing-energy values, and lease
 summaries.
 
 The config registers miners and their launch plan. Each backend section (`[cpu]`, `[cuda.N]`, `[metal]`, `[dwave]`) becomes one supervised subprocess. `binary` selects the executable: `quip-cpu-sa`, the chromatic `quip-cpu-gibbs`, `quip-cpu-sb`, or one of quip-solver-cpu's experimental kernels when that release published it. See `crates/quip-coordinator/config.toml.example`. `crates/quip-coordinator/tools/fetch-miners.sh` fetches the miner binaries per host from the standalone repos. The coordinator resolves them on `PATH` or by absolute path.
+
+The `[calibration]` section tunes miners that list the `calibrate` feature. The
+coordinator reads the newest winners once at startup and sends them to each such
+miner once, before its first job. `enabled` defaults to `true`, `qblocks` to 40
+(1 to 1000), `kinds` to empty (`cpu`, `gpu`, `qpu`), and `deadline_s` to 1800.
+The `qblocks` value is an upper bound. The walk visits at most 4 x `qblocks`
+qblocks, so a rare topology or a narrow `kinds` filter can give fewer winners
+or none. No winner means no calibration.
+A miner takes jobs after it answers, or 30 seconds after its deadline. The
+`calibrate` subcommand runs the same exchange for one miner and prints
+`outcome=... summary=...`. A miner that does not list the `calibrate` feature
+makes the subcommand exit 64. See `docs/COORDINATOR.md`.
 
 `signer_key` accepts a keystore path, a 32-byte hex master seed, or a `//DevUri`
 such as `//Alice`. It also accepts any substrate secret URI, including a BIP39

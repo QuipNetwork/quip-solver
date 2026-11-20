@@ -29,6 +29,17 @@ public_port = 20050
 # than an endless retry.
 max_submit_attempts = 5
 
+# Calibration. A solver that lists the `calibrate` feature tunes on recent
+# winning qblocks of the current topology before it takes its first job. The
+# coordinator reads the winners once at startup, and calibrates each miner at
+# most once per run. A solver that does not answer by its deadline gets jobs
+# 30 seconds after it.
+[calibration]
+enabled = true        # false sends no Calibrate
+qblocks = 40          # newest winners to send, 1 to 1000
+kinds = []            # winner hardware: "cpu", "gpu", "qpu"; empty takes all
+deadline_s = 1800     # seconds a solver has to calibrate; above 0
+
 # CPU miner. Default binary: quip-cpu-sa. Use the chromatic Gibbs variant:
 [cpu]
 binary = "quip-cpu-sa"        # or quip-cpu-gibbs, quip-cpu-sb, or any

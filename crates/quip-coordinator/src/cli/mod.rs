@@ -2,6 +2,7 @@
 //! the work to the application layer. One module per subcommand.
 
 pub mod admin;
+pub mod calibrate;
 pub mod drive;
 pub mod keygen;
 pub mod run;
@@ -44,6 +45,8 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Command {
+    /// Run one miner through calibration on recent winners; no jobs, no submit.
+    Calibrate(calibrate::CalibrateArgs),
     /// Drive a spawned miner with generated or replayed work; no submit.
     Drive(drive::DriveArgs),
     /// Create a signer keystore at --out. Refuses to overwrite.
@@ -71,6 +74,9 @@ pub fn dispatch(cli: Cli) -> StdExitCode {
     match cli.command {
         Some(Command::Drive(args)) => {
             drive::run_drive_cli(args, cli.log_level.unwrap_or(LogLevel::Info))
+        }
+        Some(Command::Calibrate(args)) => {
+            calibrate::run_calibrate_cli(&args, cli.log_level.unwrap_or(LogLevel::Info))
         }
         Some(Command::Keygen(args)) => keygen::run_keygen_cli(&args),
         Some(Command::SeedChain(args)) => admin::run_seed_chain_cli(args),

@@ -164,6 +164,7 @@ pub fn build_lease_job(
         kind: JobKind::IsingGenerate as i32,
         generation,
         deadline_ms: 0,
+        iqm: None,
         ising: None,
         provenance: Some(Provenance {
             is_pow: true,

@@ -21,6 +21,8 @@ subcommand has its own file in `cli/`:
 - `quip-coordinator drive …` — generates or replays work for one miner.
   It can read a chain topology once, then drives the miner without submissions.
   Use this mode for benchmarking and comparisons under matched conditions.
+- `quip-coordinator calibrate …` — runs one miner through calibration on the
+  newest winners of a validator, then reports the outcome. See Calibration.
 - `quip-coordinator seed-chain …` — makes a fresh runtime-120 chain mineable.
   It registers the dimer1200 family topology (`quip/twisted-ice-dimer`
   revision 1, solver-core's live recipe `x-w62-p1200`) on the
@@ -861,6 +863,144 @@ read, while `apply_config` runs after the handshake. So the supervised path
 never forwards keys such as `utilization` and `yielding` on argv.
 They already arrive in `backend_toml`, and sending them twice would put one
 operator value into two channels.
+
+## Calibration
+
+A miner that lists the `calibrate` feature in its capabilities can tune on
+recent winning qblocks before its first job. The coordinator builds the
+calibration once at startup. It then sends it to each capable miner.
+`coordinator/calibration.rs` holds the plan. `app/chain_env/readiness.rs`
+builds it.
+
+### The `[calibration]` keys
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `enabled` | `true` | `false` sends no `Calibrate`. |
+| `qblocks` | `40` | The most winners to send, from 1 to 1000. |
+| `kinds` | `[]` | Hardware filter for the winners. Empty means no filter. |
+| `deadline_s` | `1800` | Seconds a miner has to calibrate. Must exceed 0. |
+
+The values of `kinds` are `cpu`, `gpu`, and `qpu`. The `gpu` value matches GPU
+and Metal winners. The `qpu` value matches every QPU vendor. An unknown value is
+a config error. The hardware kind of a winner is the kind its account declared
+for that qblock on chain. A winner with no record passes only when `kinds` is
+empty.
+
+### When it runs
+
+The coordinator downloads the winners once at startup, before it starts any
+miner. It reads them for the topology of the startup snapshot, newest first,
+and keeps the first `qblocks` that `kinds` admits.
+
+The `qblocks` value is an upper bound. The walk visits at most 4 x `qblocks`
+recent qblocks. A rare topology or a narrow `kinds` filter can give fewer
+winners than `qblocks`. If no winner matches, the coordinator skips
+calibration.
+
+Each miner id calibrates at most once per coordinator process, and only if it
+lists the `calibrate` feature. The coordinator sends `Calibrate` after
+`Topology`. If the topology is already cached, `Calibrate` goes out at the
+handshake. Otherwise it goes out right after the first topology broadcast.
+
+The `Calibrate` message carries the problem family, the winners as
+instances, and a deadline of `deadline_s` seconds from the send time.
+
+### Job gating
+
+A calibrating miner gets no jobs until it answers `CalibrateDone` or until the
+deadline plus 30 seconds has passed. Its job credits stay in place, and the
+router stages jobs for it as usual. When the calibration ends, the dispatcher
+wakes and the staged jobs flow. The router also picks a calibrating miner last
+when another miner can take the job. A miner without the feature is not
+affected.
+
+### Limits
+
+- The coordinator skips calibration when `enabled` is `false` or when the
+  chain has no family. It also skips calibration when no winner matches or
+  when the read fails. Mining continues in each case.
+- With no mining snapshot at startup, the run never calibrates. This stays
+  true if a snapshot appears later in the run.
+- The startup download has a budget of 60 seconds. When the budget runs out,
+  the coordinator logs a warning and starts the miners without calibration.
+- The coordinator reads the winners once. If the chain topology changes mid-run,
+  every later miner takes jobs without calibration until the coordinator
+  restarts.
+- A miner that reconnects while its calibration is open gets jobs at once.
+  The new process never saw the `Calibrate`, and calibration runs once per
+  miner id.
+- When the supervisor gives up on a miner, the router removes it and releases
+  its calibration hold.
+
+### Log lines
+
+Each line below names its level and its message text. The structured fields
+follow in parentheses.
+
+| Level | Message | Fields |
+|-------|---------|--------|
+| info | `calibration prepared` | `qblocks`, `count`, `kinds`, `family`, `deadline_s` |
+| info | `calibration skipped` | `reason`, `kinds` |
+| info | `calibration skipped: no mining snapshot at startup` | none |
+| warn | `calibration skipped` | `reason` (bad topology hash or bad kinds) |
+| warn | `calibration skipped: cannot read reference winners; miners take jobs without it` | `error` |
+| warn | `calibration skipped for this run: the reference winner download did not finish within the budget; miners take jobs without it` | `budget_s` |
+| info | `calibration sent; the miner takes jobs after it answers` | `miner`, `instances`, `deadline_s` |
+| info | `miner finished calibration` | `miner`, `outcome` (`DONE`), `summary` |
+| warn | `miner finished calibration without new tuning; it keeps its current tuning` | `miner`, `outcome`, `summary` |
+| warn | `miner did not answer Calibrate by its deadline and grace; giving it jobs` | `miner`, `waited_s` |
+| warn | `miner reconnected during calibration; giving it jobs without one` | `miner` |
+| warn | `miner sent CalibrateDone with no calibration outstanding; ignoring` | `miner` |
+
+The `reason` of the info-level skip is one of `[calibration].enabled is false`,
+`the challenge has no problem family`, or `no reference winner on this
+topology`. The `outcome` of the second `miner finished` line is
+`CALIBRATE_OUTCOME_FAILED`, `CALIBRATE_OUTCOME_DEADLINE_PASSED`, or
+`CALIBRATE_OUTCOME_UNSPECIFIED`. For an outcome number that the protocol does
+not define, the value is `Unknown(n)`. The miner keeps its current tuning in
+each case. The stdout line of the offline command uses the short labels
+`DONE`, `FAILED`, `DEADLINE_PASSED`, and `TIMED_OUT`.
+
+### The offline `calibrate` subcommand
+
+`quip-coordinator calibrate` runs one miner through calibration without a full
+coordinator. It reads the mining snapshot and the winners from a validator.
+Then it spawns the miner, sends `Topology` and then `Calibrate`, and prints how
+the miner answered. It sends no job and submits nothing. It only reads, and it
+needs no signer. The code is in `cli/calibrate.rs` and `app/local_env/calibrate.rs`.
+
+```bash
+quip-coordinator calibrate --miner ./miners/quip-cpu-sa \
+  --validator ws://127.0.0.1:9944 --qblocks 40 --kinds cpu --deadline-s 1800
+```
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--miner <path>` | required | Miner binary to spawn. |
+| `--validator <url>` | required | Validator RPC address for the snapshot and the winners. |
+| `--qblocks <n>` | `40` | Winners to send, from 1 to 1000. |
+| `--kinds <list>` | empty | Winner hardware, comma separated: `cpu`, `gpu`, `qpu`. Empty admits every winner. |
+| `--deadline-s <n>` | `1800` | Seconds the miner has to calibrate. The run waits 30 seconds longer. |
+
+On stdout the command prints one line, `outcome=<NAME> summary=<text>`. The name
+is `DONE`, `FAILED`, `DEADLINE_PASSED`, or `TIMED_OUT`. The command escapes
+each control character in the summary. A newline prints as `\n`.
+Errors go to stderr as `error: <text>`.
+
+The command spawns the miner as a CPU miner with no device. It does not run a
+`[cuda.N]` or `[metal]` configuration.
+
+| Exit code | Meaning |
+|-----------|---------|
+| 0 | The outcome is `DONE`. |
+| 1 | The outcome is `FAILED`, `DEADLINE_PASSED`, or `TIMED_OUT`. Exit 1 also covers a miner that left or sent `Fatal` before it answered, an interrupt, and the internal error that no `Calibrate` was due. |
+| 64 | The request, the miner, or the chain cannot calibrate. Examples are a bad value, a miner without the `calibrate` feature, a chain with no family, or no matching winner. |
+| 69 | A chain RPC read failed. |
+| 70 | The miner never completed the handshake, as in `drive`, or the command could not create its async runtime. |
+
+`TIMED_OUT` means a miner that joined did not answer by the deadline plus 30
+seconds. The command shuts the miner down before it exits.
 
 ## Dashboard and REST surface
 

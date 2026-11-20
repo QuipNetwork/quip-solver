@@ -501,6 +501,7 @@ mod tests {
 
     fn packed(spins: &[i8]) -> Solution {
         Solution {
+            values: vec![],
             spins: encode_spins_packed(spins),
             energy_milli: 0,
         }
@@ -511,6 +512,7 @@ mod tests {
         // Three nodes, one byte. Bit 3 is padding and is set.
         let problem = problem_with(Some(edge_graph()), &[0, 0, 0], &[1000], 0);
         let bad = Solution {
+            values: vec![],
             spins: vec![0b0000_1111],
             energy_milli: 0,
         };
@@ -669,6 +671,7 @@ mod tests {
             .collect();
         let sols: Vec<Solution> = (0..4)
             .map(|_| Solution {
+                values: vec![],
                 spins: encode_spins_packed(&spins),
                 energy_milli: 0,
             })
@@ -732,6 +735,7 @@ mod tests {
     fn wire_rows(rows: &[SpinRow]) -> Vec<Solution> {
         rows.iter()
             .map(|row| Solution {
+                values: vec![],
                 spins: encode_spins_packed(&row.spins),
                 energy_milli: row.energy_milli,
             })

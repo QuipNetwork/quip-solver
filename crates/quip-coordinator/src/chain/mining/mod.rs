@@ -7,3 +7,4 @@ pub mod participation;
 pub mod pool;
 pub mod proof;
 pub mod snapshot;
+pub mod winners;

@@ -660,6 +660,7 @@ mod verification {
         for flip in 0..2 {
             spins[flip] = -1;
             solutions.push(Solution {
+                values: vec![],
                 spins: encode_spins_packed(&spins),
                 energy_milli: energy(&instance, &spins),
             });
@@ -871,6 +872,7 @@ mod verification {
         let result = JobResult {
             job_id: b"lease".to_vec(),
             solutions: vec![Solution {
+                values: vec![],
                 spins: encode_spins_packed(&spins),
                 energy_milli: energy_from_milli(&spins, &h, &j, &view.edges),
             }],
@@ -944,6 +946,7 @@ mod verification {
         let result = JobResult {
             job_id: b"lease".to_vec(),
             solutions: vec![Solution {
+                values: vec![],
                 spins: encode_spins_packed(&spins),
                 energy_milli: energy(&instance, &spins),
             }],

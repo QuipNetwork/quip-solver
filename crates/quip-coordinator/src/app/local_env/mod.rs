@@ -14,11 +14,16 @@
 //! (`coordinator::events`) keeps the multi-miner reroute behavior; this is a
 //! deliberate drive-mode-only deviation.
 
+pub mod calibrate;
 pub mod lease_source;
 pub mod list_source;
 pub mod random_source;
 pub mod report;
 
+pub use calibrate::{
+    calibrate_miner, CalibrateError, CalibrateReport, CalibrateRequest, CalibrateResult,
+    CALIBRATION_GRACE,
+};
 pub use lease_source::LeaseSource;
 pub use list_source::{ListSource, ListSourceError};
 pub use random_source::RandomSource;
@@ -506,22 +511,45 @@ impl SessionEvents for DriveManyService {
     }
 }
 
-/// Full drive-many run: spawn the miner over UDS, stage every job, validate
-/// every `Result`, and send a clean `Shutdown` once all jobs are terminal.
+/// What [`spawn_miner_session`] needs to start one miner.
+struct SpawnSpec<'a> {
+    miner_bin: &'a str,
+    sock_path: &'a str,
+    miner_id: &'a str,
+    entry: &'a LaunchEntry,
+    log_level: crate::types::log::LogLevel,
+    /// Forwarded as `--utilization` (GPU backends).
+    utilization: Option<u32>,
+    /// Forwarded as `--yielding` (GPU backends).
+    yielding: bool,
+}
+
+/// One miner process and the session server it dials.
+struct MinerSession {
+    state: Arc<Mutex<CoordinatorState>>,
+    server: tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
+    child: tokio::process::Child,
+}
+
+/// Bind the session socket, serve `make_events` on it, and spawn the miner
+/// with a fresh session token. `st` carries the topology and target the
+/// handshake sends. Shared by `drive` and `calibrate`, so both launch a miner
+/// with the same argv.
 ///
 /// # Panics
 ///
 /// Panics if the Unix socket cannot be bound or the miner process cannot be
-/// spawned (drive CLI setup failures are fatal).
+/// spawned (CLI setup failures are fatal).
 #[expect(
     clippy::expect_used,
-    clippy::print_stderr,
-    clippy::unwrap_used,
-    reason = "drive CLI: bind/spawn failures are fatal setup errors; StdMutex poison only if a prior holder panicked; eprintln is drive CLI interrupt notice"
+    reason = "CLI harness: bind/spawn failures are fatal setup errors"
 )]
-pub async fn run_drive(p: DriveManyParams<'_>) -> DriveManyReport {
-    let sock_path = p.sock_path;
-    let miner_id = p.miner_id;
+fn spawn_miner_session<E: SessionEvents + 'static>(
+    spec: &SpawnSpec<'_>,
+    mut st: CoordinatorState,
+    make_events: impl FnOnce(Arc<Mutex<CoordinatorState>>) -> Arc<E>,
+) -> MinerSession {
+    let sock_path = spec.sock_path;
     let _ = std::fs::remove_file(sock_path);
     if let Some(parent) = Path::new(sock_path).parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -532,30 +560,17 @@ pub async fn run_drive(p: DriveManyParams<'_>) -> DriveManyReport {
 
     // The one miner must present this token in its `Hello`.
     let token = gen_session_token();
-    let mut st = CoordinatorState::new();
     let _ = st
         .sessions
         .expected_tokens
-        .insert(miner_id.into(), token.clone());
+        .insert(spec.miner_id.into(), token.clone());
     let _ = st
         .sessions
         .configure
-        .insert(miner_id.into(), p.entry.configure.clone());
-    // Resolves the position-indexed scoring topology once (a run constant);
-    // every result handler borrows it by `Arc`, never rebuilding the graph.
-    st.set_topology(p.topology);
-    st.target = p.target;
-    let total = p.jobs.len();
+        .insert(spec.miner_id.into(), spec.entry.configure.clone());
     let state = Arc::new(Mutex::new(st));
-    let jobs = Arc::new(Mutex::new(p.jobs));
-    let run = Arc::new(RunState::new(total));
 
-    let svc = DriveManyService {
-        state: Arc::clone(&state),
-        jobs,
-        run: Arc::clone(&run),
-    };
-    let svc = SessionService::new(Arc::clone(&state), Arc::new(svc));
+    let svc = SessionService::new(Arc::clone(&state), make_events(Arc::clone(&state)));
     let server = tokio::spawn(async move {
         Server::builder()
             .add_service(MinerServiceServer::new(svc))
@@ -564,27 +579,82 @@ pub async fn run_drive(p: DriveManyParams<'_>) -> DriveManyReport {
     });
 
     let socket_uri = format!("unix://{sock_path}");
-    let mut cmd = Command::new(p.miner_bin);
+    let mut cmd = Command::new(spec.miner_bin);
     // The session flags — including `--device` when the entry carries one —
     // come from the supervised path's builder, so drive cannot drift from the
     // argv a real run produces. Only the governor flags below are drive's own.
     let _ = cmd
         .args(crate::miner::process::child_args(
-            p.entry,
+            spec.entry,
             &socket_uri,
-            p.log_level,
+            spec.log_level,
         ))
         .env("QUIP_SESSION_TOKEN", &token);
     // Mechanism A: forward governor flags to the spawned miner's own CLI
     // (cuda/metal). Drive has no `backend_toml` to carry them, which is why
     // these are argv here and are not in the supervised path.
-    if let Some(util) = p.utilization {
+    if let Some(util) = spec.utilization {
         let _ = cmd.arg("--utilization").arg(util.to_string());
     }
-    if p.yielding {
+    if spec.yielding {
         let _ = cmd.arg("--yielding");
     }
-    let mut child = cmd.spawn().expect("spawn miner");
+    let child = cmd.spawn().expect("spawn miner");
+    MinerSession {
+        state,
+        server,
+        child,
+    }
+}
+
+/// Full drive-many run: spawn the miner over UDS, stage every job, validate
+/// every `Result`, and send a clean `Shutdown` once all jobs are terminal.
+///
+/// # Panics
+///
+/// Panics if the Unix socket cannot be bound or the miner process cannot be
+/// spawned (drive CLI setup failures are fatal).
+#[expect(
+    clippy::print_stderr,
+    clippy::unwrap_used,
+    reason = "drive CLI: StdMutex poison only if a prior holder panicked; eprintln is drive CLI interrupt notice"
+)]
+pub async fn run_drive(p: DriveManyParams<'_>) -> DriveManyReport {
+    let sock_path = p.sock_path;
+    let miner_id = p.miner_id;
+
+    let mut st = CoordinatorState::new();
+    // Resolves the position-indexed scoring topology once (a run constant);
+    // every result handler borrows it by `Arc`, never rebuilding the graph.
+    st.set_topology(p.topology);
+    st.target = p.target;
+    let total = p.jobs.len();
+    let jobs = Arc::new(Mutex::new(p.jobs));
+    let run = Arc::new(RunState::new(total));
+
+    let MinerSession {
+        state,
+        server,
+        mut child,
+    } = spawn_miner_session(
+        &SpawnSpec {
+            miner_bin: p.miner_bin,
+            sock_path,
+            miner_id,
+            entry: p.entry,
+            log_level: p.log_level,
+            utilization: p.utilization,
+            yielding: p.yielding,
+        },
+        st,
+        |state| {
+            Arc::new(DriveManyService {
+                state,
+                jobs,
+                run: Arc::clone(&run),
+            })
+        },
+    );
 
     // No artificial time limit: the run ends when the miner has serviced every
     // job (it exits after the session sends `Shutdown` on completion), however
@@ -764,6 +834,7 @@ mod tests {
                 self.send(miner_msg::Msg::Result(JobResult {
                     job_id: job.job_id.clone(),
                     solutions: vec![Solution {
+                        values: vec![],
                         spins: encode_spins_packed(&vec![1; nodes]),
                         energy_milli: 0,
                     }],
@@ -1044,6 +1115,7 @@ mod tests {
 
     fn packed_solution(spins: &[i8]) -> Solution {
         Solution {
+            values: vec![],
             spins: encode_spins_packed(spins),
             // A wire energy claim must not determine either report metric.
             energy_milli: i64::MIN,
@@ -1154,6 +1226,7 @@ mod tests {
         let mut spec = report_spec().expect("report topology is valid");
         spec.max_energy_milli = -4000;
         let invalid = Solution {
+            values: vec![],
             // Bits 4 through 7 are padding for this four-node topology.
             spins: vec![0xff],
             energy_milli: i64::MIN,
@@ -1164,6 +1237,7 @@ mod tests {
             (Vec::new(), i64::MAX),
             (
                 vec![Solution {
+                    values: vec![],
                     spins: Vec::new(),
                     energy_milli: i64::MIN,
                 }],
@@ -1252,6 +1326,7 @@ mod tests {
 
     fn job(n: u64) -> Job {
         Job {
+            iqm: None,
             job_id: n.to_le_bytes().to_vec(),
             generator: None,
             kind: JobKind::IsingSample as i32,

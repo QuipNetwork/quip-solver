@@ -33,7 +33,8 @@ pub use sign::submit::{
     DescriptorOutcome, ParticipationOutcome, RegistrationOutcome,
 };
 
-use crate::types::miner::MinerInfo;
+use crate::types::calibration::ReferenceWinner;
+use crate::types::miner::{MinerInfo, MinerKind};
 use crate::types::order::JobOrder;
 use crate::types::proof::{Proof, SubmitReceipt};
 use crate::types::snapshot::{DecayParams, MiningSnapshot, PendingProof};
@@ -125,6 +126,23 @@ pub trait ChainClient: Send + Sync {
     /// the chain hasn't started a round or doesn't expose one; used to key the
     /// per-qblock mining-attempt logs.
     async fn fetch_latest_qblock_id(&self) -> Result<Option<u64>, ChainError>;
+
+    /// Read the winning qblock `qblock_id` (`QuantumPowApi_qblock_by_id`).
+    ///
+    /// `None` when the chain holds no such block. The winner's `kind` is
+    /// always `None` here; `fetch_participation_kind` supplies it.
+    async fn fetch_qblock_by_id(
+        &self,
+        qblock_id: u64,
+    ) -> Result<Option<ReferenceWinner>, ChainError>;
+
+    /// Read the hardware kind `account` declared for `qblock_id`
+    /// (`MinerRegistry.ParticipantsByQBlock`). `None` when it has no record.
+    async fn fetch_participation_kind(
+        &self,
+        qblock_id: u64,
+        account: [u8; 32],
+    ) -> Result<Option<MinerKind>, ChainError>;
 
     /// Read `QuantumPow.Miners[account]` at the current head.
     ///

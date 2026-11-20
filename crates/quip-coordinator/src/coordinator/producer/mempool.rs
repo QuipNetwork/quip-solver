@@ -56,6 +56,7 @@ pub fn job_order_to_job(order: &JobOrder) -> Option<Job> {
         kind: JobKind::IsingSample as i32,
         generation: 0,
         deadline_ms: order.deadline_ms,
+        iqm: None,
         ising: Some(milli_problem(
             Some(ising_problem::Graph::Edges(EdgeList { u, v })),
             &order.h_milli,

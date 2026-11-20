@@ -52,6 +52,7 @@ pub fn build_ising_job_from_nonce(
         kind: JobKind::IsingSample as i32,
         generation,
         deadline_ms,
+        iqm: None,
         ising: Some(milli_problem(
             Some(ising_problem::Graph::TopologyHash(
                 snap.topology_hash.clone(),

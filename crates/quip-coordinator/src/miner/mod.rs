@@ -11,6 +11,11 @@ use async_trait::async_trait;
 use quip_proto::v1::{coord_msg, Capabilities};
 use session::handlers::{Flow, SessionLink};
 
+/// Feature name of a solver that takes a `Calibrate` before its first job.
+/// The solver contract defines it as `quip_solver_core::CALIBRATE_FEATURE`,
+/// which this crate does not depend on outside its tests.
+pub(crate) const CALIBRATE_FEATURE: &str = "calibrate";
+
 /// What a miner session reports, and what the work behind it answers. One
 /// session loop, [`run_session`](session::handlers::run_session), drives every environment through this
 /// trait: the loop owns the handshake, the outbound channel, and the
@@ -33,6 +38,23 @@ pub trait SessionEvents: Send + Sync + 'static {
     async fn status(&self, miner_id: &str, status: &quip_proto::v1::Status);
     /// The miner sent a new capability snapshot.
     async fn capabilities(&self, miner_id: &str, caps: &Capabilities);
+    /// The handshake sent `Configure` and the requirements, and the session
+    /// gave the miner the topology with `topology_hash` (empty when none was
+    /// cached). Returns the `Calibrate` to send now, if one is due. The
+    /// default sends none.
+    async fn calibration(
+        &self,
+        _miner_id: &str,
+        _caps: &Capabilities,
+        _topology_hash: &[u8],
+    ) -> Option<quip_proto::v1::Calibrate> {
+        None
+    }
+    /// The miner finished a calibration. The default ignores it, because a
+    /// coordinator that never sent `Calibrate` has no use for the answer.
+    async fn calibrate_done(&self, miner_id: &str, _done: &quip_proto::v1::CalibrateDone) {
+        tracing::warn!(miner = %miner_id, "miner sent CalibrateDone without a Calibrate; ignoring");
+    }
     /// The miner gave up.
     async fn fatal(&self, link: &SessionLink, fatal: &quip_proto::v1::Fatal) -> Flow;
     /// Called after the handshake and after every message: whether the

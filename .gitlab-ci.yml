@@ -156,24 +156,42 @@ verify-fetch-miners:
       if echo "$out" | grep -q 'quip-cuda'; then echo "ERROR: cpu set pulled cuda"; exit 1; fi
       # The three production kernels must be required; a release that drops one
       # has to fail the image build, not ship an image missing its default
-      # miner. Everything experimental must be optional, because quip-solver-cpu
-      # builds those behind a feature flag and does not attach them to every
-      # release.
-      echo "--- cpu: production required, experimental optional ---"
+      # miner. Every other miner is found from the release's asset list and
+      # fetched as optional.
+      echo "--- cpu: production required ---"
       for b in sa gibbs sb; do
         echo "$out" | grep -q "would fetch (required): quip-cpu-${b}-" ||
           { echo "ERROR: quip-cpu-${b} is not required"; exit 1; }
       done
-      for b in bsb hdsb hbsb gbsb gdsb tedsb sbqa ggdsb fsa msa mps mfa flatiron greedy \
-        otsuka dimer ice-sat pairworm flow flow-loops tileworm gadget-repair routing dipolar; do
-        echo "$out" | grep -q "would fetch (optional): quip-cpu-${b}-" ||
-          { echo "ERROR: experimental quip-cpu-${b} not selected as optional"; exit 1; }
-      done
+      # Compare a dry run with the pinned release's asset list: every linux-amd64
+      # asset of the given repo, other than bench, must be selected. A miner the
+      # release adds then fails here instead of silently missing from the images.
+      # Names come from the releases API with grep, as in the script (no jq).
+      check_selected() {
+        hw=$1; plan=$2
+        tag=$(bash "$S" --print-tag "$hw")
+        assets=$(wget -q -O - "https://gitlab.com/api/v4/projects/quip.network%2Fquip-solver-${hw}/releases/${tag}" |
+          grep -o '"name":"quip-[^"]*-linux-amd64"' | sed 's/^"name":"\(.*\)"$/\1/' | grep -v "^quip-${hw}-bench-")
+        [ -n "$assets" ] || { echo "ERROR: no linux-amd64 assets listed for quip-solver-${hw} ${tag}"; exit 1; }
+        for a in $assets; do
+          echo "$plan" | grep -qE "would fetch \((required|optional)\): ${a} " ||
+            { echo "ERROR: ${a} in release ${tag} is not selected"; exit 1; }
+        done
+        echo "ok   every linux-amd64 ${hw} asset of ${tag} is selected"
+      }
+      check_selected cpu "$out"
       echo "--- MINER_SET=cpu-cuda ---"
       out=$(DRY_RUN=1 MINER_SET=cpu-cuda bash "$S")
       echo "$out"
       echo "$out" | grep -q 'quip-cpu-sa'
       echo "$out" | grep -q 'quip-cuda-sa'
+      check_selected cpu "$out"
+      check_selected cuda "$out"
+      for b in sa gibbs msa; do
+        echo "$out" | grep -q "would fetch (required): quip-cuda-${b}-" ||
+          { echo "ERROR: quip-cuda-${b} is not required"; exit 1; }
+      done
+      if echo "$out" | grep -q 'quip-cpu-bench\|quip-cuda-bench'; then echo "ERROR: bench selected"; exit 1; fi
       echo "--- clean-name (saved as quip-cpu-sa, not -amd64) ---"
       echo "$out" | grep -qE '\-> [^ ]+/quip-cpu-sa '
       # Darwin is the native/host install the macOS bundle ships. It is the
@@ -338,6 +356,8 @@ image-quip-solver-arm64:
   timeout: 180m
   variables:
     KANIKO_EXTRA: "--compressed-caching=false"
+    FC_VCPUS: "8"
+    FC_MEM: "16384"
   script:
     - |
       TAG="${CI_COMMIT_TAG:-v0.3.0-rc2}"; IMAGE="$CI_REGISTRY_IMAGE/v0.3/quip-solver"

@@ -168,6 +168,7 @@ fn ring_jobs(count: usize, nodes: usize) -> Vec<Job> {
     let j: Vec<i32> = vec![500; nodes];
     (0..count)
         .map(|n| Job {
+            iqm: None,
             job_id: format!("job-{n}").into_bytes(),
             generator: None,
             kind: JobKind::IsingSample as i32,

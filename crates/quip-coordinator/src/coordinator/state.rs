@@ -115,6 +115,10 @@ pub struct CoordinatorState {
     /// an order only while its id is absent, so each order is answered once;
     /// a transient submit failure removes the id to stage it again.
     pub mempool_orders: HashMap<Vec<u8>, crate::coordinator::scoring::validate::QualityGates>,
+    /// The calibration miners that list the `calibrate` feature receive before
+    /// their first job. Set once at startup, before any session starts.
+    /// `None` turns calibration off.
+    pub calibration: Option<crate::coordinator::calibration::CalibrationPlan>,
 }
 
 impl CoordinatorState {
@@ -148,6 +152,7 @@ impl CoordinatorState {
             last_proof_block_hash: String::new(),
             miner_types: HashMap::new(),
             mempool_orders: HashMap::new(),
+            calibration: None,
         }
     }
 

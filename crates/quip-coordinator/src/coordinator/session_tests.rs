@@ -105,6 +105,7 @@ fn winner(job: &Job, i: u64) -> WireResult {
     WireResult {
         job_id: job.job_id.clone(),
         solutions: vec![Solution {
+            values: vec![],
             spins: quip_protocol::wire::encode_spins_packed(&spins),
             energy_milli: energy,
         }],
@@ -486,6 +487,7 @@ fn family_state() -> (CoordinatorState, Job, WireResult) {
     let report = WireResult {
         job_id: job.job_id.clone(),
         solutions: vec![Solution {
+            values: vec![],
             spins: quip_protocol::wire::encode_spins_packed(&spins),
             energy_milli: energy,
         }],
@@ -628,6 +630,7 @@ fn reclaimed_lease_restages_with_same_range() {
 
 fn job(id: &[u8]) -> Job {
     Job {
+        iqm: None,
         job_id: id.to_vec(),
         generator: None,
         kind: JobKind::IsingSample as i32,
@@ -861,6 +864,80 @@ async fn capabilities_frames_replace_the_envelope_and_ignore_wrong_protocol() {
         Some(updated.features.as_slice())
     );
     assert!(st.inflight.contains_key(b"already-dispatched".as_slice()));
+}
+
+#[tokio::test]
+async fn calibrate_done_without_request_is_ignored() {
+    use quip_proto::v1::{CalibrateDone, CalibrateOutcome, Hello, JobRequest};
+
+    let mut st = CoordinatorState::new();
+    let _ = st
+        .sessions
+        .expected_tokens
+        .insert("m".to_owned(), "token".to_owned());
+    let state = Arc::new(Mutex::new(st));
+    let frame = |msg: miner_msg::Msg| MinerMsg { msg: Some(msg) };
+    let (in_tx, in_rx) = mpsc::channel::<Result<MinerMsg, Status>>(8);
+    let mut inbound = ReceiverStream::new(in_rx);
+    let (tx, mut rx) = mpsc::channel::<Result<CoordMsg, Status>>(8);
+    let session = {
+        let state = Arc::clone(&state);
+        let events = service(&state, Arc::new(FakeChain::new(lease_snapshot(), None)));
+        tokio::spawn(async move {
+            run_session(
+                &mut inbound,
+                &tx,
+                state,
+                events,
+                Arc::new(CancelTiming::default()),
+            )
+            .await;
+        })
+    };
+    let send = |msg: miner_msg::Msg| {
+        let in_tx = in_tx.clone();
+        async move { in_tx.send(Ok(frame(msg))).await.expect("session reads") }
+    };
+    send(miner_msg::Msg::Hello(Hello {
+        miner_id: "m".to_owned(),
+        session_token: "token".to_owned(),
+        capabilities: Some(Capabilities {
+            protocol_version: PROTOCOL_VERSION,
+            max_nodes: 100,
+            ..Capabilities::default()
+        }),
+    }))
+    .await;
+    // Welcome arrives once the handshake passes.
+    let welcome = rx.recv().await.expect("welcome").expect("ok");
+    assert!(matches!(welcome.msg, Some(coord_msg::Msg::Welcome(_))));
+    // Configure follows Welcome; the job is the first message after both.
+    let configure = rx.recv().await.expect("configure").expect("ok");
+    assert!(matches!(configure.msg, Some(coord_msg::Msg::Configure(_))));
+    {
+        let mut st = state.lock().await;
+        assert!(st.router.stage_on("m", job(b"after-calibrate")));
+    }
+
+    send(miner_msg::Msg::CalibrateDone(CalibrateDone {
+        outcome: CalibrateOutcome::Done as i32,
+        summary: None,
+    }))
+    .await;
+    send(miner_msg::Msg::JobRequest(JobRequest { credits: 1 })).await;
+
+    let sent = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("the job dispatches after the stray CalibrateDone")
+        .expect("session still open")
+        .expect("ok");
+    let Some(coord_msg::Msg::Job(j)) = sent.msg else {
+        panic!("expected a Job message");
+    };
+    assert_eq!(j.job_id, b"after-calibrate".to_vec());
+    assert!(!session.is_finished(), "the session stays open");
+    drop(in_tx);
+    session.await.expect("session ends cleanly");
 }
 
 #[test]
@@ -1122,6 +1199,7 @@ async fn cancel_timing_locates_queued_jobs_and_a_slow_result_reader() {
         .send(frame(miner_msg::Msg::Result(WireResult {
             job_id: b"j1".to_vec(),
             solutions: vec![Solution {
+                values: vec![],
                 spins: quip_protocol::wire::encode_spins_packed(&[1, 1]),
                 energy_milli: 0,
             }],
@@ -1156,4 +1234,352 @@ async fn cancel_timing_locates_queued_jobs_and_a_slow_result_reader() {
 
 fn drain_peek(buf: &Arc<std::sync::Mutex<Vec<u8>>>) -> String {
     String::from_utf8_lossy(&buf.lock().unwrap()).into_owned()
+}
+
+// ---------------------------------------------------------------------------
+// Calibration
+// ---------------------------------------------------------------------------
+
+/// Two reference winners on the lease topology, newest first.
+fn reference_winners() -> Vec<crate::types::calibration::ReferenceWinner> {
+    let topology_hash: [u8; 32] = lease_snapshot().topology_hash.try_into().unwrap();
+    [(12u64, -5100i64, -4900i64), (11, -5050, -4800)]
+        .into_iter()
+        .map(
+            |(id, energy, max)| crate::types::calibration::ReferenceWinner {
+                qblock_id: id,
+                miner: [3; 32],
+                nonce: [u8::try_from(id).unwrap(); 32],
+                energy_milli: energy,
+                max_energy_milli: max,
+                topology_hash,
+                kind: None,
+            },
+        )
+        .collect()
+}
+
+fn calibration_family() -> quip_proto::v1::FamilyDescriptor {
+    quip_proto::v1::FamilyDescriptor {
+        family_id: "quip/twisted-ice-dimer".into(),
+        revision: 1,
+        params: vec![1, 2],
+        params_digest: vec![9; 32],
+    }
+}
+
+fn lease_topology() -> Topology {
+    let snap = lease_snapshot();
+    Topology::from_nodes_edges(
+        snap.nodes,
+        snap.edges,
+        &snap.allowed_h_milli,
+        &snap.allowed_j_milli,
+        &snap.allowed_spin_milli,
+    )
+}
+
+/// State that expects miner `m`, holds a calibration plan over
+/// [`reference_winners`] with `deadline_s`, and caches the topology when
+/// `topology` is set.
+fn calibration_state(topology: bool, deadline_s: u64) -> Arc<Mutex<CoordinatorState>> {
+    let mut st = CoordinatorState::new();
+    let _ = st
+        .sessions
+        .expected_tokens
+        .insert("m".to_owned(), "token".to_owned());
+    st.calibration = Some(crate::coordinator::calibration::CalibrationPlan::prepare(
+        calibration_family(),
+        lease_snapshot().topology_hash.try_into().unwrap(),
+        &reference_winners(),
+        deadline_s,
+    ));
+    if topology {
+        st.set_topology(Some(lease_topology()));
+    }
+    Arc::new(Mutex::new(st))
+}
+
+/// Run a session for `m` over `state`, advertising `features`, and read
+/// `Welcome` and `Configure`.
+async fn join(state: &Arc<Mutex<CoordinatorState>>, features: &[&str]) -> LiveSession {
+    use quip_proto::v1::Hello;
+
+    let (miner, miner_rx) = mpsc::channel(16);
+    let (tx, rx) = mpsc::channel(16);
+    let timing = Arc::new(CancelTiming::default());
+    let mut outbound = outbound_stream(rx, Arc::clone(&timing));
+    {
+        let state = Arc::clone(state);
+        let tx = tx.clone();
+        drop(tokio::spawn(async move {
+            let mut inbound = ReceiverStream::new(miner_rx).map(Ok);
+            let events = service(&state, Arc::new(FakeChain::new(lease_snapshot(), None)));
+            run_session(&mut inbound, &tx, state, events, timing).await;
+        }));
+    }
+    miner
+        .send(frame(miner_msg::Msg::Hello(Hello {
+            miner_id: "m".to_owned(),
+            session_token: "token".to_owned(),
+            capabilities: Some(Capabilities {
+                protocol_version: PROTOCOL_VERSION,
+                supported_kinds: vec![JobKind::IsingSample as i32],
+                features: features.iter().map(|f| (*f).to_owned()).collect(),
+                ..Capabilities::default()
+            }),
+        })))
+        .await
+        .expect("session reads Hello");
+    assert!(matches!(
+        next_timed(&mut outbound).await,
+        coord_msg::Msg::Welcome(_)
+    ));
+    assert!(matches!(
+        next_timed(&mut outbound).await,
+        coord_msg::Msg::Configure(_)
+    ));
+    LiveSession {
+        miner,
+        outbound,
+        tx,
+        state: Arc::clone(state),
+    }
+}
+
+async fn grant(s: &LiveSession, credits: u32) {
+    s.miner
+        .send(frame(miner_msg::Msg::JobRequest(
+            quip_proto::v1::JobRequest { credits },
+        )))
+        .await
+        .unwrap();
+}
+
+async fn calibrate_done(s: &LiveSession, outcome: quip_proto::v1::CalibrateOutcome) {
+    s.miner
+        .send(frame(miner_msg::Msg::CalibrateDone(
+            quip_proto::v1::CalibrateDone {
+                outcome: outcome as i32,
+                summary: Some("tuned".into()),
+            },
+        )))
+        .await
+        .unwrap();
+}
+
+/// Nothing reaches the miner within `wait`.
+async fn quiet_for(s: &mut LiveSession, wait: Duration) -> bool {
+    tokio::time::timeout(wait, s.outbound.next()).await.is_err()
+}
+
+/// The next message, failing the test if none arrives within 5 s of
+/// (possibly paused) test time.
+async fn next_timed(outbound: &mut OutboundStream) -> coord_msg::Msg {
+    tokio::time::timeout(Duration::from_secs(5), next_msg(outbound))
+        .await
+        .expect("a message within 5 s")
+}
+
+fn expect_calibrate(msg: coord_msg::Msg) -> quip_proto::v1::Calibrate {
+    let coord_msg::Msg::Calibrate(c) = msg else {
+        panic!("expected Calibrate, got {msg:?}");
+    };
+    c
+}
+
+#[tokio::test(start_paused = true)]
+async fn calibrating_miner_gets_no_job_until_done() {
+    let unix_ms = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    };
+    let state = calibration_state(true, 1800);
+    // The paused tokio clock does not pause `SystemTime`, so bound the
+    // deadline by wall-clock reads taken around the handshake.
+    let before = unix_ms();
+    let mut s = join(&state, &["calibrate"]).await;
+    assert!(matches!(
+        next_timed(&mut s.outbound).await,
+        coord_msg::Msg::Topology(_)
+    ));
+    let calibrate = expect_calibrate(next_timed(&mut s.outbound).await);
+    let after = unix_ms();
+    assert_eq!(calibrate.family, Some(calibration_family()));
+    let expected: Vec<quip_proto::v1::CalibrationInstance> = reference_winners()
+        .iter()
+        .map(|w| quip_proto::v1::CalibrationInstance {
+            id: w.qblock_id.to_string(),
+            nonce: w.nonce.to_vec(),
+            achieved_energy_milli: w.energy_milli,
+            max_energy_milli: w.max_energy_milli,
+        })
+        .collect();
+    assert_eq!(calibrate.instances, expected);
+    assert_eq!(
+        calibrate.instances.first().map(|i| i.id.as_str()),
+        Some("12")
+    );
+    let deadline = u128::from(calibrate.deadline_ms);
+    assert!(
+        (before + 1_800_000..=after + 1_800_000).contains(&deadline),
+        "deadline is Unix ms now + deadline_s"
+    );
+
+    stage(&state, &[b"held"]).await;
+    grant(&s, 1).await;
+    assert!(
+        quiet_for(&mut s, Duration::from_mins(1)).await,
+        "a calibrating miner gets no job"
+    );
+    assert_eq!(state.lock().await.router.staged_len("m"), 1);
+
+    calibrate_done(&s, quip_proto::v1::CalibrateOutcome::Done).await;
+    let coord_msg::Msg::Job(j) = next_timed(&mut s.outbound).await else {
+        panic!("the job follows CalibrateDone without a new JobRequest");
+    };
+    assert_eq!(j.job_id, b"held".to_vec());
+}
+
+#[tokio::test(start_paused = true)]
+async fn miner_without_feature_is_not_calibrated() {
+    let state = calibration_state(true, 1800);
+    let mut s = join(&state, &[]).await;
+    assert!(matches!(
+        next_timed(&mut s.outbound).await,
+        coord_msg::Msg::Topology(_)
+    ));
+    stage(&state, &[b"now"]).await;
+    grant(&s, 1).await;
+    let coord_msg::Msg::Job(j) = next_timed(&mut s.outbound).await else {
+        panic!("a miner without the feature gets its job at once, never Calibrate");
+    };
+    assert_eq!(j.job_id, b"now".to_vec());
+    assert!(!state
+        .lock()
+        .await
+        .calibration
+        .as_ref()
+        .unwrap()
+        .pending("m"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn late_topology_triggers_calibration() {
+    let state = calibration_state(false, 1800);
+    let mut s = join(&state, &["calibrate"]).await;
+    // No topology yet, so no Calibrate: the miner hears nothing.
+    assert!(
+        quiet_for(&mut s, Duration::from_secs(5)).await,
+        "no Calibrate before the topology is cached"
+    );
+
+    // The feeder path: cache the topology, then broadcast it. Calibrate
+    // follows the Topology.
+    let topology = lease_topology();
+    state.lock().await.set_topology(Some(topology.clone()));
+    crate::coordinator::feeder::broadcast_topology(&state, topology.to_proto()).await;
+    assert!(matches!(
+        next_timed(&mut s.outbound).await,
+        coord_msg::Msg::Topology(_)
+    ));
+    let calibrate = expect_calibrate(next_timed(&mut s.outbound).await);
+    assert_eq!(calibrate.instances.len(), 2);
+
+    stage(&state, &[b"held"]).await;
+    grant(&s, 1).await;
+    assert!(quiet_for(&mut s, Duration::from_mins(1)).await);
+    calibrate_done(&s, quip_proto::v1::CalibrateOutcome::Failed).await;
+    assert!(
+        matches!(next_timed(&mut s.outbound).await, coord_msg::Msg::Job(j) if j.job_id == b"held")
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn silent_miner_resumes_after_deadline_and_grace() {
+    let state = calibration_state(true, 1);
+    let mut s = join(&state, &["calibrate"]).await;
+    assert!(matches!(
+        next_timed(&mut s.outbound).await,
+        coord_msg::Msg::Topology(_)
+    ));
+    let _ = expect_calibrate(next_timed(&mut s.outbound).await);
+    let start = tokio::time::Instant::now();
+    stage(&state, &[b"late"]).await;
+    grant(&s, 1).await;
+    assert!(
+        quiet_for(&mut s, Duration::from_secs(30)).await,
+        "the grace runs past the deadline"
+    );
+    let coord_msg::Msg::Job(j) = next_timed(&mut s.outbound).await else {
+        panic!("the timer frees the credits sent earlier");
+    };
+    assert_eq!(j.job_id, b"late".to_vec());
+    assert_eq!(start.elapsed(), Duration::from_secs(31));
+}
+
+/// A reconnect never calibrates again, and a miner that left mid-calibration
+/// is not held back when it returns.
+#[tokio::test(start_paused = true)]
+async fn calibrates_once_per_miner() {
+    let state = calibration_state(true, 1800);
+    let mut first = join(&state, &["calibrate"]).await;
+    assert!(matches!(
+        next_timed(&mut first.outbound).await,
+        coord_msg::Msg::Topology(_)
+    ));
+    let _ = expect_calibrate(next_timed(&mut first.outbound).await);
+    drop(first);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    let mut second = join(&state, &["calibrate"]).await;
+    assert!(matches!(
+        next_timed(&mut second.outbound).await,
+        coord_msg::Msg::Topology(_)
+    ));
+    stage(&state, &[b"again"]).await;
+    grant(&second, 1).await;
+    let coord_msg::Msg::Job(j) = next_timed(&mut second.outbound).await else {
+        panic!("the reconnected miner is not sent Calibrate again, and takes jobs");
+    };
+    assert_eq!(j.job_id, b"again".to_vec());
+}
+
+#[tokio::test(start_paused = true)]
+async fn duplicate_calibrate_done_is_ignored() {
+    init_capture();
+    let buf = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(Capture(Arc::clone(&buf)))
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let state = calibration_state(true, 1800);
+    let mut s = join(&state, &["calibrate"]).await;
+    assert!(matches!(
+        next_timed(&mut s.outbound).await,
+        coord_msg::Msg::Topology(_)
+    ));
+    let _ = expect_calibrate(next_timed(&mut s.outbound).await);
+    calibrate_done(&s, quip_proto::v1::CalibrateOutcome::Done).await;
+    calibrate_done(&s, quip_proto::v1::CalibrateOutcome::Done).await;
+    stage(&state, &[b"after"]).await;
+    grant(&s, 1).await;
+    assert!(
+        matches!(next_timed(&mut s.outbound).await, coord_msg::Msg::Job(j) if j.job_id == b"after"),
+        "the session stays open after a duplicate"
+    );
+    let output = drain(&buf);
+    assert_eq!(
+        output.matches("miner finished calibration").count(),
+        1,
+        "{output}"
+    );
+    assert!(
+        output.contains("miner sent CalibrateDone with no calibration outstanding; ignoring"),
+        "{output}"
+    );
 }

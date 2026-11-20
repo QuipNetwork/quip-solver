@@ -148,10 +148,26 @@ pub async fn run_session<S: SessionHost, E: SessionEvents>(
     {
         return;
     }
-    {
+    let topology_hash = {
         let st = state.lock().await;
+        let mut topology_hash = Vec::new();
         for msg in st.requirements() {
+            if let coord_msg::Msg::Topology(t) = &msg {
+                topology_hash.clone_from(&t.hash);
+            }
             let _ = tx.send(Ok(coord(msg))).await;
+        }
+        topology_hash
+    };
+    // A solver that calibrates gets its `Calibrate` after the topology and
+    // before any job. The events side holds back its jobs until it answers.
+    if let Some(calibrate) = events.calibration(&miner_id, &caps, &topology_hash).await {
+        if tx
+            .send(Ok(coord(coord_msg::Msg::Calibrate(calibrate))))
+            .await
+            .is_err()
+        {
+            return;
         }
     }
 
@@ -248,6 +264,10 @@ pub async fn run_session<S: SessionHost, E: SessionEvents>(
                 Flow::Continue
             }
             Some(miner_msg::Msg::LeaseDone(done)) => events.lease_done(&link, done).await,
+            Some(miner_msg::Msg::CalibrateDone(done)) => {
+                events.calibrate_done(&miner_id, &done).await;
+                Flow::Continue
+            }
             // An empty `msg` is a message this build cannot name: either a
             // field number the miner uses and this coordinator does not, or the
             // reverse. Version skew between the two arrives here and nowhere
