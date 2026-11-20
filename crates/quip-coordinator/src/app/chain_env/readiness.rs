@@ -178,60 +178,63 @@ where
     Ok(snap)
 }
 
-/// Download the calibration plan once at startup, from the snapshot the
-/// readiness walk read: the newest `qblocks` winners on the snapshot topology
-/// whose hardware `kinds` admits.
+/// Why [`plan_calibration`] built no plan.
+#[derive(Debug)]
+pub enum CalibrationSkip {
+    /// `[calibration].enabled` is false.
+    Disabled,
+    /// The challenge has no problem family.
+    NoFamily,
+    /// The snapshot topology hash is not 32 bytes.
+    BadTopologyHash(String),
+    /// `kinds` names an unknown hardware class.
+    BadKinds(String),
+    /// The winners could not be read.
+    Read(crate::chain::ChainError),
+    /// No winner qualifies on the snapshot topology.
+    NoWinners,
+}
+
+impl std::fmt::Display for CalibrationSkip {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Disabled => write!(f, "[calibration].enabled is false"),
+            Self::NoFamily => write!(f, "the challenge has no problem family"),
+            Self::BadTopologyHash(hash) => {
+                write!(f, "the snapshot topology hash {hash} is not 32 bytes")
+            }
+            Self::BadKinds(e) => write!(f, "bad hardware kinds: {e}"),
+            Self::Read(e) => write!(f, "cannot read reference winners: {e}"),
+            Self::NoWinners => write!(f, "no reference winner on this topology"),
+        }
+    }
+}
+
+/// Build the calibration plan from the snapshot: the newest `qblocks` winners
+/// on the snapshot topology whose hardware `kinds` admits.
 ///
-/// Returns `None`, and logs why, when calibration is off, the challenge has
-/// no family, no winner qualifies, or the read fails. Mining goes on in every
-/// case; the miners just take jobs without calibrating.
-pub async fn prepare_calibration(
+/// # Errors
+/// [`CalibrationSkip`] names why no plan exists.
+pub async fn plan_calibration(
     chain: &(impl ChainClient + ?Sized),
     snapshot: &MiningSnapshot,
     cfg: &CalibrationConfig,
-) -> Option<CalibrationPlan> {
+) -> Result<CalibrationPlan, CalibrationSkip> {
     if !cfg.enabled {
-        tracing::info!("calibration skipped: [calibration].enabled is false");
-        return None;
+        return Err(CalibrationSkip::Disabled);
     }
-    let Some(family) = snapshot.family.as_ref() else {
-        tracing::info!("calibration skipped: the challenge has no problem family");
-        return None;
-    };
-    let Ok(topology_hash) = <[u8; 32]>::try_from(snapshot.topology_hash.as_slice()) else {
-        tracing::warn!(
-            topology = %hex_encode(&snapshot.topology_hash),
-            "calibration skipped: the snapshot topology hash is not 32 bytes"
-        );
-        return None;
-    };
+    let family = snapshot.family.as_ref().ok_or(CalibrationSkip::NoFamily)?;
+    let topology_hash = <[u8; 32]>::try_from(snapshot.topology_hash.as_slice())
+        .map_err(|_| CalibrationSkip::BadTopologyHash(hex_encode(&snapshot.topology_hash)))?;
     // Config load already parsed `kinds`, so this only fails for a config
     // built without `parse_config`.
-    let filter = match HardwareFilter::parse(&cfg.kinds) {
-        Ok(filter) => filter,
-        Err(e) => {
-            tracing::warn!(error = %e, "calibration skipped: bad [calibration].kinds");
-            return None;
-        }
-    };
+    let filter = HardwareFilter::parse(&cfg.kinds).map_err(CalibrationSkip::BadKinds)?;
     let count = usize::try_from(cfg.qblocks).unwrap_or(usize::MAX);
-    let winners = match reference_winners(chain, &topology_hash, &filter, count).await {
-        Ok(winners) => winners,
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "calibration skipped: cannot read reference winners; miners take jobs without it"
-            );
-            return None;
-        }
-    };
+    let winners = reference_winners(chain, &topology_hash, &filter, count)
+        .await
+        .map_err(CalibrationSkip::Read)?;
     if winners.is_empty() {
-        tracing::info!(
-            topology = %hex_encode(&topology_hash),
-            kinds = ?cfg.kinds,
-            "calibration skipped: no reference winner on this topology"
-        );
-        return None;
+        return Err(CalibrationSkip::NoWinners);
     }
     tracing::info!(
         qblocks = ?winners.iter().map(|w| w.qblock_id).collect::<Vec<_>>(),
@@ -241,12 +244,43 @@ pub async fn prepare_calibration(
         deadline_s = cfg.deadline_s,
         "calibration prepared"
     );
-    Some(CalibrationPlan::prepare(
+    Ok(CalibrationPlan::prepare(
         family.descriptor().clone(),
         topology_hash,
         &winners,
         cfg.deadline_s,
     ))
+}
+
+/// Download the calibration plan once at startup, from the snapshot the
+/// readiness walk read; see [`plan_calibration`].
+///
+/// Returns `None`, and logs why, when calibration is off, the challenge has
+/// no family, no winner qualifies, or the read fails. Mining goes on in every
+/// case; the miners just take jobs without calibrating.
+pub async fn prepare_calibration(
+    chain: &(impl ChainClient + ?Sized),
+    snapshot: &MiningSnapshot,
+    cfg: &CalibrationConfig,
+) -> Option<CalibrationPlan> {
+    match plan_calibration(chain, snapshot, cfg).await {
+        Ok(plan) => Some(plan),
+        Err(skip @ (CalibrationSkip::BadTopologyHash(_) | CalibrationSkip::BadKinds(_))) => {
+            tracing::warn!(reason = %skip, "calibration skipped");
+            None
+        }
+        Err(CalibrationSkip::Read(e)) => {
+            tracing::warn!(
+                error = %e,
+                "calibration skipped: cannot read reference winners; miners take jobs without it"
+            );
+            None
+        }
+        Err(skip) => {
+            tracing::info!(reason = %skip, kinds = ?cfg.kinds, "calibration skipped");
+            None
+        }
+    }
 }
 
 /// Register the signing account with `QuantumPow.register_miner`.
