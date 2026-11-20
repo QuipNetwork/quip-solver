@@ -86,7 +86,7 @@ quip-coordinator drive --miner ./miners/quip-cpu-sa --source lease \
 
 # Calibrate one miner on the newest winners of a validator. Read-only, no signer.
 quip-coordinator calibrate --miner ./miners/quip-cpu-sa \
-  --validator ws://127.0.0.1:9944 --qblocks 40 --kinds gpu
+  --validator ws://127.0.0.1:9944 --qblocks 40 --kinds cpu
 
 # Seed a fresh runtime-120 chain with the dimer1200 family topology.
 # Give exactly one of --sudo-key or --mnemonic-file.
@@ -177,9 +177,13 @@ The `[calibration]` section tunes miners that list the `calibrate` feature. The
 coordinator reads the newest winners once at startup and sends them to each such
 miner once, before its first job. `enabled` defaults to `true`, `qblocks` to 40
 (1 to 1000), `kinds` to empty (`cpu`, `gpu`, `qpu`), and `deadline_s` to 1800.
+The `qblocks` value is an upper bound. The walk visits at most 4 x `qblocks`
+qblocks, so a rare topology or a narrow `kinds` filter can give fewer winners
+or none. No winner means no calibration.
 A miner takes jobs after it answers, or 30 seconds after its deadline. The
 `calibrate` subcommand runs the same exchange for one miner and prints
-`outcome=... summary=...`. See `docs/COORDINATOR.md`.
+`outcome=... summary=...`. A miner that does not list the `calibrate` feature
+makes the subcommand exit 64. See `docs/COORDINATOR.md`.
 
 `signer_key` accepts a keystore path, a 32-byte hex master seed, or a `//DevUri`
 such as `//Alice`. It also accepts any substrate secret URI, including a BIP39
