@@ -11,7 +11,7 @@ use crate::coordinator::state::CoordinatorState;
 use crate::coordinator::ResultSink;
 use crate::miner::session::handlers::{Flow, SessionLink};
 use crate::miner::SessionEvents;
-use quip_proto::v1::Capabilities;
+use quip_proto::v1::{Calibrate, CalibrateDone, CalibrateOutcome, Capabilities};
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
 
@@ -221,6 +221,60 @@ impl<R: ResultSink + ?Sized + 'static> SessionEvents for CoordinatorService<R> {
         drop(st);
         for ev in &events {
             log_liveness(miner_id, qblock, ev);
+        }
+    }
+
+    async fn calibration(
+        &self,
+        miner_id: &str,
+        caps: &Capabilities,
+        topology_hash: &[u8],
+    ) -> Option<Calibrate> {
+        let mut st = self.state.lock().await;
+        // The miner reconnected while its calibration was open. The new
+        // process never saw that `Calibrate`, and calibration runs once per
+        // miner id, so end it rather than hold the miner back until the timer.
+        if st.calibration.as_ref().is_some_and(|p| p.pending(miner_id))
+            && crate::coordinator::calibration::end(&mut st, miner_id)
+        {
+            tracing::warn!(
+                miner = %miner_id,
+                "miner reconnected during calibration; giving it jobs without one"
+            );
+            return None;
+        }
+        crate::coordinator::calibration::start_due(
+            &self.state,
+            &mut st,
+            miner_id,
+            &caps.features,
+            topology_hash,
+        )
+    }
+
+    async fn calibrate_done(&self, miner_id: &str, done: &CalibrateDone) {
+        let ended = crate::coordinator::calibration::end(&mut *self.state.lock().await, miner_id);
+        if !ended {
+            tracing::warn!(
+                miner = %miner_id,
+                "miner sent CalibrateDone with no calibration outstanding; ignoring"
+            );
+            return;
+        }
+        let summary = done.summary.as_deref().unwrap_or("");
+        match CalibrateOutcome::try_from(done.outcome) {
+            Ok(CalibrateOutcome::Done) => tracing::info!(
+                miner = %miner_id,
+                outcome = "DONE",
+                summary,
+                "miner finished calibration"
+            ),
+            outcome => tracing::warn!(
+                miner = %miner_id,
+                outcome = %outcome.map_or_else(|_| format!("Unknown({})", done.outcome), |o| o.as_str_name().to_owned()),
+                summary,
+                "miner finished calibration without new tuning; it keeps its current tuning"
+            ),
         }
     }
 

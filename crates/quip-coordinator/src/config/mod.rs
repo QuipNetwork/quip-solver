@@ -57,6 +57,14 @@ pub enum ConfigError {
         /// The pin, as written in the config.
         pin: String,
     },
+    /// A `[calibration]` key has the wrong type, is out of range, or names
+    /// an unknown hardware kind.
+    InvalidCalibration {
+        /// Key name, e.g. `qblocks`.
+        key: &'static str,
+        /// What is wrong with the value.
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for ConfigError {
@@ -78,6 +86,9 @@ impl std::fmt::Display for ConfigError {
                 f,
                 "[miner].solver_pin {pin:?} is neither a configured miner id nor a valid solver_id"
             ),
+            Self::InvalidCalibration { key, reason } => {
+                write!(f, "bad [calibration].{key}: {reason}")
+            }
             Self::DuplicateCudaDevice { device } => {
                 write!(f, "two [cuda] sections resolve to device {device}")
             }
@@ -143,6 +154,91 @@ pub struct CoordinatorConfig {
     /// Limits family work to this miner id or `solver_id`. `None` keeps every
     /// compatible miner.
     pub solver_pin: Option<String>,
+    /// `[calibration]`: what a solver tunes on before its first job.
+    pub calibration: CalibrationConfig,
+}
+
+/// Largest `[calibration].qblocks` value.
+pub const MAX_CALIBRATION_QBLOCKS: u32 = 1000;
+
+/// `[calibration]` config: the recent winners a solver that lists the
+/// `calibrate` feature tunes on before it takes jobs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CalibrationConfig {
+    /// Whether to calibrate at all. Defaults to `true`.
+    pub enabled: bool,
+    /// How many recent winning qblocks to send, `1..=1000`. Defaults to 40.
+    pub qblocks: u32,
+    /// Hardware classes the winners must come from: `cpu`, `gpu`, `qpu`.
+    /// Empty admits every winner. Checked at load.
+    pub kinds: Vec<String>,
+    /// Seconds a solver has to calibrate. Greater than zero. Defaults to 1800.
+    pub deadline_s: u64,
+}
+
+impl Default for CalibrationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            qblocks: 40,
+            kinds: Vec::new(),
+            deadline_s: 1800,
+        }
+    }
+}
+
+fn calibration_error(key: &'static str, reason: impl Into<String>) -> ConfigError {
+    ConfigError::InvalidCalibration {
+        key,
+        reason: reason.into(),
+    }
+}
+
+fn parse_calibration(root: &toml::Table) -> Result<CalibrationConfig, ConfigError> {
+    let mut cfg = CalibrationConfig::default();
+    let Some(section) = root.get("calibration") else {
+        return Ok(cfg);
+    };
+    let table = section
+        .as_table()
+        .ok_or_else(|| ConfigError::BadToml("[calibration] must be a table".into()))?;
+    if let Some(v) = table.get("enabled") {
+        cfg.enabled = v
+            .as_bool()
+            .ok_or_else(|| calibration_error("enabled", "expected true or false"))?;
+    }
+    if let Some(v) = table.get("qblocks") {
+        cfg.qblocks = v
+            .as_integer()
+            .and_then(|i| u32::try_from(i).ok())
+            .filter(|n| (1..=MAX_CALIBRATION_QBLOCKS).contains(n))
+            .ok_or_else(|| {
+                calibration_error(
+                    "qblocks",
+                    format!("expected an integer from 1 to {MAX_CALIBRATION_QBLOCKS}"),
+                )
+            })?;
+    }
+    if let Some(v) = table.get("kinds") {
+        cfg.kinds = v
+            .as_array()
+            .and_then(|a| {
+                a.iter()
+                    .map(|k| k.as_str().map(String::from))
+                    .collect::<Option<Vec<_>>>()
+            })
+            .ok_or_else(|| calibration_error("kinds", "expected an array of strings"))?;
+        let _ = crate::types::calibration::HardwareFilter::parse(&cfg.kinds)
+            .map_err(|e| calibration_error("kinds", e))?;
+    }
+    if let Some(v) = table.get("deadline_s") {
+        cfg.deadline_s = v
+            .as_integer()
+            .and_then(|i| u64::try_from(i).ok())
+            .filter(|&n| n > 0)
+            .ok_or_else(|| calibration_error("deadline_s", "expected an integer above 0"))?;
+    }
+    Ok(cfg)
 }
 
 /// `[dashboard]` config: where to serve the attempt logs and where they live.
@@ -395,6 +491,7 @@ pub fn parse_config(toml_text: &str) -> Result<CoordinatorConfig, ConfigError> {
 
     let launch = parse_launch(&root)?;
     let dashboard = parse_dashboard(&root);
+    let calibration = parse_calibration(&root)?;
 
     if launch.is_empty() {
         // Keys that only ever existed in the v0.2 `quip-miner` config. The v0.3
@@ -434,6 +531,7 @@ pub fn parse_config(toml_text: &str) -> Result<CoordinatorConfig, ConfigError> {
         auto_mine: identity.auto_mine,
         node_log_level: identity.node_log_level,
         solver_pin,
+        calibration,
     })
 }
 
@@ -473,6 +571,61 @@ budget_reset_day = 1
     }
 
     const IDENTITY: &str = "public_host = \"h\"\npublic_port = 1\n";
+
+    #[test]
+    fn calibration_defaults_without_a_section() {
+        let c = parse_config(&cpu_config(IDENTITY)).unwrap();
+        assert_eq!(
+            c.calibration,
+            CalibrationConfig {
+                enabled: true,
+                qblocks: 40,
+                kinds: vec![],
+                deadline_s: 1800,
+            }
+        );
+    }
+
+    #[test]
+    fn calibration_section_parses_every_key() {
+        let toml = format!(
+            "{}\n[calibration]\nenabled = false\nqblocks = 1000\n\
+             kinds = [\"gpu\", \"qpu\"]\ndeadline_s = 1\n",
+            cpu_config(IDENTITY)
+        );
+        let c = parse_config(&toml).unwrap();
+        assert_eq!(
+            c.calibration,
+            CalibrationConfig {
+                enabled: false,
+                qblocks: 1000,
+                kinds: vec!["gpu".into(), "qpu".into()],
+                deadline_s: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn calibration_rejects_bad_values() {
+        for (body, key) in [
+            ("qblocks = 0", "qblocks"),
+            ("qblocks = 1001", "qblocks"),
+            ("qblocks = \"40\"", "qblocks"),
+            ("kinds = [\"tpu\"]", "kinds"),
+            ("kinds = \"gpu\"", "kinds"),
+            ("deadline_s = 0", "deadline_s"),
+            ("enabled = 1", "enabled"),
+        ] {
+            let toml = format!("{}\n[calibration]\n{body}\n", cpu_config(IDENTITY));
+            assert!(
+                matches!(
+                    parse_config(&toml),
+                    Err(ConfigError::InvalidCalibration { key: k, .. }) if k == key
+                ),
+                "{body}"
+            );
+        }
+    }
 
     /// The D-Wave launch entry and its parsed `backend_toml`.
     fn dwave_entry(

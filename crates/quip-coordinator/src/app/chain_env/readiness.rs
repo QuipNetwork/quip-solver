@@ -21,11 +21,14 @@ use crate::chain::{
 use crate::types::hex::hex_encode;
 use crate::types::snapshot::MiningSnapshot;
 
+use crate::chain::mining::winners::reference_winners;
 use crate::chain::registration::funding::{
     ensure_funded, BalanceSource, Faucet, FundingError, FundingParams, HttpFaucet,
 };
-use crate::config::DescriptorParams;
+use crate::config::{CalibrationConfig, DescriptorParams};
+use crate::coordinator::calibration::CalibrationPlan;
 use crate::coordinator::round::{RoundEvent, RoundState};
+use crate::types::calibration::HardwareFilter;
 use sp_core::crypto::{AccountId32, Ss58Codec};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -173,6 +176,77 @@ where
     file_round_descriptor(chain, latches.descriptor_filed, descriptor, account).await;
     let _ = state.transition(RoundEvent::Succeeded);
     Ok(snap)
+}
+
+/// Download the calibration plan once at startup, from the snapshot the
+/// readiness walk read: the newest `qblocks` winners on the snapshot topology
+/// whose hardware `kinds` admits.
+///
+/// Returns `None`, and logs why, when calibration is off, the challenge has
+/// no family, no winner qualifies, or the read fails. Mining goes on in every
+/// case; the miners just take jobs without calibrating.
+pub async fn prepare_calibration(
+    chain: &(impl ChainClient + ?Sized),
+    snapshot: &MiningSnapshot,
+    cfg: &CalibrationConfig,
+) -> Option<CalibrationPlan> {
+    if !cfg.enabled {
+        tracing::info!("calibration skipped: [calibration].enabled is false");
+        return None;
+    }
+    let Some(family) = snapshot.family.as_ref() else {
+        tracing::info!("calibration skipped: the challenge has no problem family");
+        return None;
+    };
+    let Ok(topology_hash) = <[u8; 32]>::try_from(snapshot.topology_hash.as_slice()) else {
+        tracing::warn!(
+            topology = %hex_encode(&snapshot.topology_hash),
+            "calibration skipped: the snapshot topology hash is not 32 bytes"
+        );
+        return None;
+    };
+    // Config load already parsed `kinds`, so this only fails for a config
+    // built without `parse_config`.
+    let filter = match HardwareFilter::parse(&cfg.kinds) {
+        Ok(filter) => filter,
+        Err(e) => {
+            tracing::warn!(error = %e, "calibration skipped: bad [calibration].kinds");
+            return None;
+        }
+    };
+    let count = usize::try_from(cfg.qblocks).unwrap_or(usize::MAX);
+    let winners = match reference_winners(chain, &topology_hash, &filter, count).await {
+        Ok(winners) => winners,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "calibration skipped: cannot read reference winners; miners take jobs without it"
+            );
+            return None;
+        }
+    };
+    if winners.is_empty() {
+        tracing::info!(
+            topology = %hex_encode(&topology_hash),
+            kinds = ?cfg.kinds,
+            "calibration skipped: no reference winner on this topology"
+        );
+        return None;
+    }
+    tracing::info!(
+        qblocks = ?winners.iter().map(|w| w.qblock_id).collect::<Vec<_>>(),
+        count = winners.len(),
+        kinds = ?cfg.kinds,
+        family = %family.descriptor().family_id,
+        deadline_s = cfg.deadline_s,
+        "calibration prepared"
+    );
+    Some(CalibrationPlan::prepare(
+        family.descriptor().clone(),
+        topology_hash,
+        &winners,
+        cfg.deadline_s,
+    ))
 }
 
 /// Register the signing account with `QuantumPow.register_miner`.
@@ -944,5 +1018,172 @@ token = "{SENTINEL}"
             missing.contains("0xabababab"),
             "DescriptorRequired must name the account, got {missing:?}"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Calibration
+    // ---------------------------------------------------------------------
+
+    static FAMILY_TABLE: [ising_generators::descriptor::Contract; 1] =
+        [quip_solver_conformance::families::layered::UNIFORM_V1];
+
+    /// A four-node ring snapshot, with an admitted family when `family` is set.
+    fn ring_snapshot(family: bool) -> MiningSnapshot {
+        let nodes = vec![0, 1, 2, 3];
+        let edges = vec![(0, 1), (1, 2), (2, 3), (0, 3)];
+        let (h, j, spin) = (vec![-1000, 0, 1000], vec![-1000, 1000], vec![-1000, 1000]);
+        let topology = crate::types::topology::Topology::from_nodes_edges(
+            nodes.clone(),
+            edges.clone(),
+            &h,
+            &j,
+            &spin,
+        );
+        MiningSnapshot {
+            topology_hash: topology.hash.clone(),
+            nodes,
+            edges,
+            allowed_h_milli: h,
+            allowed_j_milli: j,
+            allowed_spin_milli: spin,
+            family: family.then(|| {
+                crate::types::family::ChallengeFamily::admit(
+                    &FAMILY_TABLE,
+                    "vectors/uniform-field",
+                    1,
+                    quip_solver_conformance::families::layered::P_SPEC.to_vec(),
+                    &topology,
+                )
+                .expect("family admits on the ring")
+            }),
+            ..snap()
+        }
+    }
+
+    /// Script qblocks `1..=kinds.len()` on the snapshot topology, newest last.
+    fn script_winners(chain: &FakeChain, snapshot: &MiningSnapshot, kinds: &[MinerKind]) {
+        let topology_hash: [u8; 32] = snapshot.topology_hash.clone().try_into().expect("32 bytes");
+        for (i, kind) in kinds.iter().enumerate() {
+            let id = u64::try_from(i + 1).expect("small id");
+            chain.script_qblock(
+                id,
+                crate::types::calibration::ReferenceWinner {
+                    qblock_id: id,
+                    miner: [u8::try_from(id).expect("small id"); 32],
+                    nonce: [u8::try_from(id).expect("small id"); 32],
+                    energy_milli: -5000,
+                    max_energy_milli: -4000,
+                    topology_hash,
+                    kind: Some(*kind),
+                },
+            );
+        }
+        chain.set_qblock_id(Some(u64::try_from(kinds.len()).expect("small count")));
+    }
+
+    fn calibrate_features() -> Vec<String> {
+        vec![crate::miner::CALIBRATE_FEATURE.to_owned()]
+    }
+
+    #[tokio::test]
+    async fn no_family_or_no_winners_skips_calibration() {
+        use crate::coordinator::router::MinerCaps;
+        use crate::miner::SessionEvents as _;
+
+        let cfg = crate::config::CalibrationConfig::default();
+        // No family on the challenge.
+        let no_family = ring_snapshot(false);
+        let chain = FakeChain::new(no_family.clone(), None);
+        script_winners(&chain, &no_family, &[MinerKind::Gpu]);
+        assert!(super::prepare_calibration(&chain, &no_family, &cfg)
+            .await
+            .is_none());
+        // A family, but no winner yet.
+        let with_family = ring_snapshot(true);
+        let chain = FakeChain::new(with_family.clone(), None);
+        assert!(super::prepare_calibration(&chain, &with_family, &cfg)
+            .await
+            .is_none());
+        // Turned off: nothing is read.
+        let chain = FakeChain::new(with_family.clone(), None);
+        script_winners(&chain, &with_family, &[MinerKind::Gpu]);
+        let off = crate::config::CalibrationConfig {
+            enabled: false,
+            ..cfg
+        };
+        assert!(super::prepare_calibration(&chain, &with_family, &off)
+            .await
+            .is_none());
+        assert_eq!(chain.qblock_reads(), 0);
+
+        // Without a plan, a miner that lists the feature takes jobs at once.
+        let state = Arc::new(tokio::sync::Mutex::new(
+            crate::coordinator::state::CoordinatorState::new(),
+        ));
+        let events = crate::coordinator::events::CoordinatorService {
+            state: Arc::clone(&state),
+            sink: Arc::new(FakeChain::new(with_family.clone(), None)),
+            submit_notify: Arc::new(tokio::sync::Mutex::new(None)),
+        };
+        let caps = quip_proto::v1::Capabilities {
+            protocol_version: quip_protocol::session::PROTOCOL_VERSION,
+            features: calibrate_features(),
+            ..quip_proto::v1::Capabilities::default()
+        };
+        events.joined("m", &caps).await;
+        assert!(events
+            .calibration("m", &caps, &with_family.topology_hash)
+            .await
+            .is_none());
+        let mut st = state.lock().await;
+        st.router.register_miner("m", MinerCaps::default());
+        assert!(st.router.stage_on(
+            "m",
+            quip_proto::v1::Job {
+                job_id: b"j".to_vec(),
+                ..quip_proto::v1::Job::default()
+            }
+        ));
+        st.router.grant_credits("m", 1);
+        assert!(st.router.next_job("m").is_some(), "jobs flow");
+    }
+
+    #[tokio::test]
+    async fn startup_sends_configured_count_and_kinds() {
+        let snapshot = ring_snapshot(true);
+        let chain = FakeChain::new(snapshot.clone(), None);
+        // Ids 1..=5, newest last: GPU, CPU, GPU, CPU, GPU.
+        script_winners(
+            &chain,
+            &snapshot,
+            &[
+                MinerKind::Gpu,
+                MinerKind::Cpu,
+                MinerKind::Gpu,
+                MinerKind::Cpu,
+                MinerKind::Gpu,
+            ],
+        );
+        let cfg = crate::config::CalibrationConfig {
+            qblocks: 2,
+            kinds: vec!["gpu".into()],
+            ..crate::config::CalibrationConfig::default()
+        };
+        let mut plan = super::prepare_calibration(&chain, &snapshot, &cfg)
+            .await
+            .expect("a plan");
+        let calibrate = plan
+            .due_for("m", &calibrate_features(), &snapshot.topology_hash, 0)
+            .expect("due");
+        let ids: Vec<&str> = calibrate.instances.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["5", "3"], "the two newest GPU winners");
+        assert_eq!(
+            calibrate.family.as_ref(),
+            snapshot
+                .family
+                .as_ref()
+                .map(crate::types::family::ChallengeFamily::descriptor)
+        );
+        assert_eq!(calibrate.deadline_ms, 1_800_000);
     }
 }

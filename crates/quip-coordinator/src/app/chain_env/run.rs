@@ -90,7 +90,7 @@ pub fn run(config_path: &Path, cfg: CoordinatorConfig, log_level: LogLevel) -> S
     }
     let descriptor_filed = Arc::new(AtomicBool::new(false));
     let miner_registered = Arc::new(AtomicBool::new(false));
-    if let Some(code) = run_startup_prepare(
+    let snapshot = match run_startup_prepare(
         &rt,
         chain.as_ref(),
         miner_account,
@@ -101,8 +101,22 @@ pub fn run(config_path: &Path, cfg: CoordinatorConfig, log_level: LogLevel) -> S
             miner_registered: miner_registered.as_ref(),
         },
     ) {
-        return code;
-    }
+        Ok(snapshot) => snapshot,
+        Err(code) => return code,
+    };
+    // The winners download once, here, before the supervisor spawns any
+    // miner, so the plan is in place for the first handshake.
+    let calibration = if let Some(snap) = &snapshot {
+        rt.block_on(super::readiness::prepare_calibration(
+            chain.as_ref(),
+            snap,
+            &cfg.calibration,
+        ))
+    } else {
+        tracing::info!("calibration skipped: no mining snapshot at startup");
+        None
+    };
+    rt.block_on(state.lock()).calibration = calibration;
 
     let params = RuntimeParams {
         sock_path: format!("/tmp/quip-coordinator-{}.sock", std::process::id()),
@@ -246,7 +260,8 @@ fn identity_from_keys(
 /// Same readiness walk the feeder re-runs on every later round.
 ///
 /// Funding failure is fatal at startup (exit 64). A missing snapshot is not:
-/// the feeder retries once miners are connected.
+/// the feeder retries once miners are connected. Returns the snapshot the walk
+/// read, or `None` when it read none.
 fn run_startup_prepare(
     rt: &tokio::runtime::Runtime,
     chain: &RealChainClient,
@@ -254,7 +269,7 @@ fn run_startup_prepare(
     funding: &crate::chain::registration::funding::FundingParams,
     descriptor: &crate::config::DescriptorParams,
     latches: &super::readiness::ProcessLatches<'_>,
-) -> Option<StdExitCode> {
+) -> Result<Option<crate::types::snapshot::MiningSnapshot>, StdExitCode> {
     let faucet = super::readiness::build_faucet(funding.faucet_url.as_deref());
     match rt.block_on(super::readiness::prepare_round(
         chain,
@@ -265,17 +280,17 @@ fn run_startup_prepare(
         descriptor,
         latches,
     )) {
-        Ok(_) => None,
+        Ok(snapshot) => Ok(Some(snapshot)),
         Err(super::readiness::ReadinessError::Funding(e)) => {
             tracing::error!(error = %e, "miner account is not funded; refusing to start");
-            Some(StdExitCode::from(ExitCode::ConfigInvalid as u8))
+            Err(StdExitCode::from(ExitCode::ConfigInvalid as u8))
         }
         Err(super::readiness::ReadinessError::Snapshot(e)) => {
             tracing::warn!(
                 error = %e,
                 "no mining snapshot at startup; feeder will retry"
             );
-            None
+            Ok(None)
         }
     }
 }
