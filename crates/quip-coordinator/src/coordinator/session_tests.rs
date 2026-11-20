@@ -1470,15 +1470,14 @@ async fn miner_without_feature_is_not_calibrated() {
 async fn late_topology_triggers_calibration() {
     let state = calibration_state(false, 1800);
     let mut s = join(&state, &["calibrate"]).await;
-    stage(&state, &[b"early"]).await;
-    grant(&s, 1).await;
-    // No topology yet, so no calibration: the miner may take work.
-    let coord_msg::Msg::Job(j) = next_timed(&mut s.outbound).await else {
-        panic!("without a topology the miner is not held back");
-    };
-    assert_eq!(j.job_id, b"early".to_vec());
+    // No topology yet, so no Calibrate: the miner hears nothing.
+    assert!(
+        quiet_for(&mut s, Duration::from_secs(5)).await,
+        "no Calibrate before the topology is cached"
+    );
 
-    // The feeder path: cache the topology, then broadcast it.
+    // The feeder path: cache the topology, then broadcast it. Calibrate
+    // follows the Topology.
     let topology = lease_topology();
     state.lock().await.set_topology(Some(topology.clone()));
     crate::coordinator::feeder::broadcast_topology(&state, topology.to_proto()).await;
