@@ -10,7 +10,7 @@ use crate::config::{CalibrationConfig, MAX_CALIBRATION_QBLOCKS};
 use crate::coordinator::calibration::CalibrationPlan;
 pub use crate::coordinator::calibration::CALIBRATION_GRACE;
 use crate::miner::session::handlers::{Flow, SessionLink};
-use crate::miner::SessionEvents;
+use crate::miner::{SessionEvents, CALIBRATE_FEATURE};
 use crate::types::calibration::HardwareFilter;
 use crate::types::log::LogLevel;
 use crate::types::topology::Topology;
@@ -108,6 +108,8 @@ impl std::error::Error for CalibrateError {}
 enum Event {
     /// The miner does not list the `calibrate` feature.
     Unsupported,
+    /// The plan had no `Calibrate` due for a miner that lists the feature.
+    NotDue,
     /// The miner answered.
     Done(CalibrateDone),
     /// The miner gave up.
@@ -122,8 +124,8 @@ struct CalibrateService {
     link: StdMutex<Option<SessionLink>>,
     /// The miner completed the `Hello` handshake.
     joined: AtomicBool,
-    /// The miner lacks the `calibrate` feature; the session ends at once.
-    unsupported: AtomicBool,
+    /// No `Calibrate` was sent; the session ends at once.
+    abort: AtomicBool,
 }
 
 impl CalibrateService {
@@ -173,14 +175,19 @@ impl SessionEvents for CalibrateService {
         caps: &Capabilities,
         topology_hash: &[u8],
     ) -> Option<Calibrate> {
+        if !caps.features.iter().any(|f| f == CALIBRATE_FEATURE) {
+            self.abort.store(true, Ordering::SeqCst);
+            self.emit(Event::Unsupported);
+            return None;
+        }
         let due =
             self.plan
                 .lock()
                 .await
                 .due_for(miner_id, &caps.features, topology_hash, now_unix_ms());
         if due.is_none() {
-            self.unsupported.store(true, Ordering::SeqCst);
-            self.emit(Event::Unsupported);
+            self.abort.store(true, Ordering::SeqCst);
+            self.emit(Event::NotDue);
         }
         due
     }
@@ -198,7 +205,7 @@ impl SessionEvents for CalibrateService {
         if let Ok(mut slot) = self.link.lock() {
             *slot = Some(link.clone());
         }
-        if self.unsupported.load(Ordering::SeqCst) {
+        if self.abort.load(Ordering::SeqCst) {
             link.shutdown(500).await;
             return Flow::End;
         }
@@ -316,7 +323,7 @@ pub async fn calibrate_miner(
         events,
         link: StdMutex::new(None),
         joined: AtomicBool::new(false),
-        unsupported: AtomicBool::new(false),
+        abort: AtomicBool::new(false),
     });
     let MinerSession {
         state,
@@ -374,6 +381,9 @@ fn outcome_of(
         Waited::Event(Event::Done(done)) => Ok(result_of(&done)),
         Waited::Event(Event::Unsupported) => Err(CalibrateError::Usage(
             "the miner does not list the calibrate feature".to_owned(),
+        )),
+        Waited::Event(Event::NotDue) => Err(CalibrateError::Incomplete(
+            "internal error: no Calibrate was due for the miner (topology mismatch)".to_owned(),
         )),
         Waited::Event(Event::Fatal) => Err(CalibrateError::Incomplete(
             "the miner sent Fatal before it answered".to_owned(),

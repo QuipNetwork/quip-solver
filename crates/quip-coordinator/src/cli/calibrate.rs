@@ -37,7 +37,8 @@ pub(crate) struct CalibrateArgs {
 /// Exit code for a finished run: 0 for `DONE`, 1 for any other outcome or an
 /// unfinished run, 64 for a request, miner, or chain state that cannot
 /// calibrate, 69 for an RPC error, 70 for a miner that never joined.
-pub(crate) fn exit_code(result: &Result<CalibrateReport, CalibrateError>) -> StdExitCode {
+#[must_use]
+pub fn exit_code(result: &Result<CalibrateReport, CalibrateError>) -> StdExitCode {
     match result {
         Ok(report) if report.result == CalibrateResult::Done => {
             StdExitCode::from(ExitCode::Clean as u8)
@@ -67,11 +68,29 @@ pub(crate) fn run_calibrate_cli(args: &CalibrateArgs, log_level: LogLevel) -> St
 
 /// Run the calibration against `chain`, print the outcome line, and map the
 /// result to an exit code.
-#[expect(
-    clippy::print_stdout,
-    clippy::print_stderr,
-    reason = "CLI binary: the outcome line goes to stdout, errors to stderr"
-)]
+/// Write the outcome line to `out` (or the error to `err`) and return the
+/// exit code of `result`.
+#[must_use]
+pub fn render_outcome(
+    result: &Result<CalibrateReport, CalibrateError>,
+    out: &mut impl std::io::Write,
+    err: &mut impl std::io::Write,
+) -> StdExitCode {
+    // A closed stdout or stderr leaves nothing to report to; the exit code stands.
+    let _ = match result {
+        Ok(report) => writeln!(
+            out,
+            "outcome={} summary={}",
+            report.result.label(),
+            report.summary
+        ),
+        Err(error) => writeln!(err, "error: {error}"),
+    };
+    exit_code(result)
+}
+
+/// Run the calibration against `chain`, print the outcome line, and map the
+/// result to an exit code.
 pub(crate) async fn calibrate_main(
     chain: &(impl ChainClient + ?Sized),
     args: &CalibrateArgs,
@@ -95,13 +114,5 @@ pub(crate) async fn calibrate_main(
         },
     )
     .await;
-    match &result {
-        Ok(report) => println!(
-            "outcome={} summary={}",
-            report.result.label(),
-            report.summary
-        ),
-        Err(error) => eprintln!("error: {error}"),
-    }
-    exit_code(&result)
+    render_outcome(&result, &mut std::io::stdout(), &mut std::io::stderr())
 }

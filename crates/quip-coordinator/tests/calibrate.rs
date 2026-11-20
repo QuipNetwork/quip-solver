@@ -13,6 +13,7 @@ use common::mock_miner;
 use quip_coordinator::app::local_env::{
     calibrate_miner, CalibrateError, CalibrateReport, CalibrateRequest, CalibrateResult,
 };
+use quip_coordinator::cli::calibrate::render_outcome;
 use quip_coordinator::testing::fake_chain::FakeChain;
 use quip_coordinator::types::calibration::ReferenceWinner;
 use quip_coordinator::types::family::ChallengeFamily;
@@ -196,7 +197,8 @@ async fn miner_without_feature_is_a_usage_error_before_anything_is_sent() {
         matches!(&error, CalibrateError::Usage(m) if m.contains("calibrate feature")),
         "{error}"
     );
-    assert!(started.elapsed() < Duration::from_secs(25), "slow shutdown");
+    // The miner must leave on `Shutdown`, not on the 10 s kill.
+    assert!(started.elapsed() < Duration::from_secs(5), "slow shutdown");
 }
 
 #[tokio::test]
@@ -247,4 +249,51 @@ async fn bad_request_values_are_usage_errors_before_any_read() {
         assert!(matches!(error, CalibrateError::Usage(_)), "{error}");
     }
     assert_eq!(chain.qblock_reads(), 0);
+}
+
+/// The outcome line and exit code a run prints, from one real run.
+async fn rendered(
+    chain: &FakeChain,
+    miner: &str,
+    name: &str,
+) -> (std::process::ExitCode, String, String) {
+    let result = run(chain, miner, name, 60, Duration::from_secs(30)).await;
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let code = render_outcome(&result, &mut out, &mut err);
+    (
+        code,
+        String::from_utf8(out).unwrap(),
+        String::from_utf8(err).unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn calibrate_done_prints_the_line_and_exits_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let chain = chain_with(true, 2);
+    let (code, out, err) = rendered(&chain, &mock_with(&dir, "--calibrate done"), "r-done").await;
+    assert_eq!(code, std::process::ExitCode::from(0));
+    assert_eq!(out, "outcome=DONE summary=mock calibrate Done\n");
+    assert!(err.is_empty(), "{err}");
+}
+
+#[tokio::test]
+async fn calibrate_failed_prints_the_line_and_exits_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let chain = chain_with(true, 2);
+    let (code, out, _) = rendered(&chain, &mock_with(&dir, "--calibrate failed"), "r-failed").await;
+    assert_eq!(code, std::process::ExitCode::from(1));
+    assert_eq!(out, "outcome=FAILED summary=mock calibrate Failed\n");
+}
+
+#[tokio::test]
+async fn miner_without_feature_prints_an_error_and_exits_64() {
+    let chain = chain_with(true, 2);
+    let (code, out, err) = rendered(&chain, &mock_miner(), "r-nofeature").await;
+    assert_eq!(code, std::process::ExitCode::from(64));
+    assert!(out.is_empty(), "{out}");
+    assert_eq!(
+        err,
+        "error: the miner does not list the calibrate feature\n"
+    );
 }
