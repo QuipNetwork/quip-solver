@@ -1,6 +1,7 @@
 //! Solver logic: what work goes where. The coordinator reaches the outside
 //! world only through the two traits here, which the environment supplies.
 
+pub mod calibration;
 pub mod events;
 pub mod feeder;
 pub mod ledger;

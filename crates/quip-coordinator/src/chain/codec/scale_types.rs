@@ -329,6 +329,53 @@ pub struct MinerInfoScale {
     pub rewards_earned: u128,
 }
 
+/// On-wire `QBlock` (pallet `quantum_pow::types::QBlock`). The field order is
+/// the pallet's and must not be reordered.
+#[derive(Clone, Debug, Encode, Decode, PartialEq, Eq)]
+pub struct QBlockScale {
+    /// Winning miner account.
+    pub miner: [u8; 32],
+    /// Salt the winner mined with.
+    pub salt: [u8; 32],
+    /// Energy the winner achieved, in milli units.
+    pub energy_milli: i64,
+    /// Reward paid, in plancks.
+    pub reward: u128,
+    /// Block the proof was accepted at.
+    pub submitted_at: u32,
+    /// Difficulty the block was won under.
+    pub difficulty: DifficultyConfig,
+    /// Hash of the last-proof block the work was bound to.
+    pub last_proof_block_hash: H256,
+    /// Topology the proof was mined against.
+    pub topology_hash: H256,
+    /// Self-reported compute time, in microseconds.
+    pub device_access_time_us: u64,
+}
+
+/// On-wire `QBlockWithNonce`, the answer of `QuantumPowApi_qblock_by_id`.
+#[derive(Clone, Debug, Encode, Decode, PartialEq, Eq)]
+pub struct QBlockWithNonceScale {
+    /// The stored qblock.
+    pub solution: QBlockScale,
+    /// Derived nonce. SCALE carries it little-endian.
+    pub nonce: sp_core::U256,
+}
+
+/// On-wire `ParticipationRecord`, the value of
+/// `MinerRegistry::ParticipantsByQBlock`.
+#[derive(Clone, Debug, Encode, Decode, PartialEq, Eq)]
+pub struct ParticipationRecordScale {
+    /// Quantum-block id.
+    pub qblock_id: u64,
+    /// Hardware the participant declared.
+    pub kind: MinerKind,
+    /// Declared time budget, in seconds.
+    pub budget_seconds: Option<u32>,
+    /// Block the record was last written at.
+    pub updated_at: u32,
+}
+
 /// Pallet index of `QuantumPow` in the runtime construct.
 pub const QUANTUM_POW_PALLET_INDEX: u8 = 10;
 /// Call index of `submit_proof` within `QuantumPow`.

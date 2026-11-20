@@ -405,3 +405,58 @@ fn qui_1540_energy_options_keep_numeric_and_unsigned_constraints() {
     ])
     .is_err());
 }
+
+#[test]
+fn calibrate_exit_codes_follow_the_outcome() {
+    use super::calibrate::exit_code;
+    use crate::app::local_env::{CalibrateError, CalibrateReport, CalibrateResult};
+    let report = |result| {
+        Ok(CalibrateReport {
+            result,
+            summary: String::new(),
+        })
+    };
+    assert_eq!(
+        exit_code(&report(CalibrateResult::Done)),
+        StdExitCode::from(0)
+    );
+    for result in [
+        CalibrateResult::Failed,
+        CalibrateResult::DeadlinePassed,
+        CalibrateResult::TimedOut,
+    ] {
+        assert_eq!(exit_code(&report(result)), StdExitCode::FAILURE);
+    }
+    assert_eq!(
+        exit_code(&Err(CalibrateError::Incomplete(String::new()))),
+        StdExitCode::FAILURE
+    );
+    assert_eq!(
+        exit_code(&Err(CalibrateError::Usage(String::new()))),
+        StdExitCode::from(64)
+    );
+    assert_eq!(
+        exit_code(&Err(CalibrateError::Rpc(String::new()))),
+        StdExitCode::from(69)
+    );
+}
+
+#[test]
+fn calibrate_defaults_match_the_config_section() {
+    let cli = Cli::try_parse_from([
+        "quip-coordinator",
+        "calibrate",
+        "--miner",
+        "m",
+        "--validator",
+        "ws://v",
+        "--kinds",
+        "gpu,cpu",
+    ])
+    .expect("parses");
+    let Some(Command::Calibrate(args)) = cli.command else {
+        panic!("expected calibrate");
+    };
+    assert_eq!((args.qblocks, args.deadline_s), (40, 1800));
+    assert_eq!(args.kinds, ["gpu", "cpu"]);
+}

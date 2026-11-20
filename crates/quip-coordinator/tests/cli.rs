@@ -116,3 +116,37 @@ fn bad_toml_exits_64() {
         .expect("run bad config");
     assert_eq!(out.status.code(), Some(64));
 }
+
+/// An unknown `--kinds` value is a usage error, caught before any RPC.
+#[test]
+fn calibrate_unknown_kind_exits_64() {
+    let out = Command::new(bin())
+        .args([
+            "calibrate",
+            "--miner",
+            "/nonexistent/miner",
+            "--validator",
+            "ws://127.0.0.1:1",
+            "--kinds",
+            "tpu",
+        ])
+        .output()
+        .expect("run calibrate");
+    assert_eq!(out.status.code(), Some(64));
+}
+
+/// A validator that cannot be reached is an RPC error.
+#[test]
+fn calibrate_unreachable_validator_exits_69() {
+    let out = Command::new(bin())
+        .args([
+            "calibrate",
+            "--miner",
+            "/nonexistent/miner",
+            "--validator",
+            "ws://127.0.0.1:1",
+        ])
+        .output()
+        .expect("run calibrate");
+    assert_eq!(out.status.code(), Some(69));
+}

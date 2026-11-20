@@ -18,6 +18,7 @@ use crate::chain::codec::extrinsic::RuntimeTxContext;
 use crate::chain::codec::scale_types::{NodeDescriptorV2Input, TopologyMetaScale};
 use crate::chain::sign::submit::{DescriptorOutcome, ParticipationOutcome, RegistrationOutcome};
 use crate::chain::{ChainClient, ChainError};
+use crate::types::calibration::ReferenceWinner;
 use crate::types::miner::{MinerInfo, MinerKind, SolverType};
 use crate::types::order::JobOrder;
 use crate::types::proof::{Proof, SubmitReceipt};
@@ -133,6 +134,21 @@ impl ChainClient for RealChainClient {
 
     async fn fetch_latest_qblock_id(&self) -> Result<Option<u64>, ChainError> {
         self.read_latest_qblock_id().await
+    }
+
+    async fn fetch_qblock_by_id(
+        &self,
+        qblock_id: u64,
+    ) -> Result<Option<ReferenceWinner>, ChainError> {
+        self.read_qblock_by_id(qblock_id).await
+    }
+
+    async fn fetch_participation_kind(
+        &self,
+        qblock_id: u64,
+        account: [u8; 32],
+    ) -> Result<Option<MinerKind>, ChainError> {
+        self.read_participation_kind(qblock_id, account).await
     }
 
     async fn fetch_miner_info(&self, account: [u8; 32]) -> Result<Option<MinerInfo>, ChainError> {

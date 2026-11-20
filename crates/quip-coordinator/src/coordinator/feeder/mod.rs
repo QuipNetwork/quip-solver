@@ -118,7 +118,10 @@ async fn broadcast_set_target(state: &Arc<Mutex<CoordinatorState>>, target: SetT
 /// (miner connected before the first snapshot) or changes on reseed must be
 /// fanned out here — otherwise those miners reject subsequent hash-based jobs as
 /// topology-missing/mismatch.
-async fn broadcast_topology(state: &Arc<Mutex<CoordinatorState>>, topo: quip_proto::v1::Topology) {
+pub(crate) async fn broadcast_topology(
+    state: &Arc<Mutex<CoordinatorState>>,
+    topo: quip_proto::v1::Topology,
+) {
     let senders: Vec<_> = {
         let st = state.lock().await;
         st.sessions.outbound.values().cloned().collect()
@@ -128,6 +131,9 @@ async fn broadcast_topology(state: &Arc<Mutex<CoordinatorState>>, topo: quip_pro
             .send(Ok(coord(coord_msg::Msg::Topology(topo.clone()))))
             .await;
     }
+    // A miner that joined before this topology was cached could not
+    // calibrate at its handshake. Its `Calibrate` follows the `Topology`.
+    crate::coordinator::calibration::send_due(state, &topo.hash).await;
 }
 
 /// Fan out a protocol `Cancel(max_generation)` to every live miner on reseed so

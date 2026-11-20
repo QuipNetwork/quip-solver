@@ -229,6 +229,9 @@ pub struct Router {
     sit_outs: HashMap<String, DropLog>,
     /// Operator pin for family work: a miner id or a `solver_id`.
     solver_pin: Option<String>,
+    /// Miners calibrating now. They get no job until calibration ends, and
+    /// the credits they grant meanwhile keep counting.
+    calibrating: HashSet<String>,
 }
 
 impl Router {
@@ -283,6 +286,18 @@ impl Router {
                 );
             }
         }
+    }
+
+    /// Hold every job back from `miner_id` while it calibrates. Its staged
+    /// jobs and granted credits stay, so dispatch resumes without a new grant
+    /// once [`Router::end_calibration`] runs.
+    pub fn begin_calibration(&mut self, miner_id: &str) {
+        let _ = self.calibrating.insert(miner_id.to_owned());
+    }
+
+    /// Let `miner_id` take jobs again after its calibration.
+    pub fn end_calibration(&mut self, miner_id: &str) {
+        let _ = self.calibrating.remove(miner_id);
     }
 
     /// Stage `job` on a capable miner; returns the chosen `miner_id`, or `None`.
@@ -340,7 +355,11 @@ impl Router {
             .filter(|id| exclude != Some(id.as_str()) && self.is_capable(id, &job))
             .cloned()
             .collect();
-        candidates.sort();
+        // A calibrating miner is the last choice: the job would wait for its
+        // calibration to end.
+        candidates.sort_by(|a, b| {
+            (self.calibrating.contains(a), a).cmp(&(self.calibrating.contains(b), b))
+        });
         if let Some(id) = candidates.first().cloned() {
             if let Some(q) = self.miners.get_mut(&id) {
                 q.staged.push_back(job);
@@ -423,7 +442,11 @@ impl Router {
     }
 
     /// Dispatch a compatible staged job, spending one credit only on dispatch.
+    /// A calibrating miner gets none, and keeps its credits.
     pub fn next_job(&mut self, miner_id: &str) -> Option<Job> {
+        if self.calibrating.contains(miner_id) {
+            return None;
+        }
         loop {
             let job = {
                 let q = self.miners.get_mut(miner_id)?;
@@ -601,6 +624,7 @@ impl Router {
     /// Remove a miner the supervisor has given up on, and return its staged
     /// queue. An unknown id returns an empty list.
     pub fn remove_miner(&mut self, miner_id: &str) -> Vec<Job> {
+        let _ = self.calibrating.remove(miner_id);
         self.miners
             .remove(miner_id)
             .map_or_else(Vec::new, |q| q.staged.into_iter().collect())
@@ -1069,6 +1093,30 @@ mod tests {
                 order_id: vec![],
             }),
         }
+    }
+
+    #[test]
+    fn calibrating_miner_keeps_credits_and_is_routed_last() {
+        let mut r = Router::new();
+        r.register_miner("a", caps_ising());
+        r.register_miner("b", caps_ising());
+        r.begin_calibration("a");
+        assert_eq!(
+            r.route(make_job(1, JobKind::IsingSample)).as_deref(),
+            Some("b"),
+            "another capable miner goes first"
+        );
+        assert!(r.stage_on("a", make_job(1, JobKind::IsingSample)));
+        r.grant_credits("a", 1);
+        assert!(r.next_job("a").is_none(), "no job while calibrating");
+        r.end_calibration("a");
+        assert!(r.next_job("a").is_some(), "the earlier credit still counts");
+        r.begin_calibration("b");
+        let _ = r.remove_miner("b");
+        r.register_miner("b", caps_ising());
+        assert!(r.stage_on("b", make_job(1, JobKind::IsingSample)));
+        r.grant_credits("b", 1);
+        assert!(r.next_job("b").is_some(), "removal clears the hold");
     }
 
     #[test]
