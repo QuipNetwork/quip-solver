@@ -1390,17 +1390,23 @@ fn expect_calibrate(msg: coord_msg::Msg) -> quip_proto::v1::Calibrate {
 
 #[tokio::test(start_paused = true)]
 async fn calibrating_miner_gets_no_job_until_done() {
+    let unix_ms = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    };
     let state = calibration_state(true, 1800);
+    // The paused tokio clock does not pause `SystemTime`, so bound the
+    // deadline by wall-clock reads taken around the handshake.
+    let before = unix_ms();
     let mut s = join(&state, &["calibrate"]).await;
     assert!(matches!(
         next_timed(&mut s.outbound).await,
         coord_msg::Msg::Topology(_)
     ));
-    let before = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis();
     let calibrate = expect_calibrate(next_timed(&mut s.outbound).await);
+    let after = unix_ms();
     assert_eq!(calibrate.family, Some(calibration_family()));
     let expected: Vec<quip_proto::v1::CalibrationInstance> = reference_winners()
         .iter()
@@ -1418,7 +1424,7 @@ async fn calibrating_miner_gets_no_job_until_done() {
     );
     let deadline = u128::from(calibrate.deadline_ms);
     assert!(
-        deadline >= before + 1_800_000 && deadline < before + 1_860_000,
+        (before + 1_800_000..=after + 1_800_000).contains(&deadline),
         "deadline is Unix ms now + deadline_s"
     );
 
