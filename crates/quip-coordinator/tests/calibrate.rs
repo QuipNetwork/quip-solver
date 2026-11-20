@@ -183,16 +183,13 @@ async fn miner_without_feature_is_a_usage_error_before_anything_is_sent() {
     // No `--calibrate`: the mock lists no `calibrate` feature, and a Job or
     // Calibrate sent to it would be visible as a different error.
     let chain = chain_with(true, 2);
+    // Resolve the binary first: the first call in the process runs
+    // `cargo build`, which is not part of the shutdown being timed.
+    let miner = mock_miner();
     let started = Instant::now();
-    let error = run(
-        &chain,
-        &mock_miner(),
-        "nofeature",
-        60,
-        Duration::from_secs(30),
-    )
-    .await
-    .expect_err("a miner without the feature cannot calibrate");
+    let error = run(&chain, &miner, "nofeature", 60, Duration::from_secs(30))
+        .await
+        .expect_err("a miner without the feature cannot calibrate");
     assert!(
         matches!(&error, CalibrateError::Usage(m) if m.contains("calibrate feature")),
         "{error}"
