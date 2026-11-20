@@ -248,6 +248,10 @@ pub async fn run_session<S: SessionHost, E: SessionEvents>(
                 Flow::Continue
             }
             Some(miner_msg::Msg::LeaseDone(done)) => events.lease_done(&link, done).await,
+            Some(miner_msg::Msg::CalibrateDone(done)) => {
+                events.calibrate_done(&miner_id, &done).await;
+                Flow::Continue
+            }
             // An empty `msg` is a message this build cannot name: either a
             // field number the miner uses and this coordinator does not, or the
             // reverse. Version skew between the two arrives here and nowhere

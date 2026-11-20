@@ -33,6 +33,11 @@ pub trait SessionEvents: Send + Sync + 'static {
     async fn status(&self, miner_id: &str, status: &quip_proto::v1::Status);
     /// The miner sent a new capability snapshot.
     async fn capabilities(&self, miner_id: &str, caps: &Capabilities);
+    /// The miner finished a calibration. The default ignores it, because a
+    /// coordinator that never sent `Calibrate` has no use for the answer.
+    async fn calibrate_done(&self, miner_id: &str, _done: &quip_proto::v1::CalibrateDone) {
+        tracing::warn!(miner = %miner_id, "miner sent CalibrateDone without a Calibrate; ignoring");
+    }
     /// The miner gave up.
     async fn fatal(&self, link: &SessionLink, fatal: &quip_proto::v1::Fatal) -> Flow;
     /// Called after the handshake and after every message: whether the

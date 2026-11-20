@@ -1057,6 +1057,7 @@ mod tests {
 
     fn make_job(generation: u64, kind: JobKind) -> Job {
         Job {
+            iqm: None,
             job_id: format!("g{generation}").into_bytes(),
             generator: None,
             kind: kind as i32,

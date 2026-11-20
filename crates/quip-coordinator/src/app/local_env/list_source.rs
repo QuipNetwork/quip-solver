@@ -102,6 +102,7 @@ fn build_explicit_job(entry: &ListEntryJson, generation: u64, deadline_ms: u64) 
         kind: JobKind::IsingSample as i32,
         generation,
         deadline_ms,
+        iqm: None,
         ising: Some({
             let mut problem =
                 milli_problem(Some(ising_problem::Graph::Edges(EdgeList { u, v })), &h, &j);

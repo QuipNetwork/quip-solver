@@ -128,6 +128,8 @@ fn status_msg(miner_id: &str, abandoned_generation: u64) -> MinerMsg {
         jobs_done: 0,
         abandoned_generation,
         sampler_stats: std::collections::HashMap::default(),
+        headroom: None,
+        limit_reached: false,
     }))
 }
 
@@ -276,6 +278,7 @@ fn handle_job(job: Job, topo: Option<&SessionTopo>) -> Vec<MinerMsg> {
         solutions: vec![Solution {
             spins: encode_spins_packed(&spins),
             energy_milli: energy,
+            values: vec![],
         }],
         salt: vec![],
         nonce: vec![],
@@ -346,6 +349,7 @@ fn handle_lease(job: Job, topo: Option<&Topology>, target: Option<&SetTarget>) -
                 solutions: vec![Solution {
                     spins: encode_spins_packed(&spins),
                     energy_milli: energy,
+                    values: vec![],
                 }],
                 meta: Some(SamplerMeta {
                     reads: 1,
@@ -484,7 +488,8 @@ async fn run_session(uri: &str, miner_id: &str) -> Result<(), ExitCode> {
                 break;
             }
             Some(coord_msg::Msg::SetTarget(target)) => session_target = Some(target),
-            None => {}
+            // This miner does not advertise the calibrate feature.
+            Some(coord_msg::Msg::Calibrate(_)) | None => {}
         }
     }
     // Signal end-of-outbound so tonic flushes every buffered reply, then drain
@@ -594,6 +599,7 @@ mod tests {
         Job {
             job_id: job_id.to_vec(),
             generator: None,
+            iqm: None,
             kind: kind as i32,
             generation: 1,
             deadline_ms: now_unix_ms() + 60_000,
