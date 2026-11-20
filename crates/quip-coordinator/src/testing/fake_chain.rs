@@ -9,11 +9,13 @@ use crate::types::order::JobOrder;
 use crate::types::snapshot::PendingProof;
 
 use crate::chain::registration::funding::BalanceSource;
-use crate::types::miner::MinerInfo;
+use crate::types::calibration::ReferenceWinner;
+use crate::types::miner::{MinerInfo, MinerKind};
 use crate::types::proof::{Proof, SubmitAction, SubmitReceipt};
 use crate::types::snapshot::{DecayParams, MiningSnapshot};
 
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 /// Test double: returns a scripted snapshot / order and records submits.
@@ -57,6 +59,12 @@ pub struct FakeChain {
     balance_accounts: Mutex<Vec<[u8; 32]>>,
     /// Scripted `QuantumPow.Miners[account]` value (default `None`).
     miner_info: Mutex<Option<MinerInfo>>,
+    /// Scripted winners by qblock id (see [`FakeChain::script_qblock`]).
+    qblocks: Mutex<HashMap<u64, ReferenceWinner>>,
+    /// Calls to [`ChainClient::fetch_qblock_by_id`].
+    qblock_reads: Mutex<usize>,
+    /// Calls to [`ChainClient::fetch_participation_kind`].
+    participation_reads: Mutex<usize>,
     /// Captured proofs from [`ChainClient::submit_solution`].
     pub solutions: Mutex<Vec<Proof>>,
     /// Scripted `QuantumComputeMempool.Solvers` presence for the signing account.
@@ -101,6 +109,9 @@ impl FakeChain {
             registration_submits: Mutex::new(0),
             balance_accounts: Mutex::new(Vec::new()),
             miner_info: Mutex::new(None),
+            qblocks: Mutex::new(HashMap::new()),
+            qblock_reads: Mutex::new(0),
+            participation_reads: Mutex::new(0),
             solutions: Mutex::new(Vec::new()),
             solver_registered: Mutex::new(false),
             solver_registration_result: Mutex::new(Ok(RegistrationOutcome::Registered)),
@@ -164,6 +175,51 @@ impl FakeChain {
         )]
         {
             std::mem::take(&mut *self.solutions.lock().unwrap())
+        }
+    }
+
+    /// Script the winner of qblock `id`. `fetch_qblock_by_id` answers it with
+    /// `kind` cleared, and `fetch_participation_kind` answers from `winner.kind`.
+    ///
+    /// # Panics
+    /// Panics if a prior holder poisoned this mutex.
+    pub fn script_qblock(&self, id: u64, winner: ReferenceWinner) {
+        #[expect(
+            clippy::unwrap_used,
+            reason = "test double; Mutex poison is a test failure"
+        )]
+        {
+            let _ = self.qblocks.lock().unwrap().insert(id, winner);
+        }
+    }
+
+    /// How many `fetch_qblock_by_id` calls the fake has answered.
+    ///
+    /// # Panics
+    /// Panics if a prior holder poisoned this mutex.
+    #[must_use]
+    pub fn qblock_reads(&self) -> usize {
+        #[expect(
+            clippy::unwrap_used,
+            reason = "test double; Mutex poison is a test failure"
+        )]
+        {
+            *self.qblock_reads.lock().unwrap()
+        }
+    }
+
+    /// How many `fetch_participation_kind` calls the fake has answered.
+    ///
+    /// # Panics
+    /// Panics if a prior holder poisoned this mutex.
+    #[must_use]
+    pub fn participation_reads(&self) -> usize {
+        #[expect(
+            clippy::unwrap_used,
+            reason = "test double; Mutex poison is a test failure"
+        )]
+        {
+            *self.participation_reads.lock().unwrap()
         }
     }
 
@@ -706,6 +762,48 @@ impl ChainClient for FakeChain {
         )]
         {
             Ok(self.decay_params.lock().unwrap().clone())
+        }
+    }
+
+    async fn fetch_qblock_by_id(
+        &self,
+        qblock_id: u64,
+    ) -> Result<Option<ReferenceWinner>, ChainError> {
+        #[expect(
+            clippy::unwrap_used,
+            reason = "test double; Mutex poison is a test failure"
+        )]
+        {
+            *self.qblock_reads.lock().unwrap() += 1;
+            Ok(self
+                .qblocks
+                .lock()
+                .unwrap()
+                .get(&qblock_id)
+                .map(|w| ReferenceWinner {
+                    kind: None,
+                    ..w.clone()
+                }))
+        }
+    }
+
+    async fn fetch_participation_kind(
+        &self,
+        qblock_id: u64,
+        _account: [u8; 32],
+    ) -> Result<Option<MinerKind>, ChainError> {
+        #[expect(
+            clippy::unwrap_used,
+            reason = "test double; Mutex poison is a test failure"
+        )]
+        {
+            *self.participation_reads.lock().unwrap() += 1;
+            Ok(self
+                .qblocks
+                .lock()
+                .unwrap()
+                .get(&qblock_id)
+                .and_then(|w| w.kind))
         }
     }
 
