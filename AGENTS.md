@@ -84,6 +84,10 @@ quip-coordinator drive --miner ./miners/quip-cpu-sa --source random \
 quip-coordinator drive --miner ./miners/quip-cpu-sa --source lease \
   --topology-preset smoke --count 200 --lease-size 32 --seed 7
 
+# Calibrate one miner on the newest winners of a validator. Read-only, no signer.
+quip-coordinator calibrate --miner ./miners/quip-cpu-sa \
+  --validator ws://127.0.0.1:9944 --qblocks 40 --kinds gpu
+
 # Seed a fresh runtime-120 chain with the dimer1200 family topology.
 # Give exactly one of --sudo-key or --mnemonic-file.
 quip-coordinator seed-chain --sudo-key //Alice
@@ -168,6 +172,14 @@ selection. See `docs/COORDINATOR.md` for units, missing-energy values, and lease
 summaries.
 
 The config registers miners and their launch plan. Each backend section (`[cpu]`, `[cuda.N]`, `[metal]`, `[dwave]`) becomes one supervised subprocess. `binary` selects the executable: `quip-cpu-sa`, the chromatic `quip-cpu-gibbs`, `quip-cpu-sb`, or one of quip-solver-cpu's experimental kernels when that release published it. See `crates/quip-coordinator/config.toml.example`. `crates/quip-coordinator/tools/fetch-miners.sh` fetches the miner binaries per host from the standalone repos. The coordinator resolves them on `PATH` or by absolute path.
+
+The `[calibration]` section tunes miners that list the `calibrate` feature. The
+coordinator reads the newest winners once at startup and sends them to each such
+miner once, before its first job. `enabled` defaults to `true`, `qblocks` to 40
+(1 to 1000), `kinds` to empty (`cpu`, `gpu`, `qpu`), and `deadline_s` to 1800.
+A miner takes jobs after it answers, or 30 seconds after its deadline. The
+`calibrate` subcommand runs the same exchange for one miner and prints
+`outcome=... summary=...`. See `docs/COORDINATOR.md`.
 
 `signer_key` accepts a keystore path, a 32-byte hex master seed, or a `//DevUri`
 such as `//Alice`. It also accepts any substrate secret URI, including a BIP39
