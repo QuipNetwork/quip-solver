@@ -972,7 +972,7 @@ needs no signer. The code is in `cli/calibrate.rs` and `app/local_env/calibrate.
 
 ```bash
 quip-coordinator calibrate --miner ./miners/quip-cpu-sa \
-  --validator ws://127.0.0.1:9944 --qblocks 40 --kinds gpu --deadline-s 1800
+  --validator ws://127.0.0.1:9944 --qblocks 40 --kinds cpu --deadline-s 1800
 ```
 
 | Flag | Default | Meaning |
