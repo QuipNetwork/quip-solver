@@ -105,7 +105,9 @@ pub fn run(config_path: &Path, cfg: CoordinatorConfig, log_level: LogLevel) -> S
         Err(code) => return code,
     };
     // The winners download once, here, before the supervisor spawns any
-    // miner, so the plan is in place for the first handshake.
+    // miner, so the plan is in place for the first handshake. The download
+    // gives up after `CALIBRATION_DOWNLOAD_BUDGET`, so a slow validator
+    // cannot hold every miner back.
     let calibration = if let Some(snap) = &snapshot {
         rt.block_on(super::readiness::prepare_calibration(
             chain.as_ref(),

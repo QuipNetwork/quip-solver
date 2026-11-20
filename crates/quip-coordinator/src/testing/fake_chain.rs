@@ -75,6 +75,8 @@ pub struct FakeChain {
     solver_registration_submits: Mutex<usize>,
     /// How long each `submit_proof` takes before it returns.
     submit_delay: Mutex<std::time::Duration>,
+    /// How long each `fetch_qblock_by_id` takes before it returns.
+    qblock_read_delay: Mutex<std::time::Duration>,
 }
 
 impl FakeChain {
@@ -117,6 +119,22 @@ impl FakeChain {
             solver_registration_result: Mutex::new(Ok(RegistrationOutcome::Registered)),
             solver_registration_submits: Mutex::new(0),
             submit_delay: Mutex::new(std::time::Duration::ZERO),
+            qblock_read_delay: Mutex::new(std::time::Duration::ZERO),
+        }
+    }
+
+    /// Make every later `fetch_qblock_by_id` take `delay`, as a slow or
+    /// remote validator does.
+    ///
+    /// # Panics
+    /// Panics if a prior holder poisoned this mutex.
+    pub fn set_qblock_read_delay(&self, delay: std::time::Duration) {
+        #[expect(
+            clippy::unwrap_used,
+            reason = "test double; Mutex poison is a test failure"
+        )]
+        {
+            *self.qblock_read_delay.lock().unwrap() = delay;
         }
     }
 
@@ -769,6 +787,14 @@ impl ChainClient for FakeChain {
         &self,
         qblock_id: u64,
     ) -> Result<Option<ReferenceWinner>, ChainError> {
+        #[expect(
+            clippy::unwrap_used,
+            reason = "test double; Mutex poison is a test failure"
+        )]
+        let delay = *self.qblock_read_delay.lock().unwrap();
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
         #[expect(
             clippy::unwrap_used,
             reason = "test double; Mutex poison is a test failure"

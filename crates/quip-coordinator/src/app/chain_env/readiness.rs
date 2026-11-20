@@ -252,18 +252,35 @@ pub async fn plan_calibration(
     ))
 }
 
+/// How long the startup winner download may take. No miner starts until it
+/// ends, so a slow validator must not hold mining back for longer than this.
+pub const CALIBRATION_DOWNLOAD_BUDGET: Duration = Duration::from_mins(1);
+
 /// Download the calibration plan once at startup, from the snapshot the
 /// readiness walk read; see [`plan_calibration`].
 ///
 /// Returns `None`, and logs why, when calibration is off, the challenge has
-/// no family, no winner qualifies, or the read fails. Mining goes on in every
+/// no family, no winner qualifies, the read fails, or the download takes
+/// longer than [`CALIBRATION_DOWNLOAD_BUDGET`]. Mining goes on in every
 /// case; the miners just take jobs without calibrating.
 pub async fn prepare_calibration(
     chain: &(impl ChainClient + ?Sized),
     snapshot: &MiningSnapshot,
     cfg: &CalibrationConfig,
 ) -> Option<CalibrationPlan> {
-    match plan_calibration(chain, snapshot, cfg).await {
+    let Ok(planned) = tokio::time::timeout(
+        CALIBRATION_DOWNLOAD_BUDGET,
+        plan_calibration(chain, snapshot, cfg),
+    )
+    .await
+    else {
+        tracing::warn!(
+            budget_s = CALIBRATION_DOWNLOAD_BUDGET.as_secs(),
+            "calibration skipped for this run: the reference winner download did not finish within the budget; miners take jobs without it"
+        );
+        return None;
+    };
+    match planned {
         Ok(plan) => Some(plan),
         Err(skip @ (CalibrationSkip::BadTopologyHash(_) | CalibrationSkip::BadKinds(_))) => {
             tracing::warn!(reason = %skip, "calibration skipped");
@@ -1180,6 +1197,23 @@ token = "{SENTINEL}"
         ));
         st.router.grant_credits("m", 1);
         assert!(st.router.next_job("m").is_some(), "jobs flow");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_winner_download_gives_up_after_the_budget() {
+        let snapshot = ring_snapshot(true);
+        let chain = FakeChain::new(snapshot.clone(), None);
+        script_winners(&chain, &snapshot, &[MinerKind::Gpu]);
+        // Each read outlasts the whole budget, as a stalled validator does.
+        chain.set_qblock_read_delay(Duration::from_hours(1));
+        let cfg = crate::config::CalibrationConfig::default();
+        let started = tokio::time::Instant::now();
+        assert!(super::prepare_calibration(&chain, &snapshot, &cfg)
+            .await
+            .is_none());
+        assert_eq!(started.elapsed(), super::CALIBRATION_DOWNLOAD_BUDGET);
+        assert_eq!(super::CALIBRATION_DOWNLOAD_BUDGET, Duration::from_mins(1));
+        assert_eq!(chain.qblock_reads(), 0, "the read never completed");
     }
 
     #[tokio::test]
