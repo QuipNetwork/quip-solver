@@ -277,6 +277,24 @@ async fn calibrate_done_prints_the_line_and_exits_zero() {
     assert!(err.is_empty(), "{err}");
 }
 
+/// A summary with line breaks and other control characters still prints one
+/// line, with each control character escaped.
+#[test]
+fn a_multi_line_summary_prints_one_line() {
+    let result = Ok(CalibrateReport {
+        result: CalibrateResult::Done,
+        summary: "tuned 3 of 4\r\nsweeps=8\tbeta=2.5\u{1b}[0m".to_owned(),
+    });
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let code = render_outcome(&result, &mut out, &mut err);
+    assert_eq!(code, std::process::ExitCode::from(0));
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "outcome=DONE summary=tuned 3 of 4\\r\\nsweeps=8\\tbeta=2.5\\u{1b}[0m\n"
+    );
+    assert!(err.is_empty());
+}
+
 #[tokio::test]
 async fn calibrate_failed_prints_the_line_and_exits_one() {
     let dir = tempfile::tempdir().unwrap();

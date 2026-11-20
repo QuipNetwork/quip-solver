@@ -66,10 +66,9 @@ pub(crate) fn run_calibrate_cli(args: &CalibrateArgs, log_level: LogLevel) -> St
     rt.block_on(calibrate_main(&chain, args, log_level))
 }
 
-/// Run the calibration against `chain`, print the outcome line, and map the
-/// result to an exit code.
 /// Write the outcome line to `out` (or the error to `err`) and return the
-/// exit code of `result`.
+/// exit code of `result`. Control characters in the miner's summary are
+/// escaped, so the outcome stays on one line.
 #[must_use]
 pub fn render_outcome(
     result: &Result<CalibrateReport, CalibrateError>,
@@ -82,11 +81,25 @@ pub fn render_outcome(
             out,
             "outcome={} summary={}",
             report.result.label(),
-            report.summary
+            one_line(&report.summary)
         ),
         Err(error) => writeln!(err, "error: {error}"),
     };
     exit_code(result)
+}
+
+/// `text` with each control character, such as a newline or carriage return,
+/// replaced by its Rust escape (`\n`, `\r`, `\u{1b}`). Other text is unchanged.
+fn one_line(text: &str) -> String {
+    let mut line = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_control() {
+            line.extend(c.escape_default());
+        } else {
+            line.push(c);
+        }
+    }
+    line
 }
 
 /// Run the calibration against `chain`, print the outcome line, and map the
