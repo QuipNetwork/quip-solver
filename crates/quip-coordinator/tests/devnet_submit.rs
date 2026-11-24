@@ -823,3 +823,147 @@ async fn devnet_mempool_job_proposed_end_to_end() {
         order.edges.len()
     );
 }
+
+// ----------------------------------------------------------------------------
+// Compliance gate against a live devnet and a live id.quip.network
+// ----------------------------------------------------------------------------
+
+/// Propose an open order on the genesis default Ising spec, signed by `seed`.
+/// Returns the order number the chain assigned and the proposer's account id.
+async fn propose_open_order_as(url: &str, seed: &str) -> (u64, [u8; 32]) {
+    let pair = HybridPair::from_string(seed, None).expect("a dev seed URI");
+    let account = account_id_from_public(&pair.public());
+    let account: [u8; 32] = *AsRef::<[u8; 32]>::as_ref(&account);
+    let ising = IsingParams {
+        nodes: vec![0, 1],
+        edges: vec![(0, 1)],
+        h_values: vec![0, 0],
+        j_values: vec![-1000],
+        min_energy_milli: None,
+        min_diversity_milli: None,
+        min_solutions: None,
+    };
+    let order_id = read_next_order_id(url).await;
+    let nonce = account_nonce(url, &account).await;
+    let ctx = fetch_ext_ctx(url, nonce).await;
+    let call = encode_propose_job_call(&default_ising_spec_id(), &ising, MIN_REWARD);
+    let ext = build_hybrid_signed_extrinsic(&pair, &call, &ctx);
+    let _ = rpc_try(url, "author_submitExtrinsic", vec![json!(hex_encode(&ext))])
+        .await
+        .unwrap_or_else(|e| panic!("propose_job as {seed} was refused: {e}"));
+    for _ in 0..60 {
+        if read_next_order_id(url).await > order_id {
+            return (order_id, account);
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    panic!("propose_job as {seed} never created order #{order_id}");
+}
+
+fn required_env(name: &str) -> String {
+    std::env::var(name).unwrap_or_else(|_| {
+        panic!(
+            "{name} is unset. This test needs QUIP_DEVNET (ws://…), QUIP_ID_URL \
+             (…/v1) and QUIP_ID_API_KEY; see reference-material/e2e.md"
+        )
+    })
+}
+
+/// The integration end to end against real systems: two consumers propose on a
+/// live chain, the coordinator's own chain client reads both orders back, and
+/// the gate (the same `ChainEnv` path the feeder uses) asks the live
+/// id.quip.network about each proposer. The allowed consumer's order must come
+/// through and the denied one's must not, although the chain offers both.
+///
+/// Setup: the provider behind `QUIP_ID_API_KEY` is ready; the account of
+/// `QUIP_ALLOWED_SEED` (default `//Bob`) is linked to a credential that passes
+/// its policy; the account of `QUIP_DENIED_SEED` (default `//BobStash`) is not
+/// linked. The test prints both account ids for linking.
+#[tokio::test]
+#[ignore = "requires a live devnet and id.quip.network; see reference-material/e2e.md"]
+async fn devnet_compliance_gate_admits_only_the_allowed_consumer() {
+    use quip_coordinator::app::chain_env::{ChainEnv, ChainEnvParams};
+    use quip_coordinator::app::compliance::open_gate;
+    use quip_coordinator::coordinator::WorkSource as _;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    let url = required_env("QUIP_DEVNET");
+    let id_url = required_env("QUIP_ID_URL");
+    let api_key = required_env("QUIP_ID_API_KEY");
+    let allowed_seed = std::env::var("QUIP_ALLOWED_SEED").unwrap_or_else(|_| "//Bob".into());
+    let denied_seed = std::env::var("QUIP_DENIED_SEED").unwrap_or_else(|_| "//BobStash".into());
+    init_test_logging();
+
+    let gate = open_gate(Some(&id_url), Some(&api_key))
+        .await
+        .unwrap_or_else(|refusal| panic!("the gate did not open: {refusal}"))
+        .expect("both settings are given");
+
+    let (allowed_order, allowed_account) = propose_open_order_as(&url, &allowed_seed).await;
+    let (denied_order, denied_account) = propose_open_order_as(&url, &denied_seed).await;
+    println!(
+        "allowed: {allowed_seed} account {} order #{allowed_order}",
+        hex_encode(&allowed_account)
+    );
+    println!(
+        "denied:  {denied_seed} account {} order #{denied_order}",
+        hex_encode(&denied_account)
+    );
+
+    let miner = HybridPair::from_string("//Alice", None).expect("//Alice");
+    let miner_account = account_id_from_public(&miner.public());
+    let miner_account: [u8; 32] = *AsRef::<[u8; 32]>::as_ref(&miner_account);
+    let chain = Arc::new(RealChainClient::new(
+        vec![url.clone()],
+        "//Alice".to_string(),
+        quip_coordinator::types::miner::MinerKind::Cpu,
+    ));
+    let env = ChainEnv::new(
+        Arc::clone(&chain),
+        ChainEnvParams {
+            miner_account,
+            funding: quip_coordinator::chain::registration::funding::FundingParams::default(),
+            descriptor: quip_coordinator::config::DescriptorParams::default(),
+            descriptor_filed: Arc::new(AtomicBool::new(false)),
+            miner_registered: Arc::new(AtomicBool::new(false)),
+            solver_registered: Arc::new(AtomicBool::new(false)),
+            compliance: Some(gate),
+        },
+    );
+
+    let on_chain: Vec<u64> = chain
+        .fetch_mempool_orders(miner_account)
+        .await
+        .expect("read the mempool")
+        .iter()
+        .map(order_number)
+        .collect();
+    assert!(
+        on_chain.contains(&allowed_order) && on_chain.contains(&denied_order),
+        "the chain must offer both orders, or the gate proves nothing: {on_chain:?}"
+    );
+
+    let admitted: Vec<u64> = env
+        .mempool_orders()
+        .await
+        .expect("read the mempool through the gate")
+        .iter()
+        .map(order_number)
+        .collect();
+    assert!(
+        admitted.contains(&allowed_order),
+        "the allowed consumer's order #{allowed_order} was not admitted: {admitted:?}. \
+         Is {} linked to a passing credential?",
+        hex_encode(&allowed_account)
+    );
+    assert!(
+        !admitted.contains(&denied_order),
+        "the denied consumer's order #{denied_order} was admitted: {admitted:?}"
+    );
+    println!("PASS: order #{allowed_order} admitted, order #{denied_order} refused");
+}
+
+fn order_number(order: &JobOrder) -> u64 {
+    quip_coordinator::app::compliance::order_number(order)
+}
