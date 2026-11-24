@@ -1,7 +1,8 @@
 //! Opt-in id.quip.network compliance gate for mempool orders.
 //!
 //! With `[miner].quip_id_url` and `QUIP_ID_API_KEY` set, only orders whose
-//! proposer id.quip.network allows are staged. With neither, every order is.
+//! proposer id.quip.network allows are staged. Otherwise, or if the gate
+//! cannot open, every order is.
 
 use std::sync::Arc;
 
@@ -15,27 +16,46 @@ fn present(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|v| !v.is_empty())
 }
 
-/// The gate's client, or `None` when the gate is off.
+/// Why the gate is not open. Either way, every mempool order is staged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GateError {
+    /// Neither setting is present.
+    Disabled,
+    /// The settings are present but cannot be used.
+    Failed(String),
+}
+
+impl std::fmt::Display for GateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Disabled => write!(f, "compliance gate not configured"),
+            Self::Failed(detail) => write!(f, "{detail}"),
+        }
+    }
+}
+
+/// The gate's client.
 ///
 /// # Errors
-/// When only one of the URL and the key is set, the key is refused, or the
-/// provider is not ready. An unreachable id.quip.network still opens the gate;
-/// orders are skipped until it answers.
+/// [`GateError::Disabled`] without settings; [`GateError::Failed`] when only
+/// one is set, the key is refused, or the provider is not ready. An
+/// unreachable id.quip.network still opens the gate.
 pub async fn open_gate(
     url: Option<&str>,
     api_key: Option<&str>,
-) -> Result<Option<Arc<quip_id::Client>>, String> {
+) -> Result<Arc<quip_id::Client>, GateError> {
     let (url, api_key) = match (present(url), present(api_key)) {
-        (None, None) => return Ok(None),
+        (None, None) => return Err(GateError::Disabled),
         (Some(url), Some(api_key)) => (url, api_key),
         _ => {
-            return Err(format!(
+            return Err(GateError::Failed(format!(
                 "[miner].quip_id_url and {} must be set together",
                 quip_id::API_KEY_VARIABLE
-            ))
+            )))
         }
     };
-    let client = quip_id::Client::new(url, api_key).map_err(|e| e.to_string())?;
+    let client =
+        quip_id::Client::new(url, api_key).map_err(|e| GateError::Failed(e.to_string()))?;
     match client.whoami_at_startup().await {
         quip_id::Startup::Ok(who) => {
             tracing::info!(%url, provider = %who.provider_name, "compliance gate enabled");
@@ -44,12 +64,12 @@ pub async fn open_gate(
             tracing::warn!(%url, %detail, "compliance gate enabled; id.quip.network unreachable");
         }
         refused => {
-            return Err(format!(
+            return Err(GateError::Failed(format!(
                 "id.quip.network refused the compliance gate: {refused:?}"
-            ))
+            )))
         }
     }
-    Ok(Some(Arc::new(client)))
+    Ok(Arc::new(client))
 }
 
 /// The chain's order number: the order id's little-endian `u64`, or 0.

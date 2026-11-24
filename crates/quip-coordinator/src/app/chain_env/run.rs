@@ -55,10 +55,14 @@ pub fn run(
         cfg.quip_id_url.as_deref(),
         environment_api_key,
     )) {
-        Ok(gate) => gate,
+        Ok(gate) => Some(gate),
+        Err(crate::app::compliance::GateError::Disabled) => {
+            tracing::info!("compliance gate not configured; staging every mempool order");
+            None
+        }
         Err(e) => {
-            tracing::error!(error = %e, "compliance gate refused; not starting");
-            return StdExitCode::from(ExitCode::ConfigInvalid as u8);
+            tracing::warn!(error = %e, "compliance gate not opened; staging every mempool order");
+            None
         }
     };
 

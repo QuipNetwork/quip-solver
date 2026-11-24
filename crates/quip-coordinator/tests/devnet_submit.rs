@@ -897,8 +897,7 @@ async fn devnet_compliance_gate_admits_only_the_allowed_consumer() {
 
     let gate = open_gate(Some(&id_url), Some(&api_key))
         .await
-        .unwrap_or_else(|refusal| panic!("the gate did not open: {refusal}"))
-        .expect("both settings are given");
+        .unwrap_or_else(|refusal| panic!("the gate did not open: {refusal}"));
 
     let (allowed_order, allowed_account) = propose_open_order_as(&url, &allowed_seed).await;
     let (denied_order, denied_account) = propose_open_order_as(&url, &denied_seed).await;

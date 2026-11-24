@@ -1889,56 +1889,48 @@ async fn compliance_gate_stages_an_order_once_its_consumer_is_allowed() {
     f.stop().await;
 }
 
-/// Opening the gate at startup: which settings turn it on, which answers from
-/// id.quip.network let the coordinator start, and that the coordinator's own
-/// `run` refuses before touching the chain.
+/// Opening the gate at startup: which settings turn it on, and which answers
+/// from id.quip.network open it.
 mod compliance_startup {
     use super::quip_id_stub::{IdStub, WhoamiReply, API_KEY};
-    use quip_coordinator::app::compliance::open_gate;
+    use quip_coordinator::app::compliance::{open_gate, GateError};
 
-    async fn opened(url: &str, api_key: &str) -> Result<bool, String> {
-        open_gate(Some(url), Some(api_key))
-            .await
-            .map(|gate| gate.is_some())
+    async fn opened(url: &str, api_key: &str) -> bool {
+        open_gate(Some(url), Some(api_key)).await.is_ok()
+    }
+
+    async fn failed(url: Option<&str>, api_key: Option<&str>) -> bool {
+        matches!(open_gate(url, api_key).await, Err(GateError::Failed(_)))
     }
 
     #[tokio::test]
     async fn no_url_and_no_key_leaves_the_gate_off() {
-        assert_eq!(
-            open_gate(None, None).await.map(|gate| gate.is_some()),
-            Ok(false)
-        );
+        assert_eq!(open_gate(None, None).await.err(), Some(GateError::Disabled));
     }
 
     #[tokio::test]
     async fn blank_settings_leave_the_gate_off() {
         assert_eq!(
-            open_gate(Some("  "), Some(""))
-                .await
-                .map(|gate| gate.is_some()),
-            Ok(false)
+            open_gate(Some("  "), Some("")).await.err(),
+            Some(GateError::Disabled)
         );
     }
 
-    /// Half a configuration must stop the coordinator: silently mining without
-    /// the gate is exactly what an operator who set one half did not ask for.
     #[tokio::test]
-    async fn a_url_without_a_key_is_refused() {
-        assert!(open_gate(Some("https://id.quip.network/v1"), None)
-            .await
-            .is_err());
+    async fn a_url_without_a_key_fails_to_open() {
+        assert!(failed(Some("https://id.quip.network/v1"), None).await);
     }
 
     #[tokio::test]
-    async fn a_key_without_a_url_is_refused() {
-        assert!(open_gate(None, Some("qid_live_a")).await.is_err());
+    async fn a_key_without_a_url_fails_to_open() {
+        assert!(failed(None, Some("qid_live_a")).await);
     }
 
     #[tokio::test]
     async fn a_ready_provider_opens_the_gate_after_asking_whoami_with_our_key() {
         let stub = IdStub::start().await;
 
-        assert_eq!(opened(&stub.url, API_KEY).await, Ok(true));
+        assert!(opened(&stub.url, API_KEY).await);
         let asked = stub.asked();
         assert_eq!(asked.len(), 1, "one startup question: {asked:?}");
         let whoami = asked.first().expect("asked once");
@@ -1950,28 +1942,27 @@ mod compliance_startup {
     }
 
     #[tokio::test]
-    async fn a_refused_key_stops_startup() {
+    async fn a_refused_key_fails_to_open() {
         let stub = IdStub::start().await;
 
-        assert!(opened(&stub.url, "qid_test_wrong").await.is_err());
+        assert!(failed(Some(&stub.url), Some("qid_test_wrong")).await);
     }
 
-    /// A provider without an active policy would have every order denied: refuse
-    /// to start rather than mine nothing quietly.
+    /// A provider without an active policy would have every order denied.
     #[tokio::test]
-    async fn a_provider_that_is_not_ready_stops_startup() {
+    async fn a_provider_that_is_not_ready_fails_to_open() {
         let stub = IdStub::start().await;
         stub.whoami_replies(WhoamiReply::NotReady(vec!["no_active_policy".into()]));
 
-        assert!(opened(&stub.url, API_KEY).await.is_err());
+        assert!(failed(Some(&stub.url), Some(API_KEY)).await);
     }
 
     #[tokio::test]
-    async fn a_request_id_quip_network_rejects_stops_startup() {
+    async fn a_request_id_quip_network_rejects_fails_to_open() {
         let stub = IdStub::start().await;
         stub.whoami_replies(WhoamiReply::Status(400));
 
-        assert!(opened(&stub.url, API_KEY).await.is_err());
+        assert!(failed(Some(&stub.url), Some(API_KEY)).await);
     }
 
     /// Our outage must not stop a restart from mining: the gate opens, and denies
@@ -1981,62 +1972,11 @@ mod compliance_startup {
         let stub = IdStub::start().await;
         stub.whoami_replies(WhoamiReply::Status(503));
 
-        assert_eq!(opened(&stub.url, API_KEY).await, Ok(true));
+        assert!(opened(&stub.url, API_KEY).await);
     }
 
     #[tokio::test]
-    async fn a_url_that_is_not_http_stops_startup() {
-        assert!(opened("id.quip.network/v1", API_KEY).await.is_err());
-    }
-
-    /// A config whose validator is never reachable, so any of these tests that
-    /// got past the gate would fail differently (and slowly) on the chain.
-    fn config_with(miner_extra: &str) -> quip_coordinator::config::CoordinatorConfig {
-        quip_coordinator::config::parse_config(&format!(
-            "[miner]\nvalidators = [\"ws://127.0.0.1:1\"]\nsigner_key = \"//Alice\"\n\
-             public_host = \"203.0.113.10\"\npublic_port = 20050\n{miner_extra}\n[cpu]\n"
-        ))
-        .expect("config parses")
-    }
-
-    fn run_refused_as_config_invalid(
-        cfg: quip_coordinator::config::CoordinatorConfig,
-        env_key: Option<&str>,
-    ) -> bool {
-        let started = std::time::Instant::now();
-        let code = quip_coordinator::app::chain_env::run::run(
-            std::path::Path::new("compliance-test.toml"),
-            cfg,
-            quip_coordinator::types::log::LogLevel::Info,
-            env_key,
-        );
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(10),
-            "the refusal must come before any chain work"
-        );
-        code == std::process::ExitCode::from(quip_protocol::session::ExitCode::ConfigInvalid as u8)
-    }
-
-    #[test]
-    fn run_refuses_half_a_compliance_configuration() {
-        let cfg = config_with("quip_id_url = \"http://127.0.0.1:1/v1\"\n");
-        assert!(run_refused_as_config_invalid(cfg, None));
-    }
-
-    #[test]
-    fn run_refuses_a_key_id_quip_network_rejects() {
-        let runtime = tokio::runtime::Runtime::new().expect("runtime");
-        let stub = runtime.block_on(IdStub::start());
-        let cfg = config_with(&format!("quip_id_url = \"{}\"\n", stub.url));
-        assert!(run_refused_as_config_invalid(cfg, Some("qid_test_wrong")));
-    }
-
-    #[test]
-    fn run_refuses_a_provider_that_is_not_ready() {
-        let runtime = tokio::runtime::Runtime::new().expect("runtime");
-        let stub = runtime.block_on(IdStub::start());
-        stub.whoami_replies(WhoamiReply::NotReady(vec!["no_active_policy".into()]));
-        let cfg = config_with(&format!("quip_id_url = \"{}\"\n", stub.url));
-        assert!(run_refused_as_config_invalid(cfg, Some(API_KEY)));
+    async fn a_url_that_is_not_http_fails_to_open() {
+        assert!(failed(Some("id.quip.network/v1"), Some(API_KEY)).await);
     }
 }

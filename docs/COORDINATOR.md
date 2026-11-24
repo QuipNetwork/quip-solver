@@ -579,9 +579,10 @@ Proof-of-work rounds are never gated.
 quip_id_url = "https://id.quip.network/v1"
 ```
 
-- **Startup** exits 64 (`ConfigInvalid`) when only one of the two is set, the
-  key is refused, or the provider is not ready. An unreachable id.quip.network
-  does not stop startup; orders are skipped until it answers.
+- **Startup** opens the gate with one `GET /v1/whoami`. If only one of the
+  two is set, the key is refused or the provider is not ready, it logs a
+  warning and stages every order without the gate. An unreachable
+  id.quip.network still opens it; orders are skipped until it answers.
 - **Orders** are asked about in `ChainEnv::mempool_orders` through
   `app::compliance::admit`. A decision covers the consumer until it expires
   (at most 24 hours), so later orders from that consumer use the cached answer.
