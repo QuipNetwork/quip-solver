@@ -4,8 +4,8 @@
 mod dispatch {
     //! CO-1: family capability matching and the operator solver pin.
 
-    use quip_coordinator::coordinator::router::{Ineligible, MinerCaps, Router};
-    use quip_coordinator::types::problem::milli_problem;
+    use quip_coordinator::producer::problem::milli_problem;
+    use quip_coordinator::router::{Ineligible, MinerCaps, Router};
     use quip_proto::v1::{
         ising_problem, EdgeList, FamilyBinding, FamilyDescriptor, FamilySupport,
         GeneratorAlgorithm, IsingProblemGenerator, Job, JobKind, RejectReason,
@@ -171,7 +171,7 @@ mod dispatch {
 
     #[test]
     fn family_lease_ignores_base_topology_size_limits() {
-        let topology = quip_coordinator::types::topology::Topology::from_nodes_edges(
+        let topology = quip_coordinator::topology::Topology::from_nodes_edges(
             vec![0, 1, 2],
             vec![(0, 1), (1, 2)],
             &[0],
@@ -356,13 +356,11 @@ mod drive {
 
     use ising_generators::descriptor::{params_digest, Contract};
     use ising_generators::Code;
-    use quip_coordinator::app::local_env::drain_all;
-    use quip_coordinator::app::local_env::lease_source::LeaseSource;
-    use quip_coordinator::coordinator::scoring::lease::{build_lease_job, lease_generator};
-    use quip_coordinator::types::family::ChallengeFamily;
-    use quip_coordinator::types::snapshot::head_state_key;
-    use quip_coordinator::types::topology::Topology;
-    use quip_coordinator::types::topology_spec::{parse_topology_spec, TopologySpec};
+    use quip_coordinator::chain::snapshot::head_state_key;
+    use quip_coordinator::drive::lease_source::LeaseSource;
+    use quip_coordinator::drive::{drain_all, parse_topology_spec, TopologySpec};
+    use quip_coordinator::lease::{build_lease_job, ChallengeFamily};
+    use quip_coordinator::topology::Topology;
     use quip_proto::v1::{GeneratorAlgorithm, IsingProblemGenerator, Job};
     use quip_solver_conformance::families::layered::{P_F5000, P_L2_F0, P_SPEC, UNIFORM_V1};
 
@@ -370,8 +368,7 @@ mod drive {
     const FAMILY: &str = "vectors/uniform-field";
 
     fn spec() -> TopologySpec {
-        parse_topology_spec(quip_coordinator::types::topology_spec::preset_spec("smoke").unwrap())
-            .unwrap()
+        parse_topology_spec(quip_coordinator::presets::preset_spec("smoke").unwrap()).unwrap()
     }
 
     fn admit(params: &[u8], topology: &Topology) -> Result<ChallengeFamily, Code> {
@@ -413,16 +410,7 @@ mod drive {
     #[test]
     fn snapshot_without_a_family_stays_on_the_legacy_generator() {
         let spec = spec();
-        let snap = spec.to_snapshot();
-        let job = build_lease_job(
-            lease_generator(snap.family.as_ref()),
-            &snap.topology_hash,
-            snap.last_proof_block_hash,
-            [1; 32],
-            0,
-            4,
-            1,
-        );
+        let job = build_lease_job(&spec.to_snapshot(), [1; 32], 0, 4, 1);
         let g = generator(&job);
         assert_eq!(g.algorithm, GeneratorAlgorithm::Blake3Chacha8V1 as i32);
         assert_eq!(g.family, None);
@@ -461,13 +449,13 @@ mod drive {
             table.iter().map(|c| (c.family_id, c.revision)).collect()
         };
         assert_eq!(
-            ids(quip_coordinator::types::family::FAMILY_CONTRACTS),
+            ids(quip_coordinator::lease::FAMILY_CONTRACTS),
             ids(ising_generators::registry::CONTRACTS)
         );
         let spec = spec();
         assert_eq!(
             ChallengeFamily::admit(
-                quip_coordinator::types::family::FAMILY_CONTRACTS,
+                quip_coordinator::lease::FAMILY_CONTRACTS,
                 FAMILY,
                 1,
                 P_SPEC.to_vec(),
@@ -533,13 +521,11 @@ mod verification {
     use ising_generators::polariton::POLARITON_V1;
     use ising_generators::random::derive_nonce;
     use ising_generators::registry::CONTRACTS as REGISTRY;
-    use quip_coordinator::coordinator::scoring::lease::{
-        build_lease_job, lease_generator, verify_and_select, LeaseTopology,
+    use quip_coordinator::drive::TopologySpec;
+    use quip_coordinator::lease::{
+        build_lease_job, verify_and_select, ChallengeFamily, LeaseTopology,
     };
-
-    use quip_coordinator::types::family::ChallengeFamily;
-    use quip_coordinator::types::topology::Topology;
-    use quip_coordinator::types::topology_spec::TopologySpec;
+    use quip_coordinator::topology::Topology;
     use quip_proto::v1::{IsingProblemGenerator, Result as JobResult, SetTarget, Solution};
     use quip_protocol::lease::LeaseSpec;
     use quip_protocol::scoring::energy_from_milli;
@@ -587,17 +573,7 @@ mod verification {
         snap.last_proof_block_hash = root;
         snap.family =
             Some(ChallengeFamily::admit(&CONTRACTS, family, 1, params.to_vec(), topo).unwrap());
-        build_lease_job(
-            lease_generator(snap.family.as_ref()),
-            &snap.topology_hash,
-            snap.last_proof_block_hash,
-            MINER,
-            0,
-            32,
-            1,
-        )
-        .generator
-        .unwrap()
+        build_lease_job(&snap, MINER, 0, 32, 1).generator.unwrap()
     }
 
     fn lease() -> IsingProblemGenerator {
@@ -660,7 +636,6 @@ mod verification {
         for flip in 0..2 {
             spins[flip] = -1;
             solutions.push(Solution {
-                values: vec![],
                 spins: encode_spins_packed(&spins),
                 energy_milli: energy(&instance, &spins),
             });
@@ -853,15 +828,7 @@ mod verification {
         let spec = spec_of(&topo);
         let mut snap = spec.to_snapshot();
         snap.last_proof_block_hash = LAST_PROOF;
-        let job = build_lease_job(
-            lease_generator(snap.family.as_ref()),
-            &snap.topology_hash,
-            snap.last_proof_block_hash,
-            MINER,
-            0,
-            4,
-            1,
-        );
+        let job = build_lease_job(&snap, MINER, 0, 4, 1);
         let lease = job.generator.unwrap();
         let parsed = LeaseSpec::from_proto(&lease).unwrap();
         let salt = parsed.salt(0).unwrap();
@@ -872,7 +839,6 @@ mod verification {
         let result = JobResult {
             job_id: b"lease".to_vec(),
             solutions: vec![Solution {
-                values: vec![],
                 spins: encode_spins_packed(&spins),
                 energy_milli: energy_from_milli(&spins, &h, &j, &view.edges),
             }],
@@ -902,17 +868,7 @@ mod verification {
             )
             .unwrap(),
         );
-        let lease = build_lease_job(
-            lease_generator(snap.family.as_ref()),
-            &snap.topology_hash,
-            snap.last_proof_block_hash,
-            MINER,
-            0,
-            32,
-            1,
-        )
-        .generator
-        .unwrap();
+        let lease = build_lease_job(&snap, MINER, 0, 32, 1).generator.unwrap();
         let verifier = LeaseTopology::from_topology(&topo, REGISTRY).unwrap();
         (topo, lease, verifier)
     }
@@ -946,7 +902,6 @@ mod verification {
         let result = JobResult {
             job_id: b"lease".to_vec(),
             solutions: vec![Solution {
-                values: vec![],
                 spins: encode_spins_packed(&spins),
                 energy_milli: energy(&instance, &spins),
             }],
@@ -972,13 +927,12 @@ mod verification {
     #[test]
     fn an_accepted_family_witness_passes_the_validator_check() {
         use quantum_validation::families::{AdvertisedLimits, FamilyChallenge, CONTRACTS};
-        use quip_coordinator::chain::codec::proof_encode::{
+        use quip_coordinator::chain::proof_encode::{
             build_quantum_proof, ProofBuildContext, WitnessFormat,
         };
-        use quip_coordinator::types::family::{ChallengeFamily, FAMILY_CONTRACTS};
-        use quip_coordinator::types::proof::Proof;
-
-        use quip_coordinator::types::topology::Topology;
+        use quip_coordinator::chain::submit::Proof;
+        use quip_coordinator::lease::{ChallengeFamily, FAMILY_CONTRACTS};
+        use quip_coordinator::topology::Topology;
 
         let (lease, verifier, result) = polariton_report(true);
         let (_, validated) = verify_and_select(&lease, &verifier, &open_target(), &result).unwrap();
@@ -1006,7 +960,6 @@ mod verification {
                 generation: 1,
                 salt: salt.to_vec(),
                 device_access_time_us: 0,
-                topology_hash: vec![0; 32],
             },
             &ProofBuildContext {
                 topology_hash: [0; 32],

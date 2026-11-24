@@ -6,10 +6,9 @@
 use clap::Parser;
 use quip_proto::v1::miner_service_client::MinerServiceClient;
 use quip_proto::v1::{
-    coord_msg, ising_problem, miner_msg, Algorithm, Backend, CalibrateDone, CalibrateOutcome,
-    Capabilities, CoefficientEncoding, CoordMsg, Fatal, IsingProblem, Job, JobKind, JobRequest,
-    MinerMsg, Ready, Reject, RejectReason, Result as JobResult, SamplerMeta, SetTarget, Solution,
-    Status, Topology,
+    coord_msg, ising_problem, miner_msg, Algorithm, Backend, Capabilities, CoefficientEncoding,
+    CoordMsg, Fatal, IsingProblem, Job, JobKind, JobRequest, MinerMsg, Ready, Reject, RejectReason,
+    Result as JobResult, SamplerMeta, SetTarget, Solution, Status, Topology,
 };
 use quip_protocol::scoring::energy_milli;
 use quip_protocol::session::{
@@ -35,40 +34,6 @@ struct Cli {
     check: bool,
     #[arg(long, default_value = "info")]
     log_level: String,
-    /// List the `calibrate` feature and answer `Calibrate` this way. A job
-    /// that arrives before the `Calibrate` ends the session with a `Fatal`.
-    #[arg(long, value_enum)]
-    calibrate: Option<CalibrateMode>,
-}
-
-/// How the mock answers a `Calibrate`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
-enum CalibrateMode {
-    /// `CalibrateDone { outcome: DONE }`.
-    Done,
-    /// `CalibrateDone { outcome: FAILED }`.
-    Failed,
-    /// `CalibrateDone { outcome: DEADLINE_PASSED }`.
-    Deadline,
-    /// Never answers.
-    Silent,
-}
-
-/// The solver-contract feature name of a solver that calibrates.
-const CALIBRATE_FEATURE: &str = "calibrate";
-
-/// The reply to a `Calibrate` in `mode`, or `None` for `silent`.
-fn calibrate_reply(mode: CalibrateMode) -> Option<MinerMsg> {
-    let outcome = match mode {
-        CalibrateMode::Done => CalibrateOutcome::Done,
-        CalibrateMode::Failed => CalibrateOutcome::Failed,
-        CalibrateMode::Deadline => CalibrateOutcome::DeadlinePassed,
-        CalibrateMode::Silent => return None,
-    };
-    Some(miner(miner_msg::Msg::CalibrateDone(CalibrateDone {
-        outcome: outcome as i32,
-        summary: Some(format!("mock calibrate {mode:?}")),
-    })))
 }
 
 fn print_capabilities() {
@@ -85,15 +50,12 @@ fn print_capabilities() {
 }
 
 /// The envelope this mock advertises in `Hello` and on `GetCapabilities`.
-/// A mock that calibrates also lists the `calibrate` feature.
-fn mock_capabilities(calibrate: Option<CalibrateMode>) -> Capabilities {
+fn mock_capabilities() -> Capabilities {
     Capabilities {
         supported_kinds: vec![JobKind::IsingSample as i32, JobKind::IsingGenerate as i32],
         max_nodes: 100_000,
         max_edges: 1_000_000,
-        features: calibrate
-            .map(|_| vec![CALIBRATE_FEATURE.to_owned()])
-            .unwrap_or_default(),
+        features: vec![],
         protocol_version: PROTOCOL_VERSION,
         stream_width: 1,
         native_topology_hash: None,
@@ -139,7 +101,7 @@ async fn run() -> Result<(), ExitCode> {
     }
     let uri = cli.quip_coordinator.ok_or(ExitCode::ConfigInvalid)?;
     let miner_id = cli.miner_id.unwrap_or_else(|| "mock-0".into());
-    run_session(&uri, &miner_id, cli.calibrate).await
+    run_session(&uri, &miner_id).await
 }
 
 fn now_unix_ms() -> u64 {
@@ -159,15 +121,13 @@ fn miner(msg: miner_msg::Msg) -> MinerMsg {
     MinerMsg { msg: Some(msg) }
 }
 
-fn status_msg(miner_id: &str, abandoned_generation: u64) -> MinerMsg {
+fn status_msg(miner_id: &str) -> MinerMsg {
     miner(miner_msg::Msg::Status(Status {
         miner_id: miner_id.into(),
         utilization: 0.0,
         jobs_done: 0,
-        abandoned_generation,
+        abandoned_generation: 0,
         sampler_stats: std::collections::HashMap::default(),
-        headroom: None,
-        limit_reached: false,
     }))
 }
 
@@ -316,7 +276,6 @@ fn handle_job(job: Job, topo: Option<&SessionTopo>) -> Vec<MinerMsg> {
         solutions: vec![Solution {
             spins: encode_spins_packed(&spins),
             energy_milli: energy,
-            values: vec![],
         }],
         salt: vec![],
         nonce: vec![],
@@ -387,7 +346,6 @@ fn handle_lease(job: Job, topo: Option<&Topology>, target: Option<&SetTarget>) -
                 solutions: vec![Solution {
                     spins: encode_spins_packed(&spins),
                     energy_milli: energy,
-                    values: vec![],
                 }],
                 meta: Some(SamplerMeta {
                     reads: 1,
@@ -413,14 +371,10 @@ fn handle_lease(job: Job, topo: Option<&Topology>, target: Option<&SetTarget>) -
     clippy::too_many_lines,
     reason = "the session loop dispatches coordinator messages and flushes replies"
 )]
-async fn run_session(
-    uri: &str,
-    miner_id: &str,
-    calibrate: Option<CalibrateMode>,
-) -> Result<(), ExitCode> {
+async fn run_session(uri: &str, miner_id: &str) -> Result<(), ExitCode> {
     // Resolve token before any network I/O so a missing QUIP_SESSION_TOKEN
     // always maps to exit 77 (never InternalFatal from a connect failure).
-    let hello = build_hello(miner_id, mock_capabilities(calibrate)).map_err(ExitCode::from)?;
+    let hello = build_hello(miner_id, mock_capabilities()).map_err(ExitCode::from)?;
 
     let path = uri.strip_prefix("unix://").unwrap_or(uri).to_string();
     let channel = Endpoint::try_from("http://[::]:50051") // dummy authority, unused for UDS
@@ -455,8 +409,6 @@ async fn run_session(
     let mut session_topo: Option<SessionTopo> = None;
     let mut raw_topo: Option<Topology> = None;
     let mut session_target: Option<SetTarget> = None;
-    let mut abandoned: u64 = 0;
-    let mut calibrated = false;
     loop {
         let idle = u64::from(config.as_ref().map_or(300, |c| c.idle_timeout_s));
         let next = tokio::time::timeout(Duration::from_secs(idle), inbound.message()).await;
@@ -477,15 +429,8 @@ async fn run_session(
                 }
             }
             Some(coord_msg::Msg::Configure(c)) => {
-                let session = SessionConfig::from_configure(miner_id.into(), &c);
-                // Ready grants nothing. The first JobRequest opens the
-                // pipeline, as the miner SDK does.
-                let credits = session.queue_depth;
-                config = Some(session);
+                config = Some(SessionConfig::from_configure(miner_id.into(), &c));
                 tx.send(miner(miner_msg::Msg::Ready(Ready {})))
-                    .await
-                    .map_err(|_| ExitCode::InternalFatal)?;
-                tx.send(miner(miner_msg::Msg::JobRequest(JobRequest { credits })))
                     .await
                     .map_err(|_| ExitCode::InternalFatal)?;
             }
@@ -494,16 +439,6 @@ async fn run_session(
                 raw_topo = Some(t);
             }
             Some(coord_msg::Msg::Job(job)) => {
-                // The solver contract sends `Calibrate` before the first job
-                // to a solver that lists the feature. A job first is a
-                // coordinator bug, and this mock exists to catch it.
-                if calibrate.is_some() && !calibrated {
-                    let _ = tx
-                        .send(fatal_msg(ExitCode::InternalFatal, "Job before Calibrate"))
-                        .await;
-                    session_err = Some(ExitCode::InternalFatal);
-                    break;
-                }
                 let replies = if job.kind == JobKind::IsingGenerate as i32 {
                     handle_lease(job, raw_topo.as_ref(), session_target.as_ref())
                 } else {
@@ -513,26 +448,22 @@ async fn run_session(
                     tx.send(reply).await.map_err(|_| ExitCode::InternalFatal)?;
                 }
             }
-            Some(coord_msg::Msg::Cancel(c)) => {
-                // No jobs buffered in this mock. Acknowledge via Status with
-                // the new watermark, as the miner SDK does.
-                abandoned = abandoned.max(c.max_generation);
-                tx.send(status_msg(miner_id, abandoned))
+            Some(coord_msg::Msg::Cancel(_)) => {
+                // No jobs buffered in this mock; acknowledge via Status.
+                tx.send(status_msg(miner_id))
                     .await
                     .map_err(|_| ExitCode::InternalFatal)?;
             }
             Some(coord_msg::Msg::Ping(_)) => {
-                tx.send(status_msg(miner_id, abandoned))
+                tx.send(status_msg(miner_id))
                     .await
                     .map_err(|_| ExitCode::InternalFatal)?;
             }
             // Answer with the same permissive envelope --capabilities prints.
             Some(coord_msg::Msg::GetCapabilities(_)) => {
-                tx.send(miner(miner_msg::Msg::Capabilities(mock_capabilities(
-                    calibrate,
-                ))))
-                .await
-                .map_err(|_| ExitCode::InternalFatal)?;
+                tx.send(miner(miner_msg::Msg::Capabilities(mock_capabilities())))
+                    .await
+                    .map_err(|_| ExitCode::InternalFatal)?;
             }
             Some(coord_msg::Msg::Shutdown(s)) => {
                 grace_ms = if s.grace_ms == 0 {
@@ -543,12 +474,6 @@ async fn run_session(
                 break;
             }
             Some(coord_msg::Msg::SetTarget(target)) => session_target = Some(target),
-            Some(coord_msg::Msg::Calibrate(_)) => {
-                calibrated = true;
-                if let Some(reply) = calibrate.and_then(calibrate_reply) {
-                    tx.send(reply).await.map_err(|_| ExitCode::InternalFatal)?;
-                }
-            }
             None => {}
         }
     }
@@ -659,7 +584,6 @@ mod tests {
         Job {
             job_id: job_id.to_vec(),
             generator: None,
-            iqm: None,
             kind: kind as i32,
             generation: 1,
             deadline_ms: now_unix_ms() + 60_000,
@@ -695,32 +619,6 @@ mod tests {
                 _ => None,
             })
             .unwrap_or(b"")
-    }
-
-    #[test]
-    fn calibrate_modes_answer_with_their_outcome() {
-        for (mode, outcome) in [
-            (CalibrateMode::Done, Some(CalibrateOutcome::Done)),
-            (CalibrateMode::Failed, Some(CalibrateOutcome::Failed)),
-            (
-                CalibrateMode::Deadline,
-                Some(CalibrateOutcome::DeadlinePassed),
-            ),
-            (CalibrateMode::Silent, None),
-        ] {
-            let got = calibrate_reply(mode).and_then(|m| match m.msg {
-                Some(miner_msg::Msg::CalibrateDone(d)) => {
-                    CalibrateOutcome::try_from(d.outcome).ok()
-                }
-                _ => None,
-            });
-            assert_eq!(got, outcome, "{mode:?}");
-        }
-        assert_eq!(
-            mock_capabilities(Some(CalibrateMode::Silent)).features,
-            vec![CALIBRATE_FEATURE.to_owned()]
-        );
-        assert!(mock_capabilities(None).features.is_empty());
     }
 
     #[test]

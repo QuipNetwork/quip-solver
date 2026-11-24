@@ -33,10 +33,9 @@
 # OS is part of the name because arch alone is ambiguous: the cpu miner ships
 # both a linux-arm64 and a darwin-arm64 build.
 #
-# Each repo's production binaries are required: cpu sa, gibbs and sb; metal sa
-# and gibbs; cuda sa, gibbs and msa. Every other miner the release publishes for
-# the target platform (experimental kernels, family generators) is found from
-# the release's asset list and fetched as optional — see fetch_discovered.
+# The cpu miner's production binaries (sa, gibbs, sb) are required; its
+# experimental kernels and family generators are fetched too but tolerate
+# absence — see CPU_EXPERIMENTAL and CPU_FAMILY below.
 #
 # NOTE: every run resolves tags from the GitLab API, DRY_RUN included, because
 # the asset URL it prints contains the tag.
@@ -167,63 +166,28 @@ fetch() {
   done
 }
 
-# release_assets REPO TAG  — print the asset names one release published, one
-# per line, from a single call to the releases API. The names come out of
-# `assets.links[].name`. There is no JSON parser here on purpose: the toolchain
-# image and the Docker build stages carry curl, grep and sed but not jq, so the
-# names are pulled out with grep. Every miner asset name starts with "quip-",
-# which keeps the release's own title and the author's name out of the list.
-#
-# A failed call, or a release that lists no miner assets, fails the run. An
-# empty list must never mean "fetch nothing".
-release_assets() {
-  local body names
-  body="$(curl --fail --silent --show-error \
-    "${API}/projects/${GROUP}%2F${1}/releases/${2}")" || {
-    echo "cannot list the assets of ${1} ${2}" >&2
-    return 1
-  }
-  names="$(printf '%s' "$body" | grep -o '"name":"quip-[^"]*"' | sed 's/^"name":"\(.*\)"$/\1/')" || true
-  if [ -z "$names" ]; then
-    echo "release ${2} of ${1} lists no miner assets" >&2
-    return 1
-  fi
-  printf '%s\n' "$names"
-}
+# Experimental CPU kernels, fetched alongside the production three. These build
+# behind quip-solver-cpu's opt-in `experimental` cargo feature, so every name
+# here is optional: the ones a release carries land in DEST and the rest are
+# skipped without failing an image build. They are inert until a config.toml
+# `[cpu] binary =` names one.
+# Source of truth for the list: the binaries table in quip-solver-cpu's README.
+CPU_EXPERIMENTAL=(
+  quip-cpu-bsb quip-cpu-hdsb quip-cpu-hbsb quip-cpu-gbsb quip-cpu-gdsb
+  quip-cpu-tedsb quip-cpu-sbqa quip-cpu-ggdsb quip-cpu-fsa quip-cpu-msa
+  quip-cpu-mps quip-cpu-mfa quip-cpu-flatiron quip-cpu-greedy
+)
 
-# fetch_discovered HW TAG PROJ REQUIRED...  — fetch as optional every asset the
-# release TAG published for this platform as "quip-<HW>-<name>-<os>-<arch>".
-# Discovery replaces a hand-written list, so a miner a repo adds reaches the
-# images and the macOS bundle without an edit here. REQUIRED names the miners
-# the caller already fetched as required; they are not fetched twice. `bench`
-# is a benchmark harness, not a miner, and is never installed.
-#
-# <name> may itself hold hyphens (flow-loops, msa-descent). The platform
-# suffix is stripped from the end, so the name is whatever precedes it.
-fetch_discovered() {
-  local hw="$1" tag="$2" proj="$3"
-  shift 3
-  local assets suffix asset name skip req
-  local -a found
-  assets="$(release_assets "${proj##*%2F}" "$tag")" || return 1
-  suffix="-${os_tag}-${arch}"
-  found=()
-  while IFS= read -r asset; do
-    case "$asset" in
-    "quip-${hw}-"*"$suffix") name="${asset%"$suffix"}" ;;
-    *) continue ;;
-    esac
-    [ "$name" = "quip-${hw}-bench" ] && continue
-    skip=false
-    for req in "$@"; do
-      [ "$name" = "$req" ] && skip=true
-    done
-    [ "$skip" = true ] || found+=("$name")
-  done <<<"$assets"
-  if [ "${#found[@]}" -gt 0 ]; then
-    fetch optional "$tag" "$proj" "${found[@]}"
-  fi
-}
+# CPU miners that link a canonical family generator. The production kernels
+# declare only the generic tier, so the router refuses them every family lease
+# with GeneratorUnsupported. Each of these runs its own method on its families
+# and a generic sampler on every other job. Optional for the same reason as
+# above.
+CPU_FAMILY=(
+  quip-cpu-otsuka quip-cpu-dimer quip-cpu-ice-sat quip-cpu-pairworm
+  quip-cpu-flow quip-cpu-flow-loops quip-cpu-tileworm quip-cpu-gadget-repair
+  quip-cpu-routing quip-cpu-dipolar
+)
 
 # Decide which backends this run wants.
 want_cpu=false
@@ -256,22 +220,22 @@ auto)
   ;;
 esac
 
-CUDA_CORE=("quip-cuda-sa" "quip-cuda-gibbs" "quip-cuda-msa")
-
 # Resolve a tag only for a miner this run actually wants, so a repo that is not
 # needed can never fail the run.
 if [ "$want_metal" = true ]; then
   METAL_TAG="$(miner_tag metal)"
   fetch required "$METAL_TAG" "quip.network%2Fquip-solver-metal" "quip-metal-sa" "quip-metal-gibbs"
-  fetch_discovered metal "$METAL_TAG" "quip.network%2Fquip-solver-metal" \
-    "quip-metal-sa" "quip-metal-gibbs"
+  # Optional for the same reason the experimental CPU kernels are: a Metal
+  # release that predates one of these kernels is skipped rather than failing
+  # the run. quip-metal-otsuka links the twisted-ice dimer family generator.
+  fetch optional "$METAL_TAG" "quip.network%2Fquip-solver-metal" "quip-metal-msa" "quip-metal-otsuka"
 fi
 if [ "$want_cpu" = true ]; then
   CPU_TAG="$(miner_tag cpu)"
   fetch required "$CPU_TAG" "quip.network%2Fquip-solver-cpu" \
     "quip-cpu-sa" "quip-cpu-gibbs" "quip-cpu-sb"
-  fetch_discovered cpu "$CPU_TAG" "quip.network%2Fquip-solver-cpu" \
-    "quip-cpu-sa" "quip-cpu-gibbs" "quip-cpu-sb"
+  fetch optional "$CPU_TAG" "quip.network%2Fquip-solver-cpu" "${CPU_EXPERIMENTAL[@]}"
+  fetch optional "$CPU_TAG" "quip.network%2Fquip-solver-cpu" "${CPU_FAMILY[@]}"
 fi
 if [ "$want_cuda" = true ]; then
   if [ "$arch" != amd64 ]; then
@@ -282,12 +246,10 @@ if [ "$want_cuda" = true ]; then
     fi
   elif [ "$cuda_required" = true ]; then
     CUDA_TAG="$(miner_tag cuda)"
-    fetch required "$CUDA_TAG" "quip.network%2Fquip-solver-cuda" "${CUDA_CORE[@]}"
-    fetch_discovered cuda "$CUDA_TAG" "quip.network%2Fquip-solver-cuda" "${CUDA_CORE[@]}"
+    fetch required "$CUDA_TAG" "quip.network%2Fquip-solver-cuda" "quip-cuda-sa" "quip-cuda-gibbs" "quip-cuda-msa"
   else
     CUDA_TAG="$(miner_tag cuda)"
-    { fetch required "$CUDA_TAG" "quip.network%2Fquip-solver-cuda" "${CUDA_CORE[@]}" &&
-      fetch_discovered cuda "$CUDA_TAG" "quip.network%2Fquip-solver-cuda" "${CUDA_CORE[@]}"; } ||
+    fetch required "$CUDA_TAG" "quip.network%2Fquip-solver-cuda" "quip-cuda-sa" "quip-cuda-gibbs" "quip-cuda-msa" ||
       echo "note: cuda binaries optional (no GPU host)"
   fi
 fi

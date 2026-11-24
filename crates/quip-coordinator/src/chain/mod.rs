@@ -1,43 +1,54 @@
 //! Chain access behind `ChainClient`. Real impl talks Substrate JSON-RPC;
 //! tests use `FakeChain`.
 
-pub mod client;
-pub mod codec;
-pub mod governance;
-pub mod mining;
-pub mod registration;
-pub mod sign;
-pub mod startup;
+pub mod account;
+pub mod dryrun;
+pub mod extrinsic;
+pub mod fake;
+pub mod mempool;
+pub mod orders;
+pub mod outcome;
+pub mod pool;
+pub mod preflight;
+pub mod proof_encode;
+pub mod real;
+pub mod scale_types;
+pub mod seed;
+pub mod snapshot;
+pub mod submit;
+pub mod sync;
+pub mod transport;
+pub mod transport_jsonrpsee;
+pub mod watch;
 
-pub use client::dryrun::{decode_dispatch_error, describe_module_error, ModuleError};
-pub use client::jsonrpsee::JsonrpseeTransport;
-pub use client::transport::{BoxStream, RpcTransport};
-pub use client::watch::{parse_tx_status, TxStatus};
-pub use client::RealChainClient;
-pub use codec::extrinsic::RuntimeTxContext;
-pub use codec::scale_types::{MinerInfoScale, NodeDescriptorV2Input};
-pub use governance::seed::{
-    register_topology_call, seed_chain, ss58, SeedParams, SeedTopology, DEFAULT_ENERGY_BAND,
-    DEFAULT_SEED_DIFFICULTY, MIN_SEED_SPEC_VERSION,
+pub use account::{free_from_account_bytes, system_account_storage_key};
+pub use dryrun::{decode_dispatch_error, describe_module_error, ModuleError};
+pub use extrinsic::RuntimeTxContext;
+pub use fake::FakeChain;
+pub use mempool::JobOrder;
+pub use orders::{job_orders_prefix, order_id_from_key};
+pub use outcome::{SubmitLedger, QBLOCK_RETENTION};
+pub use pool::{decode_pending_proof, PendingProof};
+pub use real::RealChainClient;
+pub use scale_types::{
+    MinerInfoScale, MinerKind, MinerSpecScale, NodeDescriptorV2Input, NodeLogLevel, SolverType,
+    MAX_ORDER_SOLUTIONS,
 };
-pub use governance::set_family::{
-    apply_family, dimer_1200, family_root_calls, plan_family, twisted_dimer, twisted_dimer_params,
-    ExistingDefault, FamilyOutcome, FamilyPlan,
+pub use seed::{
+    apply_family, dimer_1200, family_root_calls, plan_family, register_topology_call, seed_chain,
+    ss58, twisted_dimer, twisted_dimer_params, ExistingDefault, FamilyOutcome, FamilyPlan,
+    SeedParams, SeedTopology, DEFAULT_ENERGY_BAND, DEFAULT_SEED_DIFFICULTY, MIN_SEED_SPEC_VERSION,
 };
-pub use mining::mempool::{job_orders_prefix, order_id_from_key};
-pub use mining::pool::decode_pending_proof;
-pub use mining::snapshot::round_root;
-pub use registration::account::{free_from_account_bytes, system_account_storage_key};
-pub use sign::submit::{
+pub use snapshot::{head_state_key, round_root, DecayParams, MiningSnapshot};
+pub use submit::{
     classify_descriptor, classify_participation, classify_receipt, classify_registration,
-    DescriptorOutcome, ParticipationOutcome, RegistrationOutcome,
+    DescriptorOutcome, ParticipationOutcome, Proof, RegistrationOutcome, SubmitAction,
+    SubmitReceipt,
 };
+pub use transport::{BoxStream, RpcTransport};
+pub use transport_jsonrpsee::JsonrpseeTransport;
+pub use watch::{parse_tx_status, TxStatus};
 
-use crate::types::calibration::ReferenceWinner;
-use crate::types::miner::{MinerInfo, MinerKind};
-use crate::types::order::JobOrder;
-use crate::types::proof::{Proof, SubmitReceipt};
-use crate::types::snapshot::{DecayParams, MiningSnapshot, PendingProof};
 use async_trait::async_trait;
 
 /// Errors from chain I/O (RPC, decode, submit).
@@ -62,6 +73,24 @@ impl std::fmt::Display for ChainError {
 }
 
 impl std::error::Error for ChainError {}
+
+/// `QuantumPow.Miners[account]`, widened for the dashboard wire shape.
+///
+/// The pallet stores `registered_at` and both proof counts as `u32`. They widen
+/// to `u64` here so the dashboard serializer has one integer type to guard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MinerInfo {
+    /// Block the account registered at.
+    pub registered_at: u64,
+    /// Reserved miner deposit, in plancks.
+    pub deposit: u128,
+    /// Lifetime accepted proofs. Also the `pow_sequence` a submission reports.
+    pub proofs_submitted: u64,
+    /// Lifetime winning proofs.
+    pub proofs_won: u64,
+    /// Lifetime rewards, in plancks.
+    pub rewards_earned: u128,
+}
 
 /// Async chain seam: snapshot fetch, mempool orders, extrinsic submit.
 #[async_trait]
@@ -107,7 +136,7 @@ pub trait ChainClient: Send + Sync {
     /// order named by `proof.order_id` (8 bytes, little-endian).
     ///
     /// `proof.solutions` must already respect the pallet bound
-    /// ([`crate::types::order::MAX_ORDER_SOLUTIONS`] rows).
+    /// ([`MAX_ORDER_SOLUTIONS`] rows).
     async fn submit_solution(&self, proof: &Proof) -> Result<SubmitReceipt, ChainError>;
 
     /// Hybrid-sign and submit `MinerRegistry.set_descriptor`.
@@ -126,23 +155,6 @@ pub trait ChainClient: Send + Sync {
     /// the chain hasn't started a round or doesn't expose one; used to key the
     /// per-qblock mining-attempt logs.
     async fn fetch_latest_qblock_id(&self) -> Result<Option<u64>, ChainError>;
-
-    /// Read the winning qblock `qblock_id` (`QuantumPowApi_qblock_by_id`).
-    ///
-    /// `None` when the chain holds no such block. The winner's `kind` is
-    /// always `None` here; `fetch_participation_kind` supplies it.
-    async fn fetch_qblock_by_id(
-        &self,
-        qblock_id: u64,
-    ) -> Result<Option<ReferenceWinner>, ChainError>;
-
-    /// Read the hardware kind `account` declared for `qblock_id`
-    /// (`MinerRegistry.ParticipantsByQBlock`). `None` when it has no record.
-    async fn fetch_participation_kind(
-        &self,
-        qblock_id: u64,
-        account: [u8; 32],
-    ) -> Result<Option<MinerKind>, ChainError>;
 
     /// Read `QuantumPow.Miners[account]` at the current head.
     ///
