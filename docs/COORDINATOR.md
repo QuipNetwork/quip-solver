@@ -11,18 +11,15 @@ how they fit together. For build and run commands, see `AGENTS.md`.
 
 ## Run modes
 
-`main.rs` parses the command line, and `cli::dispatch` runs it. Each
-subcommand has its own file in `cli/`:
+`main.rs` parses one CLI:
 
 - `quip-coordinator --config <config.toml>` — the production runtime
-  (`cli/run.rs`, then `app::chain_env::run`, then `app::run`). Connects to the validators,
+  (`run_config_path` → `runtime::run_runtime`). Connects to the validators,
   spawns and supervises the configured miners, feeds them chain work, submits
   proofs.
 - `quip-coordinator drive …` — generates or replays work for one miner.
   It can read a chain topology once, then drives the miner without submissions.
   Use this mode for benchmarking and comparisons under matched conditions.
-- `quip-coordinator calibrate …` — runs one miner through calibration on the
-  newest winners of a validator, then reports the outcome. See Calibration.
 - `quip-coordinator seed-chain …` — makes a fresh runtime-120 chain mineable.
   It registers the dimer1200 family topology (`quip/twisted-ice-dimer`
   revision 1, solver-core's live recipe `x-w62-p1200`) on the
@@ -57,8 +54,7 @@ runtimes before 120.
 
 ## Logging
 
-`observe/logging.rs` installs the subscriber, and `cli::dispatch` calls it
-first through `app::init_logging`. The `tracing`
+`logging.rs` installs the subscriber, and `main` calls it first. The `tracing`
 macros only dispatch to an installed subscriber. Without that call every log
 statement in the process does nothing and `RUST_LOG` has no effect.
 
@@ -98,12 +94,12 @@ seconds warns once.
   `[dwave]`/`[qpu]` launches no miners and can never mine. The error names the
   v0.2 `quip-miner` format when it sees that format's keys, because the two
   configs are not interchangeable.
-- **An incompatible validator.** `chain::startup::preflight` reads the runtime version
+- **An incompatible validator.** `chain::preflight` reads the runtime version
   and checks `QuantumPowApi`. The coordinator drives version 2 or newer, the
   version that added `difficulty_for`, which every poll calls. Version 3,
   in runtime 120, adds a `family` field to the topology record. Each poll reads
   the version and decodes the record in the layout of that version.
-- **An unfunded miner account.** `chain/registration/funding.rs` reads the account balance and,
+- **An unfunded miner account.** `funding.rs` reads the account balance and,
   when the balance is below `min_balance_plancks` (2 UNIT), requests a top up
   from `faucet_url`. It retries with backoff for `funding_timeout_s` (10
   minutes by default), then gives up. An account that cannot pay transaction
@@ -155,13 +151,10 @@ When the key is absent it defaults to `["ws://quip-validator:9944",
 
 ## Runtime wiring
 
-`app::run` (in `app/mod.rs`) is the production entry point. It runs over any
-`Environment`: `app::chain_env::ChainEnv` in production, and a fake chain in
-the tests. It:
+`run_runtime` (in `runtime.rs`) is the production entry point. It:
 
 1. Binds a Unix-domain socket and serves the gRPC `MinerService` on it
-   (`miner::session::service::SessionService` over the coordinator's
-   `CoordinatorService`). Miners connect back over this socket.
+   (`CoordinatorService`). Miners connect back over this socket.
 2. Seeds each miner's `Configure` from the launch plan so the server can answer
    the handshake.
 3. Spawns one `supervise_miner` task per configured miner.
@@ -171,7 +164,7 @@ the tests. It:
    drains the feeder and supervisors (so in-band `Shutdown` and any kill-after-
    grace finish), aborts the server, and removes the socket.
 
-`CoordinatorState` (in `coordinator/state.rs`) is the shared state behind an
+`CoordinatorState` (in `session.rs`) is the shared state behind an
 `Arc<Mutex<…>>`: the `Router`, the in-flight map, the current `Topology` and
 difficulty `target`, per-miner `Configure`, and the salt→job bookkeeping.
 
@@ -249,12 +242,6 @@ compares the winner:
 | The signing account | The read raced the write | `StopRoundStale` |
 | Nothing | The pallet rejected the proof itself. Check diversity, energy, and registration. | `classify_receipt` |
 
-Before the client encodes or signs a proof, it compares the proof topology
-hash with the topology hash of the current snapshot. If they differ, the chain
-would refuse the proof. The client then returns `StopRoundStale` and makes no
-chain call. It logs this warning:
-"proof was mined on a topology the chain no longer uses; dropping it".
-
 A lost race is the one included-but-failed case that says nothing is wrong
 with the proof, so it must not appear as a rejection.
 
@@ -266,21 +253,18 @@ Naming the pallet error variant itself, such as `InsufficientDiversity`,
 still needs metadata decoding. `classify_receipt` matches those names, so it
 only ever sees them for errors the node reports before inclusion.
 
-`RealChainClient` (`chain/client/mod.rs`) is the live client over Substrate
-JSON-RPC. `FakeChain` (`testing/fake_chain.rs`) backs the tests. The client's
-operations live in the `chain` folders by concern. `chain/client/` holds the
-transport and storage reads. `chain/codec/` holds `extrinsic` (H4 hybrid
-sr25519 + FN-DSA-512 signing, `load_hybrid_pair`, `miner_identity_bytes`,
-`signer_account_bytes`), `proof_encode`, and `scale_types`. `chain/sign/`
-holds submission and `classify_receipt`. `chain/registration/`,
-`chain/mining/`, `chain/governance/`, and `chain/startup/` hold the rest. The
-plain data (`MiningSnapshot`, `DecayParams`, `JobOrder`, `Proof`,
-`SubmitAction`) is in `types/`. Nothing outside `chain/` talks to the node
-directly.
+`RealChainClient` (`chain/real.rs`) is the live client over Substrate
+JSON-RPC. `FakeChain` (`chain/fake.rs`) backs the tests. Supporting
+modules: `extrinsic` (H4 hybrid sr25519 + FN-DSA-512 signing, `load_hybrid_pair`,
+`miner_identity_bytes`, `signer_account_bytes`), `snapshot`
+(`MiningSnapshot`, `DecayParams`),
+`mempool` (`JobOrder`), `submit` (`Proof`, `classify_receipt`, `SubmitAction`),
+plus `proof_encode` and `scale_types` for SCALE codec. Nothing outside
+`chain/` talks to the node directly.
 
 ## Job production — the feeder
 
-`feeder_loop` (in `coordinator/feeder/mod.rs`) runs one poll every `poll_interval_ms`
+`feeder_loop` (in `runtime.rs`) runs one poll every `poll_interval_ms`
 (1000 ms in production). The poll runs every 250 ms when the miners are
 stopped for a pending win. A win is visible on the next poll, so the
 worst-case delay before `Cancel` is one poll interval plus the snapshot RPC.
@@ -329,7 +313,7 @@ The states, in order:
 8. **Awaiting qblock.** Off the walk. On each poll in state 7 the feeder
    reads `author_pendingExtrinsics`, decodes every signed
    `QuantumPow.submit_proof`, and replays the pallet gates against the
-   snapshot (`chain::mining::pool::judge_pending_proof`). The decoder drops an entry
+   snapshot (`pool_watch::judge_pending_proof`). The decoder drops an entry
    whose compact length does not match its bytes, and an entry with a mortal
    era. It verifies the hybrid signature with the genesis hash and the runtime
    versions. For `CheckMetadataHash` mode Enabled it checks only that the
@@ -450,24 +434,9 @@ Startup drives states 2 through 6. A funding failure at startup is still exit
 download after miners connect.
 
 One `info` line names the new generation, the cancelled staged-job count, the
-miner count, and the refreshed target. The coordinator writes that line after
-it queues each `Cancel`, before any miner has the `Cancel`.
+miner count, and the refreshed target.
 
-Each session times its `Cancel` until the miner acknowledges it with a
-`Status` whose `abandoned_generation` covers the `Cancel`. An `info` line,
-`miner acknowledged cancel`, then reports these intervals:
-
-| Field | Interval |
-|-------|----------|
-| `send_wait_ms` | The send waited for space in the full outbound channel. |
-| `queue_delay_ms` | The `Cancel` waited in the outbound channel for the transport to take it. Jobs queued ahead of the `Cancel` add to this interval. |
-| `ack_wait_ms` | From the transport taking the `Cancel` to the session reading the `Status`. This interval covers network and miner time. It also covers messages queued ahead of the `Status` in the session's read loop. |
-| `total_ms` | From the start of the send to the session reading the `Status`. |
-
-The session logs the validation time of each result at `debug`, as
-`result validated` with `validation_us`.
-
-Mempool jobs carry generation `0` (`coordinator::producer::mempool::job_order_to_job`).
+Mempool jobs carry generation `0` (`producer::mempool::job_order_to_job`).
 Reseeds keep those jobs. PoW jobs carry the live generation. The feeder drops
 them when their round ends. A cancelled in-flight job is not re-queued, not
 scored, and not submitted. The miner refunds its credit with `JobRequest{1}`.
@@ -491,7 +460,7 @@ the floor. The feeder then clamps the depth to `stage_ceiling`, a per-miner
 budget of 64 MiB of staged Ising models (`MAX_STAGE_BYTES_PER_MINER`), so a
 fast miner on a large topology cannot stage an unbounded reserve. The EMA
 tracks queue drain. A job leaves the staged queue at dispatch, so that is the
-signal the feeder sizes against. The default floor is 256 (`app/chain_env/run.rs`),
+signal the feeder sizes against. The default floor is 256 (`main.rs`),
 generous enough to keep every miner fed from the first poll. The one-minute
 heartbeat reports completions, not this dispatch counter.
 
@@ -499,7 +468,7 @@ heartbeat reports completions, not this dispatch counter.
 
 The chain eases `max_energy_milli` between wins. A solution that misses the
 threshold now may clear it later in the same round, so the session path
-stashes it and the feeder submits it at the projected block. `coordinator/round/decay.rs`
+stashes it and the feeder submits it at the projected block. `decay.rs`
 mirrors the chain's rule so the projection needs no per-block RPC.
 
 The chain has shipped three rules. Runtime 117 steps the threshold once per
@@ -539,37 +508,13 @@ neither starts a new generation.
 
 `WinStash::viability_block` finds the first block whose threshold exceeds a
 candidate's energy by binary search over 25,600 blocks. A candidate that
-does not clear inside that window is not held.
-
-At each poll the feeder calls `WinStash::win_time_check`. The call walks the
-due candidates from the lowest energy up. A candidate is due when its
-viability block has arrived by the block that a proof sent now lands in, the
-feeder has not submitted it, and its energy beats the energy already sent. The
-call returns the first due candidate that clears the gates of that block:
-`min_solutions`, diversity, and the projected energy threshold. A due
-candidate that fails the gates stays stashed, and the walk moves to the next
-one. If none clears the gates, the call reports the best due candidate with
-its failed check. The feeder logs that check at debug level and submits
-nothing at that poll. The stash summary in `attempts.json` reports `decay_algorithm` and `target_proof_blocks` so an
+does not clear inside that window is not held. The stash summary in
+`attempts.json` reports `decay_algorithm` and `target_proof_blocks` so an
 operator can confirm which rule and target a round ran under.
-
-The pallet checks a proof against the threshold of the block that includes
-it. A proof sent while block N is the head lands in block N + 1 at the
-earliest. `WinStash::win_time_check` therefore replays the chain's gates
-against the threshold of the block after the head
-(`WIN_TIME_LEAD_BLOCKS` = 1), not against the live target of the head. A
-held candidate goes out one block before its viability block and lands in
-the first block that admits it. `min_solutions` and `min_diversity_milli`
-do not decay; the solution count and the diversity are recomputed over the
-rows that the projected threshold admits. The projection applies only when
-the decay model reproduces the live threshold at the head exactly. When the
-two disagree, the feeder uses the live threshold, so a wrong model cannot
-spend submit attempts on early proofs. Set `WIN_TIME_LEAD_BLOCKS` to 0 to
-gate on the head's own threshold.
 
 ## Routing and credits
 
-`Router` (`coordinator/router/`) indexes miner capabilities and holds a staged queue per miner.
+`Router` (`router.rs`) indexes miner capabilities and holds a staged queue per miner.
 `route` selects the first capable miner by sorted miner id.
 `stage_on` targets a specific miner, which is what the feeder uses.
 Both paths check job kinds, the lease generator, node and edge limits, and degree.
@@ -587,22 +532,15 @@ Jobs already dispatched continue under the existing result and reject rules.
 A snapshot with an incompatible protocol version leaves the current envelope intact.
 
 A **credit pool** gates dispatch, not a queue depth. The miner grants
-`width` credits with its first `JobRequest` and one more per terminal event
-(`Result` or `Reject`). `Ready` grants nothing. Each dispatch spends one credit (`next_job`). Dispatch stays
+`width` credits up front and one more per terminal event (`Result` or
+`Reject`). Each dispatch spends one credit (`next_job`). Dispatch stays
 one-to-one with completion, and the credits the miner has issued bound the
 in-flight count. In-flight jobs live in `CoordinatorState`, so the
 router keeps no separate outstanding counter.
 
-The once-a-minute `miner throughput` line counts rejects in `jobs_rejected`,
-apart from the `jobs_completed` count of finished work.
-
 On a reject with `UnsupportedKind`, the router records that the miner cannot
 serve that job kind and re-routes the job to another capable miner. On a miner
-crash, `reclaim` returns its staged and in-flight jobs for re-queue, and the
-miner stays registered while it restarts. When the supervisor stops restarting
-a miner, `retire_miner` returns the same jobs and removes the miner from the
-router. The jobs then go to the remaining miners. A reclaimed mempool order
-that no miner can take leaves `mempool_orders`. A later block stages it again.
+crash, `reclaim` returns its staged and in-flight jobs for re-queue.
 
 A miner with a native fingerprint receives hash jobs for the active session topology.
 The miner keeps its refusal or defect handling for those jobs.
@@ -628,12 +566,9 @@ They do not restore dropped jobs.
 
 ## The miner session
 
-`SessionService` (`miner/session/service.rs`) is the server side of the gRPC
-`MinerService`, the streaming miner protocol carried over the Unix socket. Each
-session runs one loop (`miner/session/handlers.rs`), and the loop reports to a
-`SessionEvents` impl: `CoordinatorService` (`coordinator/events.rs`) in
-production, and the drive harness in `app/local_env/`. Per session the loop
-runs the handshake (`Hello` → `Welcome`), applies `Configure`, then
+`CoordinatorService<C>` is the server side of the gRPC `MinerService`
+(`session.rs`), the streaming miner protocol carried over the Unix socket. Per
+session it runs the handshake (`Hello` → `Welcome`), applies `Configure`, then
 services the bidirectional stream: a `JobRequest` grants credits, the
 coordinator dispatches staged `Job`s, and each `Result` or `Reject` is a
 terminal event that frees a credit and advances accounting. A periodic `Ping`
@@ -679,7 +614,7 @@ than zero, the miner counts as a round participant.
 
 ## Problem families
 
-`FAMILY_CONTRACTS` in `crates/quip-coordinator/src/types/family.rs` is
+`FAMILY_CONTRACTS` in `crates/quip-coordinator/src/lease.rs` is
 `ising_generators::registry::CONTRACTS`, every family revision that the
 generator crate ships. A snapshot with a family issues only family leases and
 has no legacy fallback.
@@ -745,7 +680,7 @@ revision are not in `FAMILY_CONTRACTS`.
 
 ## Supervision and shutdown
 
-`supervise_miner` (`miner/supervisor.rs`) owns one miner for the run. It spawns the
+`supervise_miner` (`supervisor.rs`) owns one miner for the run. It spawns the
 binary with the session token in the `QUIP_SESSION_TOKEN` environment variable
 (never argv) and three arguments — `--quip-coordinator <socket-uri>`,
 `--miner-id <id>`, and `--log-level <level>` — and sets `kill_on_drop`. The
@@ -763,18 +698,13 @@ Restarts follow the child's exit code (`restart_policy`):
   (`2^consecutive × base`, capped at `max`) under a failure budget. Too many
   crashes inside the window marks the miner unhealthy and stops respawning.
 
-On a crash the miner's staged and in-flight jobs are re-queued. The miner
-stays registered while it restarts. If the policy does not respawn the miner
-(`Never` or `Unhealthy`) or the spawn fails, the supervisor removes the miner
-from the router. Its jobs go to the remaining miners. A mempool order that no
-miner can take leaves `mempool_orders`, so a later block stages it again.
-
-When the runtime stops, each live miner gets an in-band `Shutdown` first, then
-a hard kill after the grace period (`grace_ms`).
+On a crash the miner's staged and in-flight jobs are re-queued. When the runtime
+stops, each live miner gets an in-band `Shutdown` first, then a hard kill after
+the grace period (`grace_ms`).
 
 ## Config to launch plan
 
-`parse_config` (`config/mod.rs`) turns `config.toml` into a `CoordinatorConfig`:
+`parse_config` (`config.rs`) turns `config.toml` into a `CoordinatorConfig`:
 the `[miner]` section gives `validators`, `signer_key`, the required
 descriptor keys (`public_host`, `public_port`), and the optional keys
 (`node_name`, `log_level`, `node_id`, `auto_mine`). Each backend section
@@ -793,11 +723,9 @@ Leave `queue_depth` out of a section to let the miner choose its depth. The
 coordinator then sends `queue_depth = 0`, which means "not set" on the wire.
 The CPU, CUDA and Metal miners use a depth of 3. The D-Wave miner uses 96,
 so up to 96 QPU submissions are in flight at once. An explicit `queue_depth`
-goes to the miner unchanged. `Ready` grants no credits. The miner sends its
-first `JobRequest` after `Ready`, and the coordinator dispatches work only
-against credits from `JobRequest`. A D-Wave miner with a budget sends no
-`JobRequest` until it decides to spend QPU time, so it receives no jobs
-before then.
+goes to the miner unchanged. When the miner sends `Ready`, the coordinator
+grants credits equal to the depth the miner uses, which is 3 when the field
+is 0. The D-Wave miner grants the rest of its 96 credits itself.
 
 For D-Wave, set `budget` and `budget_reset_day` in `[dwave]`:
 
@@ -863,144 +791,6 @@ read, while `apply_config` runs after the handshake. So the supervised path
 never forwards keys such as `utilization` and `yielding` on argv.
 They already arrive in `backend_toml`, and sending them twice would put one
 operator value into two channels.
-
-## Calibration
-
-A miner that lists the `calibrate` feature in its capabilities can tune on
-recent winning qblocks before its first job. The coordinator builds the
-calibration once at startup. It then sends it to each capable miner.
-`coordinator/calibration.rs` holds the plan. `app/chain_env/readiness.rs`
-builds it.
-
-### The `[calibration]` keys
-
-| Key | Default | Meaning |
-|-----|---------|---------|
-| `enabled` | `true` | `false` sends no `Calibrate`. |
-| `qblocks` | `40` | The most winners to send, from 1 to 1000. |
-| `kinds` | `[]` | Hardware filter for the winners. Empty means no filter. |
-| `deadline_s` | `1800` | Seconds a miner has to calibrate. Must exceed 0. |
-
-The values of `kinds` are `cpu`, `gpu`, and `qpu`. The `gpu` value matches GPU
-and Metal winners. The `qpu` value matches every QPU vendor. An unknown value is
-a config error. The hardware kind of a winner is the kind its account declared
-for that qblock on chain. A winner with no record passes only when `kinds` is
-empty.
-
-### When it runs
-
-The coordinator downloads the winners once at startup, before it starts any
-miner. It reads them for the topology of the startup snapshot, newest first,
-and keeps the first `qblocks` that `kinds` admits.
-
-The `qblocks` value is an upper bound. The walk visits at most 4 x `qblocks`
-recent qblocks. A rare topology or a narrow `kinds` filter can give fewer
-winners than `qblocks`. If no winner matches, the coordinator skips
-calibration.
-
-Each miner id calibrates at most once per coordinator process, and only if it
-lists the `calibrate` feature. The coordinator sends `Calibrate` after
-`Topology`. If the topology is already cached, `Calibrate` goes out at the
-handshake. Otherwise it goes out right after the first topology broadcast.
-
-The `Calibrate` message carries the problem family, the winners as
-instances, and a deadline of `deadline_s` seconds from the send time.
-
-### Job gating
-
-A calibrating miner gets no jobs until it answers `CalibrateDone` or until the
-deadline plus 30 seconds has passed. Its job credits stay in place, and the
-router stages jobs for it as usual. When the calibration ends, the dispatcher
-wakes and the staged jobs flow. The router also picks a calibrating miner last
-when another miner can take the job. A miner without the feature is not
-affected.
-
-### Limits
-
-- The coordinator skips calibration when `enabled` is `false` or when the
-  chain has no family. It also skips calibration when no winner matches or
-  when the read fails. Mining continues in each case.
-- With no mining snapshot at startup, the run never calibrates. This stays
-  true if a snapshot appears later in the run.
-- The startup download has a budget of 60 seconds. When the budget runs out,
-  the coordinator logs a warning and starts the miners without calibration.
-- The coordinator reads the winners once. If the chain topology changes mid-run,
-  every later miner takes jobs without calibration until the coordinator
-  restarts.
-- A miner that reconnects while its calibration is open gets jobs at once.
-  The new process never saw the `Calibrate`, and calibration runs once per
-  miner id.
-- When the supervisor gives up on a miner, the router removes it and releases
-  its calibration hold.
-
-### Log lines
-
-Each line below names its level and its message text. The structured fields
-follow in parentheses.
-
-| Level | Message | Fields |
-|-------|---------|--------|
-| info | `calibration prepared` | `qblocks`, `count`, `kinds`, `family`, `deadline_s` |
-| info | `calibration skipped` | `reason`, `kinds` |
-| info | `calibration skipped: no mining snapshot at startup` | none |
-| warn | `calibration skipped` | `reason` (bad topology hash or bad kinds) |
-| warn | `calibration skipped: cannot read reference winners; miners take jobs without it` | `error` |
-| warn | `calibration skipped for this run: the reference winner download did not finish within the budget; miners take jobs without it` | `budget_s` |
-| info | `calibration sent; the miner takes jobs after it answers` | `miner`, `instances`, `deadline_s` |
-| info | `miner finished calibration` | `miner`, `outcome` (`DONE`), `summary` |
-| warn | `miner finished calibration without new tuning; it keeps its current tuning` | `miner`, `outcome`, `summary` |
-| warn | `miner did not answer Calibrate by its deadline and grace; giving it jobs` | `miner`, `waited_s` |
-| warn | `miner reconnected during calibration; giving it jobs without one` | `miner` |
-| warn | `miner sent CalibrateDone with no calibration outstanding; ignoring` | `miner` |
-
-The `reason` of the info-level skip is one of `[calibration].enabled is false`,
-`the challenge has no problem family`, or `no reference winner on this
-topology`. The `outcome` of the second `miner finished` line is
-`CALIBRATE_OUTCOME_FAILED`, `CALIBRATE_OUTCOME_DEADLINE_PASSED`, or
-`CALIBRATE_OUTCOME_UNSPECIFIED`. For an outcome number that the protocol does
-not define, the value is `Unknown(n)`. The miner keeps its current tuning in
-each case. The stdout line of the offline command uses the short labels
-`DONE`, `FAILED`, `DEADLINE_PASSED`, and `TIMED_OUT`.
-
-### The offline `calibrate` subcommand
-
-`quip-coordinator calibrate` runs one miner through calibration without a full
-coordinator. It reads the mining snapshot and the winners from a validator.
-Then it spawns the miner, sends `Topology` and then `Calibrate`, and prints how
-the miner answered. It sends no job and submits nothing. It only reads, and it
-needs no signer. The code is in `cli/calibrate.rs` and `app/local_env/calibrate.rs`.
-
-```bash
-quip-coordinator calibrate --miner ./miners/quip-cpu-sa \
-  --validator ws://127.0.0.1:9944 --qblocks 40 --kinds cpu --deadline-s 1800
-```
-
-| Flag | Default | Meaning |
-|------|---------|---------|
-| `--miner <path>` | required | Miner binary to spawn. |
-| `--validator <url>` | required | Validator RPC address for the snapshot and the winners. |
-| `--qblocks <n>` | `40` | Winners to send, from 1 to 1000. |
-| `--kinds <list>` | empty | Winner hardware, comma separated: `cpu`, `gpu`, `qpu`. Empty admits every winner. |
-| `--deadline-s <n>` | `1800` | Seconds the miner has to calibrate. The run waits 30 seconds longer. |
-
-On stdout the command prints one line, `outcome=<NAME> summary=<text>`. The name
-is `DONE`, `FAILED`, `DEADLINE_PASSED`, or `TIMED_OUT`. The command escapes
-each control character in the summary. A newline prints as `\n`.
-Errors go to stderr as `error: <text>`.
-
-The command spawns the miner as a CPU miner with no device. It does not run a
-`[cuda.N]` or `[metal]` configuration.
-
-| Exit code | Meaning |
-|-----------|---------|
-| 0 | The outcome is `DONE`. |
-| 1 | The outcome is `FAILED`, `DEADLINE_PASSED`, or `TIMED_OUT`. Exit 1 also covers a miner that left or sent `Fatal` before it answered, an interrupt, and the internal error that no `Calibrate` was due. |
-| 64 | The request, the miner, or the chain cannot calibrate. Examples are a bad value, a miner without the `calibrate` feature, a chain with no family, or no matching winner. |
-| 69 | A chain RPC read failed. |
-| 70 | The miner never completed the handshake, as in `drive`, or the command could not create its async runtime. |
-
-`TIMED_OUT` means a miner that joined did not answer by the deadline plus 30
-seconds. The command shuts the miner down before it exits.
 
 ## Dashboard and REST surface
 

@@ -47,20 +47,19 @@ use quantum_validation::{
     calculate_diversity, derive_nonce, energy_of_solution, generate_ising_model, select_diverse,
     MilliValue,
 };
-use quip_coordinator::chain::codec::extrinsic::{
-    build_hybrid_signed_extrinsic, miner_identity_bytes, miners_storage_key, SignedExtensionContext,
+use quip_coordinator::chain::extrinsic::{
+    build_hybrid_signed_extrinsic, hex_decode, hex_encode, miner_identity_bytes,
+    miners_storage_key, SignedExtensionContext,
 };
-use quip_coordinator::chain::codec::scale_types::{
-    encode_register_miner_call, IsingParams, MiningSnapshotScale, ResultDelivery, RewardResolution,
+use quip_coordinator::chain::scale_types::{
+    encode_register_miner_call, IsingParams, JobMode, MiningSnapshotScale, ResultDelivery,
+    RewardResolution,
 };
-use quip_coordinator::chain::{ChainClient, RealChainClient};
-use quip_coordinator::types::order::{JobMode, JobOrder};
-
-use quip_coordinator::types::hex::{hex_decode, hex_encode};
-use quip_coordinator::types::proof::SubmitAction;
-use quip_coordinator::types::topology_spec::{parse_topology_spec, preset_spec};
-
-use quip_coordinator::types::proof::MAX_PROOF_SOLUTIONS;
+use quip_coordinator::chain::submit::SubmitAction;
+use quip_coordinator::chain::{ChainClient, JobOrder, RealChainClient};
+use quip_coordinator::drive::parse_topology_spec;
+use quip_coordinator::presets::preset_spec;
+use quip_coordinator::validate::MAX_PROOF_SOLUTIONS;
 use quip_transaction_crypto::{account_id_from_public, HybridPair};
 use sp_core::Pair;
 
@@ -424,12 +423,12 @@ fn init_test_logging() {
     let level = std::env::var("QUIP_DEVNET_LOG")
         .ok()
         .and_then(|s| match s.as_str() {
-            "trace" => Some(quip_coordinator::types::log::LogLevel::Trace),
-            "debug" => Some(quip_coordinator::types::log::LogLevel::Debug),
+            "trace" => Some(quip_coordinator::logging::LogLevel::Trace),
+            "debug" => Some(quip_coordinator::logging::LogLevel::Debug),
             _ => None,
         })
-        .unwrap_or(quip_coordinator::types::log::LogLevel::Info);
-    let _ = quip_coordinator::observe::logging::init(Some(level));
+        .unwrap_or(quip_coordinator::logging::LogLevel::Info);
+    let _ = quip_coordinator::logging::init(Some(level));
 }
 
 #[tokio::test]
@@ -448,7 +447,7 @@ async fn devnet_submit_proof_end_to_end() {
     let client = RealChainClient::new(
         vec![url.clone()],
         "//Alice".to_string(),
-        quip_coordinator::types::miner::MinerKind::Cpu,
+        quip_coordinator::chain::MinerKind::Cpu,
     );
 
     // ---------------- Milestone 1: read path ----------------
@@ -578,14 +577,14 @@ async fn devnet_submit_proof_end_to_end() {
     );
 
     // (5) Drive the coordinator's real submit path.
-    let proof = quip_coordinator::types::proof::Proof {
+    let proof = quip_coordinator::chain::submit::Proof {
         job_id: vec![],
         best_energy_milli: best_energy,
         diversity_milli: diversity,
         n_valid: valid.len() as u32,
         solutions: valid
             .iter()
-            .map(|(s, e)| quip_coordinator::types::proof::SpinRow {
+            .map(|(s, e)| quip_coordinator::validate::SpinRow {
                 spins: s.clone(),
                 energy_milli: *e,
             })
@@ -595,7 +594,6 @@ async fn devnet_submit_proof_end_to_end() {
         generation: 0,
         salt: salt.to_vec(),
         device_access_time_us: 0,
-        topology_hash: snap.topology_hash.clone(),
     };
     let action = client.submit_proof(&proof).await;
     println!("  RealChainClient::submit_proof -> {action:?}");
@@ -731,7 +729,7 @@ async fn devnet_mempool_job_proposed_end_to_end() {
     let client = RealChainClient::new(
         vec![url.clone()],
         "//Alice".to_string(),
-        quip_coordinator::types::miner::MinerKind::Cpu,
+        quip_coordinator::chain::MinerKind::Cpu,
     );
 
     // The canonical default plain-Ising spec is seeded at genesis; propose

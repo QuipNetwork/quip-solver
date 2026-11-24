@@ -12,7 +12,7 @@ mod handshake {
     //! Handshake rejection against `quip-mock-miner`. The accepting path runs in
     //! every test that drives the mock miner end to end.
 
-    use quip_coordinator::testing::session_harness::serve_one_session_expecting;
+    use quip_coordinator::session::serve_one_session_expecting;
 
     #[tokio::test]
     async fn rejects_wrong_token_miner_exits() {
@@ -36,10 +36,8 @@ mod handshake {
 mod protocol_version {
     //! The coordinator accepts only `PROTOCOL_VERSION` in a miner `Hello`.
 
-    use quip_coordinator::coordinator::events::CoordinatorService;
-    use quip_coordinator::coordinator::state::CoordinatorState;
-    use quip_coordinator::miner::session::service::SessionService;
-    use quip_coordinator::testing::fake_chain::FakeChain;
+    use quip_coordinator::chain::FakeChain;
+    use quip_coordinator::session::{CoordinatorService, CoordinatorState};
     use quip_proto::v1::miner_service_client::MinerServiceClient;
     use quip_proto::v1::miner_service_server::MinerServiceServer;
     use quip_proto::v1::{coord_msg, miner_msg, Capabilities, Configure, Hello, JobKind, MinerMsg};
@@ -59,11 +57,8 @@ mod protocol_version {
         let sock = format!("/tmp/quip-proto-{}.sock", std::process::id());
         let _ = std::fs::remove_file(&sock);
         let mut st = CoordinatorState::new();
-        let _ = st
-            .sessions
-            .expected_tokens
-            .insert("cpu-0".into(), "tok".into());
-        let _ = st.sessions.configure.insert(
+        let _ = st.expected_tokens.insert("cpu-0".into(), "tok".into());
+        let _ = st.configure.insert(
             "cpu-0".into(),
             Configure {
                 queue_depth: 1,
@@ -74,26 +69,22 @@ mod protocol_version {
             },
         );
         let chain = Arc::new(FakeChain::new(
-            quip_coordinator::types::topology_spec::parse_topology_spec(
-                quip_coordinator::types::topology_spec::preset_spec("smoke").expect("preset"),
+            quip_coordinator::drive::parse_topology_spec(
+                quip_coordinator::presets::preset_spec("smoke").expect("preset"),
             )
             .expect("spec")
             .to_snapshot(),
             None,
         ));
-        let state = Arc::new(Mutex::new(st));
         let svc = CoordinatorService {
-            state: Arc::clone(&state),
-            sink: chain,
+            state: Arc::new(Mutex::new(st)),
+            chain,
             submit_notify: Arc::new(Mutex::new(None)),
         };
         let incoming = UnixListenerStream::new(UnixListener::bind(&sock).expect("bind"));
         let server = tokio::spawn(
             Server::builder()
-                .add_service(MinerServiceServer::new(SessionService::new(
-                    state,
-                    Arc::new(svc),
-                )))
+                .add_service(MinerServiceServer::new(svc))
                 .serve_with_incoming(incoming),
         );
 
@@ -205,13 +196,46 @@ mod supervisor {
     #[cfg(unix)]
     #[tokio::test]
     async fn clean_exit_reclaims_and_reroutes_inflight() {
-        use quip_coordinator::config::launch::LaunchEntry;
-        use quip_coordinator::coordinator::state::CoordinatorState;
-        use quip_coordinator::miner::supervisor::{supervise_miner, BackoffPolicy};
-        use quip_proto::v1::Configure;
+        use quip_coordinator::config::LaunchEntry;
+        use quip_coordinator::router::MinerCaps;
+        use quip_coordinator::session::CoordinatorState;
+        use quip_coordinator::supervisor::{supervise_miner, BackoffPolicy};
+        use quip_proto::v1::{Configure, Job, JobKind, Provenance};
         use std::sync::Arc;
         use std::time::Duration;
         use tokio::sync::{watch, Mutex};
+
+        // A tiny job of a shape `cpu-1` can serve (2 nodes / 1 edge).
+        fn job(job_id: &str, generation: u64, is_pow: bool) -> Job {
+            Job {
+                job_id: job_id.as_bytes().to_vec(),
+                generator: None,
+                kind: JobKind::IsingSample as i32,
+                generation,
+                deadline_ms: 9_999_999,
+                ising: Some({
+                    let mut problem =
+                        quip_coordinator::producer::problem::milli_problem(None, &[0; 2], &[0; 1]);
+                    problem.num_reads = 0;
+                    problem
+                }),
+                provenance: Some(Provenance {
+                    is_pow,
+                    order_id: if is_pow { vec![] } else { b"order-1".to_vec() },
+                }),
+            }
+        }
+
+        fn caps() -> MinerCaps {
+            MinerCaps {
+                backend: "mock".into(),
+                algorithm: "sa".into(),
+                supported_kinds: vec![JobKind::IsingSample as i32],
+                max_nodes: 1000,
+                max_edges: 10000,
+                ..MinerCaps::default()
+            }
+        }
 
         // `/usr/bin/true` (or `/bin/true`) exits 0 immediately, ignoring argv/env —
         // a stand-in for a miner that self-exits cleanly.
@@ -224,12 +248,10 @@ mod supervisor {
         {
             let mut st = state.lock().await;
             // A second, capable miner the reclaimed jobs can re-route onto.
-            st.router.register_miner("cpu-1", tiny_caps());
-            // cpu-0 is registered too: an `OnDemand` restart must keep it so.
-            st.router.register_miner("cpu-0", tiny_caps());
+            st.router.register_miner("cpu-1", caps());
             // cpu-0 dispatched two jobs and then exits without completing them.
-            st.dispatch_inflight("cpu-0", tiny_job("pow-1", 1, true));
-            st.dispatch_inflight("cpu-0", tiny_job("mempool-1", 0, false));
+            st.dispatch_inflight("cpu-0", job("pow-1", 1, true));
+            st.dispatch_inflight("cpu-0", job("mempool-1", 0, false));
             assert_eq!(st.inflight.len(), 2);
         }
 
@@ -255,7 +277,7 @@ mod supervisor {
             Arc::clone(&state),
             policy,
             200,
-            quip_coordinator::types::log::LogLevel::Info,
+            quip_coordinator::logging::LogLevel::Info,
             stop_rx,
         ));
 
@@ -278,210 +300,12 @@ mod supervisor {
                 st.inflight.len()
             );
             assert!(st.inflight_owner.is_empty(), "inflight_owner leaked");
-            // The restarting miner stays registered, and both jobs re-routed
-            // across the two capable miners.
-            assert_eq!(
-                st.router.miner_ids(),
-                vec!["cpu-0".to_string(), "cpu-1".to_string()]
-            );
-            assert_eq!(
-                st.router.staged_len("cpu-0") + st.router.staged_len("cpu-1"),
-                2,
-                "jobs not re-routed"
-            );
+            // Both jobs re-routed onto the surviving capable miner.
+            assert_eq!(st.router.staged_len("cpu-1"), 2, "jobs not re-routed");
         }
 
         let _ = stop_tx.send(true);
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
-    }
-
-    /// Shared setup for the give-up tests: `/usr/bin/false` exits 1 and the
-    /// zero budget makes the first crash `Unhealthy`.
-    #[cfg(unix)]
-    async fn run_unhealthy_supervisor(
-        state: &std::sync::Arc<
-            tokio::sync::Mutex<quip_coordinator::coordinator::state::CoordinatorState>,
-        >,
-    ) {
-        use quip_coordinator::config::launch::LaunchEntry;
-        use quip_coordinator::miner::supervisor::{supervise_miner, BackoffPolicy};
-        use quip_proto::v1::Configure;
-        use std::sync::Arc;
-        use std::time::Duration;
-        use tokio::sync::watch;
-
-        let false_bin = ["/usr/bin/false", "/bin/false"]
-            .into_iter()
-            .find(|p| std::path::Path::new(p).exists())
-            .expect("a `false` binary");
-        let entry = LaunchEntry {
-            miner_id: "cpu-0".into(),
-            binary: false_bin.to_string(),
-            backend: "cpu".into(),
-            device: None,
-            configure: Configure::default(),
-        };
-        let policy = BackoffPolicy {
-            base_ms: 10,
-            max_ms: 10,
-            budget: 0,
-            window_ms: 60_000,
-        };
-        let (_stop_tx, stop_rx) = watch::channel(false);
-        let handle = tokio::spawn(supervise_miner(
-            entry,
-            "unix:///nonexistent.sock".into(),
-            Arc::clone(state),
-            policy,
-            200,
-            quip_coordinator::types::log::LogLevel::Info,
-            stop_rx,
-        ));
-        tokio::time::timeout(Duration::from_secs(5), handle)
-            .await
-            .expect("supervisor returns once the miner is unhealthy")
-            .expect("supervisor task");
-    }
-
-    #[cfg(unix)]
-    fn tiny_job(job_id: &str, generation: u64, is_pow: bool) -> quip_proto::v1::Job {
-        use quip_proto::v1::{Job, JobKind, Provenance};
-        Job {
-            iqm: None,
-            job_id: job_id.as_bytes().to_vec(),
-            generator: None,
-            kind: JobKind::IsingSample as i32,
-            generation,
-            deadline_ms: 9_999_999,
-            ising: Some({
-                let mut problem =
-                    quip_coordinator::types::problem::milli_problem(None, &[0; 2], &[0; 1]);
-                problem.num_reads = 0;
-                problem
-            }),
-            provenance: Some(Provenance {
-                is_pow,
-                order_id: if is_pow { vec![] } else { b"order-1".to_vec() },
-            }),
-        }
-    }
-
-    #[cfg(unix)]
-    fn tiny_caps() -> quip_coordinator::coordinator::router::MinerCaps {
-        use quip_proto::v1::JobKind;
-        quip_coordinator::coordinator::router::MinerCaps {
-            backend: "mock".into(),
-            algorithm: "sa".into(),
-            supported_kinds: vec![JobKind::IsingSample as i32],
-            max_nodes: 1000,
-            max_edges: 10000,
-            ..quip_coordinator::coordinator::router::MinerCaps::default()
-        }
-    }
-
-    /// A miner the supervisor gives up on leaves the router, and its in-flight
-    /// jobs go to the miners that remain (QUI-2121).
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn unhealthy_miner_is_removed_and_its_jobs_reroute() {
-        use quip_coordinator::coordinator::state::CoordinatorState;
-        use std::sync::Arc;
-        use tokio::sync::Mutex;
-
-        let state = Arc::new(Mutex::new(CoordinatorState::new()));
-        {
-            let mut st = state.lock().await;
-            st.router.register_miner("cpu-0", tiny_caps());
-            st.router.register_miner("cpu-1", tiny_caps());
-            st.dispatch_inflight("cpu-0", tiny_job("pow-1", 1, true));
-            st.dispatch_inflight("cpu-0", tiny_job("mempool-1", 0, false));
-        }
-        run_unhealthy_supervisor(&state).await;
-        let st = state.lock().await;
-        assert_eq!(st.router.miner_ids(), vec!["cpu-1".to_string()]);
-        assert_eq!(st.router.staged_len("cpu-1"), 2);
-    }
-
-    /// A miner whose binary cannot spawn is given up on at once: it leaves the
-    /// router and its in-flight job goes to the miner that remains (QUI-2121).
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn spawn_failure_retires_the_miner() {
-        use quip_coordinator::config::launch::LaunchEntry;
-        use quip_coordinator::coordinator::state::CoordinatorState;
-        use quip_coordinator::miner::supervisor::{supervise_miner, BackoffPolicy};
-        use quip_proto::v1::Configure;
-        use std::sync::Arc;
-        use std::time::Duration;
-        use tokio::sync::{watch, Mutex};
-
-        let state = Arc::new(Mutex::new(CoordinatorState::new()));
-        {
-            let mut st = state.lock().await;
-            st.router.register_miner("cpu-0", tiny_caps());
-            st.router.register_miner("cpu-1", tiny_caps());
-            st.dispatch_inflight("cpu-0", tiny_job("pow-1", 1, true));
-        }
-        let entry = LaunchEntry {
-            miner_id: "cpu-0".into(),
-            binary: "/nonexistent/quip-miner-binary".into(),
-            backend: "cpu".into(),
-            device: None,
-            configure: Configure::default(),
-        };
-        let policy = BackoffPolicy {
-            base_ms: 10,
-            max_ms: 10,
-            budget: 0,
-            window_ms: 60_000,
-        };
-        let (_stop_tx, stop_rx) = watch::channel(false);
-        let handle = tokio::spawn(supervise_miner(
-            entry,
-            "unix:///nonexistent.sock".into(),
-            Arc::clone(&state),
-            policy,
-            200,
-            quip_coordinator::types::log::LogLevel::Info,
-            stop_rx,
-        ));
-        tokio::time::timeout(Duration::from_secs(5), handle)
-            .await
-            .expect("supervisor returns after the spawn fails")
-            .expect("supervisor task");
-        let st = state.lock().await;
-        assert_eq!(st.router.miner_ids(), vec!["cpu-1".to_string()]);
-        assert_eq!(st.router.staged_len("cpu-1"), 1);
-    }
-
-    /// With no miner left to take a reclaimed mempool order, its id leaves
-    /// `mempool_orders` so the feeder stages the order again.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn unroutable_mempool_order_is_released_for_restaging() {
-        use quip_coordinator::coordinator::scoring::validate::QualityGates;
-        use quip_coordinator::coordinator::state::CoordinatorState;
-        use std::sync::Arc;
-        use tokio::sync::Mutex;
-
-        let state = Arc::new(Mutex::new(CoordinatorState::new()));
-        {
-            let mut st = state.lock().await;
-            st.router.register_miner("cpu-0", tiny_caps());
-            let _ = st.mempool_orders.insert(
-                b"mempool-1".to_vec(),
-                QualityGates {
-                    min_energy_milli: 0,
-                    min_diversity_milli: 0,
-                    min_solutions: 0,
-                },
-            );
-            st.dispatch_inflight("cpu-0", tiny_job("mempool-1", 0, false));
-        }
-        run_unhealthy_supervisor(&state).await;
-        let st = state.lock().await;
-        assert!(st.router.miner_ids().is_empty());
-        assert!(!st.mempool_orders.contains_key(b"mempool-1".as_slice()));
     }
 
     /// The spawn must actually use the argv builder: `child_args` can be correct
@@ -490,9 +314,9 @@ mod supervisor {
     #[cfg(unix)]
     #[tokio::test]
     async fn spawned_child_receives_device_flag() {
-        use quip_coordinator::config::launch::LaunchEntry;
-        use quip_coordinator::coordinator::state::CoordinatorState;
-        use quip_coordinator::miner::supervisor::{supervise_miner, BackoffPolicy};
+        use quip_coordinator::config::LaunchEntry;
+        use quip_coordinator::session::CoordinatorState;
+        use quip_coordinator::supervisor::{supervise_miner, BackoffPolicy};
         use quip_proto::v1::Configure;
         use std::sync::Arc;
         use std::time::Duration;
@@ -551,7 +375,7 @@ mod supervisor {
             Arc::clone(&state),
             policy,
             200,
-            quip_coordinator::types::log::LogLevel::Info,
+            quip_coordinator::logging::LogLevel::Info,
             stop_rx,
         ));
 
