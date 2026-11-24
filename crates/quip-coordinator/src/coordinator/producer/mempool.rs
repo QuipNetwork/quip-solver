@@ -87,6 +87,7 @@ mod tests {
             min_diversity_milli: None,
             min_solutions: Some(1),
             deadline_ms: 9_999_999,
+            proposer: [0; 32],
         }
     }
 

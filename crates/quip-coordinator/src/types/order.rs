@@ -53,6 +53,8 @@ pub struct JobOrder {
     /// Soft deadline as absolute Unix milliseconds, projected from the blocks
     /// left before the order expires. Miners compare it with their own clock.
     pub deadline_ms: u64,
+    /// Account that proposed the order (raw `AccountId32`).
+    pub proposer: [u8; 32],
 }
 
 impl JobOrder {
@@ -105,6 +107,7 @@ mod tests {
             min_diversity_milli: None,
             min_solutions: None,
             deadline_ms: 0,
+            proposer: [0; 32],
         }
     }
 

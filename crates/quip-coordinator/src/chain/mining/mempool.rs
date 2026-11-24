@@ -176,6 +176,7 @@ impl RealChainClient {
                 min_diversity_milli: scale.ising_params.min_diversity_milli,
                 min_solutions: scale.ising_params.min_solutions,
                 deadline_ms,
+                proposer: scale.proposer,
             };
             let eligible = match &order.mode {
                 JobMode::Open => true,
@@ -480,6 +481,35 @@ mod fetch_tests {
                     "no subscriptions in this test".into(),
                 ))
             }
+        }
+
+        /// The proposer is who id.quip.network is asked about, so every
+        /// order must carry its own, exactly as the chain stored it.
+        #[tokio::test]
+        async fn fetch_keeps_each_orders_proposer() {
+            let account = alice_account();
+            let proposed_by = |proposer: [u8; 32]| JobOrderScale {
+                proposer,
+                ..scale_order(JobMode::Open)
+            };
+            let (_validator, client) = client_for(
+                account,
+                Some(SolverType::Cpu),
+                vec![proposed_by([0xa1; 32]), proposed_by([0xd2; 32])],
+                MinerKind::Cpu,
+            );
+            let orders = client.fetch_mempool_orders(account).await.expect("orders");
+            let proposers: Vec<(Vec<u8>, [u8; 32])> = orders
+                .iter()
+                .map(|order| (order.order_id.clone(), order.proposer))
+                .collect();
+            assert_eq!(
+                proposers,
+                vec![
+                    (1u64.to_le_bytes().to_vec(), [0xa1; 32]),
+                    (2u64.to_le_bytes().to_vec(), [0xd2; 32]),
+                ],
+            );
         }
 
         #[tokio::test]

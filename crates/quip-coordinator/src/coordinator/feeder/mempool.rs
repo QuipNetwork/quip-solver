@@ -100,6 +100,7 @@ mod tests {
             min_diversity_milli: min_diversity,
             min_solutions: None,
             deadline_ms: 0,
+            proposer: [0; 32],
         }
     }
 
