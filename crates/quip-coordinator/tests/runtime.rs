@@ -15,6 +15,7 @@
 )]
 
 mod common;
+mod quip_id_stub;
 
 use ising_generators::random::derive_nonce;
 use quip_coordinator::testing::fake_chain::FakeChain;
@@ -105,6 +106,7 @@ fn mempool_order() -> JobOrder {
         min_diversity_milli: None,
         min_solutions: Some(1),
         deadline_ms: 0,
+        proposer: [0x0b; 32],
     }
 }
 
@@ -142,6 +144,7 @@ fn chain_env_params() -> ChainEnvParams {
         descriptor_filed: Arc::new(AtomicBool::new(false)),
         miner_registered: Arc::new(AtomicBool::new(false)),
         solver_registered: Arc::new(AtomicBool::new(false)),
+        compliance: None,
     }
 }
 
@@ -1655,4 +1658,385 @@ async fn mock_miner_calibrates_then_mines() {
     let st = state.lock().await;
     let plan = st.calibration.as_ref().expect("plan");
     assert!(!plan.pending("cpu-0"), "the calibration ended");
+}
+
+// ---------------------------------------------------------------------------
+// Compliance gate (id.quip.network)
+// ---------------------------------------------------------------------------
+
+/// A consumer whose account id.quip.network allows.
+const ALLOWED_CONSUMER: [u8; 32] = [0xa1; 32];
+/// A consumer whose account id.quip.network denies.
+const DENIED_CONSUMER: [u8; 32] = [0xd2; 32];
+
+fn order_from(order_number: u64, proposer: [u8; 32]) -> JobOrder {
+    JobOrder {
+        order_id: order_number.to_le_bytes().to_vec(),
+        proposer,
+        ..mempool_order()
+    }
+}
+
+fn gated_params(stub: &quip_id_stub::IdStub) -> Params {
+    let mut params = feeder_params(2, 30);
+    params.chain.compliance = Some(Arc::new(
+        quip_id::Client::new(&stub.url, quip_id_stub::API_KEY).expect("the quip-id client builds"),
+    ));
+    params
+}
+
+/// The mempool orders the feeder has handed to `cpu-0`, by order id.
+async fn staged_order_ids(f: &Feeder) -> Vec<Vec<u8>> {
+    let mut ids: Vec<Vec<u8>> = f
+        .state
+        .lock()
+        .await
+        .router
+        .reclaim("cpu-0")
+        .into_iter()
+        .filter(|job| job.generation == 0)
+        .map(|job| job.job_id)
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// Let the feeder read the order map on `blocks` more blocks.
+async fn advance_blocks(f: &Feeder, from: u64, blocks: u64) {
+    for block in from..from + blocks {
+        f.chain.set_snapshot(Some(snapshot_at([2u8; 32], block)));
+        tokio::time::sleep(Duration::from_millis(120)).await;
+    }
+}
+
+/// The shipping claim: with the gate on, the order from a consumer
+/// id.quip.network allows is staged to a miner, and the order from a consumer
+/// it denies is never staged, however many blocks the feeder reads it on.
+/// Each question names the proposer, the chain's order number and our key.
+#[tokio::test]
+async fn compliance_gate_stages_the_allowed_consumers_order_and_never_the_denied_ones() {
+    let stub = quip_id_stub::IdStub::start().await;
+    stub.allow(ALLOWED_CONSUMER);
+    stub.deny(DENIED_CONSUMER, &["no_credential"]);
+    let chain = FakeChain::new(ising_snapshot(), None);
+    chain.set_orders(vec![
+        order_from(7, ALLOWED_CONSUMER),
+        order_from(8, DENIED_CONSUMER),
+    ]);
+    let f = Feeder::spawn(chain, gated_params(&stub), vec![("cpu-0", ising_caps())]).await;
+
+    assert!(
+        wait_until(100, 30, async || !f
+            .state
+            .lock()
+            .await
+            .mempool_orders
+            .is_empty())
+        .await,
+        "the allowed order was never staged"
+    );
+    advance_blocks(&f, 43, 5).await;
+
+    assert_eq!(
+        staged_order_ids(&f).await,
+        vec![7u64.to_le_bytes().to_vec()]
+    );
+    assert!(
+        !f.state
+            .lock()
+            .await
+            .mempool_orders
+            .contains_key(8u64.to_le_bytes().as_slice()),
+        "the denied order must never be recorded as staged"
+    );
+
+    let asked = stub.decisions_asked();
+    let asked_about = |consumer: [u8; 32], order: u64| {
+        asked.iter().any(|a| {
+            a.method == "POST"
+                && a.authorization.as_deref() == Some(&format!("Bearer {}", quip_id_stub::API_KEY))
+                && a.body.get("consumer") == Some(&serde_json::json!(quip_id_stub::hex(&consumer)))
+                && a.body.get("orderId") == Some(&serde_json::json!(order))
+        })
+    };
+    assert!(
+        asked_about(ALLOWED_CONSUMER, 7),
+        "never asked about order 7: {asked:?}"
+    );
+    assert!(
+        asked_about(DENIED_CONSUMER, 8),
+        "never asked about order 8: {asked:?}"
+    );
+    f.stop().await;
+}
+
+/// Without the gate configured, every eligible order is staged and nobody is
+/// asked: operators who do not opt in see no change.
+#[tokio::test]
+async fn without_the_compliance_gate_every_order_is_staged() {
+    let stub = quip_id_stub::IdStub::start().await;
+    let chain = FakeChain::new(ising_snapshot(), None);
+    chain.set_orders(vec![
+        order_from(7, ALLOWED_CONSUMER),
+        order_from(8, DENIED_CONSUMER),
+    ]);
+    let f = Feeder::spawn(chain, feeder_params(2, 30), vec![("cpu-0", ising_caps())]).await;
+
+    assert!(
+        wait_until(100, 30, async || f.state.lock().await.mempool_orders.len()
+            == 2)
+        .await,
+        "both orders must be staged with the gate off"
+    );
+    assert_eq!(
+        staged_order_ids(&f).await,
+        vec![7u64.to_le_bytes().to_vec(), 8u64.to_le_bytes().to_vec()]
+    );
+    assert!(
+        stub.asked().is_empty(),
+        "the gate is off; nobody should be asked"
+    );
+    f.stop().await;
+}
+
+/// When id.quip.network cannot answer and nothing is cached, the gate fails
+/// closed: no order is staged.
+#[tokio::test]
+async fn compliance_gate_stages_nothing_while_id_quip_network_is_down() {
+    let stub = quip_id_stub::IdStub::start().await;
+    stub.allow(ALLOWED_CONSUMER);
+    stub.fail_decisions_with(503);
+    let chain = FakeChain::new(ising_snapshot(), None);
+    chain.set_orders(vec![order_from(7, ALLOWED_CONSUMER)]);
+    let f = Feeder::spawn(chain, gated_params(&stub), vec![("cpu-0", ising_caps())]).await;
+
+    assert!(
+        wait_until(100, 30, async || !stub.decisions_asked().is_empty()).await,
+        "the gate never asked"
+    );
+    advance_blocks(&f, 43, 3).await;
+
+    assert!(
+        staged_order_ids(&f).await.is_empty(),
+        "an outage must not let orders through"
+    );
+    assert!(f.state.lock().await.mempool_orders.is_empty());
+    f.stop().await;
+}
+
+/// A key id.quip.network refuses (revoked, expired, wrong chain) stages
+/// nothing.
+#[tokio::test]
+async fn compliance_gate_stages_nothing_when_the_key_is_refused() {
+    let stub = quip_id_stub::IdStub::start().await;
+    stub.allow(ALLOWED_CONSUMER);
+    let chain = FakeChain::new(ising_snapshot(), None);
+    chain.set_orders(vec![order_from(7, ALLOWED_CONSUMER)]);
+    let mut params = feeder_params(2, 30);
+    params.chain.compliance = Some(Arc::new(
+        quip_id::Client::new(&stub.url, "qid_test_revoked").expect("the quip-id client builds"),
+    ));
+    let f = Feeder::spawn(chain, params, vec![("cpu-0", ising_caps())]).await;
+
+    assert!(
+        wait_until(100, 30, async || !stub.decisions_asked().is_empty()).await,
+        "the gate never asked"
+    );
+    advance_blocks(&f, 43, 3).await;
+
+    assert!(
+        staged_order_ids(&f).await.is_empty(),
+        "a refused key must not let orders through"
+    );
+    f.stop().await;
+}
+
+/// A denied order is asked about again on later blocks, so a consumer who
+/// fixes their standing (links an account, accepts terms) has the same open
+/// order staged without the operator restarting anything.
+#[tokio::test]
+async fn compliance_gate_stages_an_order_once_its_consumer_is_allowed() {
+    let stub = quip_id_stub::IdStub::start().await;
+    stub.deny(DENIED_CONSUMER, &["terms_not_accepted"]);
+    stub.decisions_expire_in(-600);
+    let chain = FakeChain::new(ising_snapshot(), None);
+    chain.set_orders(vec![order_from(8, DENIED_CONSUMER)]);
+    let f = Feeder::spawn(chain, gated_params(&stub), vec![("cpu-0", ising_caps())]).await;
+
+    assert!(
+        wait_until(100, 30, async || !stub.decisions_asked().is_empty()).await,
+        "the gate never asked"
+    );
+    advance_blocks(&f, 43, 2).await;
+    assert!(staged_order_ids(&f).await.is_empty());
+
+    stub.allow(DENIED_CONSUMER);
+    let mut block = 45;
+    let staged = wait_until(50, 30, async || {
+        block += 1;
+        f.chain.set_snapshot(Some(snapshot_at([2u8; 32], block)));
+        !f.state.lock().await.mempool_orders.is_empty()
+    })
+    .await;
+    assert!(
+        staged,
+        "the order was never staged after its consumer was allowed"
+    );
+    assert_eq!(
+        staged_order_ids(&f).await,
+        vec![8u64.to_le_bytes().to_vec()]
+    );
+    f.stop().await;
+}
+
+/// Opening the gate at startup: which settings turn it on, which answers from
+/// id.quip.network let the coordinator start, and that the coordinator's own
+/// `run` refuses before touching the chain.
+mod compliance_startup {
+    use super::quip_id_stub::{IdStub, WhoamiReply, API_KEY};
+    use quip_coordinator::app::compliance::open_gate;
+
+    async fn opened(url: &str, api_key: &str) -> Result<bool, String> {
+        open_gate(Some(url), Some(api_key))
+            .await
+            .map(|gate| gate.is_some())
+    }
+
+    #[tokio::test]
+    async fn no_url_and_no_key_leaves_the_gate_off() {
+        assert_eq!(
+            open_gate(None, None).await.map(|gate| gate.is_some()),
+            Ok(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn blank_settings_leave_the_gate_off() {
+        assert_eq!(
+            open_gate(Some("  "), Some(""))
+                .await
+                .map(|gate| gate.is_some()),
+            Ok(false)
+        );
+    }
+
+    /// Half a configuration must stop the coordinator: silently mining without
+    /// the gate is exactly what an operator who set one half did not ask for.
+    #[tokio::test]
+    async fn a_url_without_a_key_is_refused() {
+        assert!(open_gate(Some("https://id.quip.network/v1"), None)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn a_key_without_a_url_is_refused() {
+        assert!(open_gate(None, Some("qid_live_a")).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_ready_provider_opens_the_gate_after_asking_whoami_with_our_key() {
+        let stub = IdStub::start().await;
+
+        assert_eq!(opened(&stub.url, API_KEY).await, Ok(true));
+        let asked = stub.asked();
+        assert_eq!(asked.len(), 1, "one startup question: {asked:?}");
+        let whoami = asked.first().expect("asked once");
+        assert_eq!(whoami.path, "/v1/whoami");
+        assert_eq!(
+            whoami.authorization.as_deref(),
+            Some(format!("Bearer {API_KEY}").as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_key_stops_startup() {
+        let stub = IdStub::start().await;
+
+        assert!(opened(&stub.url, "qid_test_wrong").await.is_err());
+    }
+
+    /// A provider without an active policy would have every order denied: refuse
+    /// to start rather than mine nothing quietly.
+    #[tokio::test]
+    async fn a_provider_that_is_not_ready_stops_startup() {
+        let stub = IdStub::start().await;
+        stub.whoami_replies(WhoamiReply::NotReady(vec!["no_active_policy".into()]));
+
+        assert!(opened(&stub.url, API_KEY).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_request_id_quip_network_rejects_stops_startup() {
+        let stub = IdStub::start().await;
+        stub.whoami_replies(WhoamiReply::Status(400));
+
+        assert!(opened(&stub.url, API_KEY).await.is_err());
+    }
+
+    /// Our outage must not stop a restart from mining: the gate opens, and denies
+    /// orders until id.quip.network answers.
+    #[tokio::test]
+    async fn an_unreachable_id_quip_network_still_opens_the_gate() {
+        let stub = IdStub::start().await;
+        stub.whoami_replies(WhoamiReply::Status(503));
+
+        assert_eq!(opened(&stub.url, API_KEY).await, Ok(true));
+    }
+
+    #[tokio::test]
+    async fn a_url_that_is_not_http_stops_startup() {
+        assert!(opened("id.quip.network/v1", API_KEY).await.is_err());
+    }
+
+    /// A config whose validator is never reachable, so any of these tests that
+    /// got past the gate would fail differently (and slowly) on the chain.
+    fn config_with(miner_extra: &str) -> quip_coordinator::config::CoordinatorConfig {
+        quip_coordinator::config::parse_config(&format!(
+            "[miner]\nvalidators = [\"ws://127.0.0.1:1\"]\nsigner_key = \"//Alice\"\n\
+             public_host = \"203.0.113.10\"\npublic_port = 20050\n{miner_extra}\n[cpu]\n"
+        ))
+        .expect("config parses")
+    }
+
+    fn run_refused_as_config_invalid(
+        cfg: quip_coordinator::config::CoordinatorConfig,
+        env_key: Option<&str>,
+    ) -> bool {
+        let started = std::time::Instant::now();
+        let code = quip_coordinator::app::chain_env::run::run(
+            std::path::Path::new("compliance-test.toml"),
+            cfg,
+            quip_coordinator::types::log::LogLevel::Info,
+            env_key,
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "the refusal must come before any chain work"
+        );
+        code == std::process::ExitCode::from(quip_protocol::session::ExitCode::ConfigInvalid as u8)
+    }
+
+    #[test]
+    fn run_refuses_half_a_compliance_configuration() {
+        let cfg = config_with("quip_id_url = \"http://127.0.0.1:1/v1\"\n");
+        assert!(run_refused_as_config_invalid(cfg, None));
+    }
+
+    #[test]
+    fn run_refuses_a_key_id_quip_network_rejects() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let stub = runtime.block_on(IdStub::start());
+        let cfg = config_with(&format!("quip_id_url = \"{}\"\n", stub.url));
+        assert!(run_refused_as_config_invalid(cfg, Some("qid_test_wrong")));
+    }
+
+    #[test]
+    fn run_refuses_a_provider_that_is_not_ready() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let stub = runtime.block_on(IdStub::start());
+        stub.whoami_replies(WhoamiReply::NotReady(vec!["no_active_policy".into()]));
+        let cfg = config_with(&format!("quip_id_url = \"{}\"\n", stub.url));
+        assert!(run_refused_as_config_invalid(cfg, Some(API_KEY)));
+    }
 }

@@ -2,6 +2,7 @@
 //! and the dashboard together for one environment.
 
 pub mod chain_env;
+pub mod compliance;
 pub mod local_env;
 
 use crate::config::launch::LaunchEntry;

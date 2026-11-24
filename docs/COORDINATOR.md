@@ -567,6 +567,27 @@ two disagree, the feeder uses the live threshold, so a wrong model cannot
 spend submit attempts on early proofs. Set `WIN_TIME_LEAD_BLOCKS` to 0 to
 gate on the head's own threshold.
 
+## Compliance gate (id.quip.network)
+
+Opt-in. With `[miner].quip_id_url` set and `QUIP_ID_API_KEY` in the
+environment, the coordinator stages only the mempool orders whose proposer
+id.quip.network allows. With neither, every order is staged as before.
+Proof-of-work rounds are never gated.
+
+```toml
+[miner]
+quip_id_url = "https://id.quip.network/v1"
+```
+
+- **Startup** exits 64 (`ConfigInvalid`) when only one of the two is set, the
+  key is refused, or the provider is not ready. An unreachable id.quip.network
+  does not stop startup; orders are skipped until it answers.
+- **Orders** are asked about in `ChainEnv::mempool_orders` through
+  `app::compliance::admit`. A decision covers the consumer until it expires
+  (at most 24 hours), so later orders from that consumer use the cached answer.
+- **Failure** keeps the order out. A skipped order is asked about again on the
+  next poll.
+
 ## Routing and credits
 
 `Router` (`coordinator/router/`) indexes miner capabilities and holds a staged queue per miner.

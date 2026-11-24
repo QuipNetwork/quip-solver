@@ -27,7 +27,12 @@ use tokio::sync::Mutex;
     clippy::too_many_lines,
     reason = "linear startup: config, chain client, readiness, then runtime params"
 )]
-pub fn run(config_path: &Path, cfg: CoordinatorConfig, log_level: LogLevel) -> StdExitCode {
+pub fn run(
+    config_path: &Path,
+    cfg: CoordinatorConfig,
+    log_level: LogLevel,
+    environment_api_key: Option<&str>,
+) -> StdExitCode {
     // Identify the process before doing anything that can warn or fail, so the
     // first line of any captured log says what this is and what it is talking to.
     tracing::info!(
@@ -43,6 +48,17 @@ pub fn run(config_path: &Path, cfg: CoordinatorConfig, log_level: LogLevel) -> S
         Err(e) => {
             tracing::error!(error = %e, "cannot start tokio runtime");
             return StdExitCode::from(ExitCode::InternalFatal as u8);
+        }
+    };
+
+    let compliance = match rt.block_on(crate::app::compliance::open_gate(
+        cfg.quip_id_url.as_deref(),
+        environment_api_key,
+    )) {
+        Ok(gate) => gate,
+        Err(e) => {
+            tracing::error!(error = %e, "compliance gate refused; not starting");
+            return StdExitCode::from(ExitCode::ConfigInvalid as u8);
         }
     };
 
@@ -148,6 +164,7 @@ pub fn run(config_path: &Path, cfg: CoordinatorConfig, log_level: LogLevel) -> S
             descriptor_filed,
             miner_registered,
             solver_registered: Arc::new(AtomicBool::new(false)),
+            compliance,
         },
     ));
     tracing::info!(

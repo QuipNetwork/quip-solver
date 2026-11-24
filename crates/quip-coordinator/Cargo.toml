@@ -71,6 +71,8 @@ async-trait = "0.1"
 # Stream type for RPC subscriptions. The transport trait returns a boxed
 # stream so it stays object safe across native and WebAssembly builds.
 futures = "0.3"
+# Opt-in id.quip.network compliance gate for mempool orders.
+quip-id = "0.1"
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

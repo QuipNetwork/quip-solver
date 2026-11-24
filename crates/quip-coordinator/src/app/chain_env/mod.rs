@@ -38,6 +38,8 @@ pub struct ChainEnvParams {
     /// Set once `QuantumComputeMempool.Solvers` holds the signing account with
     /// the configured type. Mempool orders are staged only after this.
     pub solver_registered: Arc<AtomicBool>,
+    /// Opt-in compliance gate for mempool orders; `None` stages every order.
+    pub compliance: Option<Arc<quip_id::Client>>,
 }
 
 /// The chain as the coordinator's [`WorkSource`] and [`ResultSink`].
@@ -102,10 +104,17 @@ impl<C: ChainClient + SyncSource + BalanceSource + 'static> WorkSource for Chain
     }
 
     async fn mempool_orders(&self) -> Result<Vec<JobOrder>, String> {
-        self.chain
+        let orders = self
+            .chain
             .fetch_mempool_orders(self.params.miner_account)
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        // Gated outside the feeder's state lock; a skipped order is asked
+        // about again next poll, from the client's cache.
+        match self.params.compliance.as_deref() {
+            None => Ok(orders),
+            Some(oracle) => Ok(crate::app::compliance::admit(oracle, orders).await),
+        }
     }
 
     async fn wait_synced(&self) -> Result<(), String> {

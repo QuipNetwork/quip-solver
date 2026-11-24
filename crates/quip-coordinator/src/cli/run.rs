@@ -38,5 +38,6 @@ pub(crate) fn run_config_path(config: Option<PathBuf>, log_level: LogLevel) -> S
         Err(code) => return code,
     };
 
-    crate::app::chain_env::run::run(&config_path, cfg, log_level)
+    let environment_api_key = std::env::var(quip_id::API_KEY_VARIABLE).ok();
+    crate::app::chain_env::run::run(&config_path, cfg, log_level, environment_api_key.as_deref())
 }

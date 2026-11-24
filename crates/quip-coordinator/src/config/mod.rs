@@ -124,6 +124,9 @@ pub struct CoordinatorConfig {
     /// Faucet base URL for auto-funding the miner account. `None` disables it,
     /// and an underfunded account then fails startup with no way to recover.
     pub faucet_url: Option<String>,
+    /// id.quip.network base URL including `/v1`; with `QUIP_ID_API_KEY`, turns
+    /// the mempool compliance gate on. `None` leaves it off.
+    pub quip_id_url: Option<String>,
     /// Balance floor in plancks, below which the coordinator funds or refuses.
     pub min_balance_plancks: u128,
     /// Amount requested per faucet attempt, in plancks.
@@ -410,6 +413,16 @@ fn parse_miner_identity(miner: &toml::Table) -> Result<MinerIdentity, ConfigErro
     })
 }
 
+/// `[miner].quip_id_url`; blank reads as unset, like `faucet_url`.
+fn parse_quip_id_url(miner: &toml::Table) -> Option<String> {
+    miner
+        .get("quip_id_url")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
 /// Parse a coordinator TOML config into validators, signer, and launch plan.
 ///
 /// Section mapping: `[cpu]`→`cpu-0`, `[cuda.N]`→`cuda-N`, `[metal]`→`metal-0`,
@@ -463,6 +476,7 @@ pub fn parse_config(toml_text: &str) -> Result<CoordinatorConfig, ConfigError> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(String::from);
+    let quip_id_url = parse_quip_id_url(miner);
     let plancks_of = |key: &str, default: u128| -> u128 {
         miner
             .get(key)
@@ -518,6 +532,7 @@ pub fn parse_config(toml_text: &str) -> Result<CoordinatorConfig, ConfigError> {
         validators,
         signer_key,
         faucet_url,
+        quip_id_url,
         min_balance_plancks,
         faucet_top_up_plancks,
         funding_timeout_s,
@@ -813,6 +828,10 @@ budget_reset_day = 1
             !config.signer_key.is_empty(),
             "shipped template must point at a keystore path"
         );
+        assert!(
+            config.quip_id_url.is_none(),
+            "the shipped template must leave the compliance gate off"
+        );
         assert!(!config.launch.iter().any(|entry| entry.backend == "dwave"));
 
         let mut enabled = String::new();
@@ -1071,6 +1090,7 @@ rest_port = 8086
     fn sample_config_applies_defaults() {
         let cfg = parse_config(SAMPLE).unwrap();
         assert_eq!(cfg.faucet_url, None);
+        assert_eq!(cfg.quip_id_url, None, "the compliance gate is opt-in");
         assert_eq!(
             cfg.min_balance_plancks,
             crate::chain::registration::funding::DEFAULT_MIN_BALANCE_PLANCKS
@@ -1110,6 +1130,24 @@ rest_port = 8086
         assert_eq!(c.faucet_top_up_plancks, 50);
         assert_eq!(c.funding_timeout_s, 30);
         assert_eq!(c.max_submit_attempts, 2);
+    }
+
+    #[test]
+    fn quip_id_url_is_read_trimmed_from_the_miner_section() {
+        let text = "[miner]\nsigner_key = \"//Alice\"\n\
+                    public_host = \"203.0.113.10\"\npublic_port = 20050\n\
+                    quip_id_url = \" https://id.quip.network/v1 \"\n\n[cpu]\n";
+        let c = parse_config(text).unwrap();
+        assert_eq!(c.quip_id_url.as_deref(), Some("https://id.quip.network/v1"));
+    }
+
+    #[test]
+    fn blank_quip_id_url_reads_as_unset() {
+        let text = "[miner]\nsigner_key = \"//Alice\"\n\
+                    public_host = \"203.0.113.10\"\npublic_port = 20050\n\
+                    quip_id_url = \"  \"\n\n[cpu]\n";
+        let c = parse_config(text).unwrap();
+        assert_eq!(c.quip_id_url, None);
     }
 
     /// Emptying the value is how an operator opts out without deleting the key.

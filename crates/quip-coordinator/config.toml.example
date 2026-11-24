@@ -18,6 +18,10 @@ public_host = "203.0.113.10"
 # This is the public front door, not the validator peer port and not
 # the dashboard port. Zero is not a valid port.
 public_port = 20050
+
+# Opt-in compliance gate: with QUIP_ID_API_KEY set, stage only the mempool
+# orders id.quip.network allows. Unset, every order is staged.
+# quip_id_url = "https://id.quip.network/v1"
 # Limit problem-family work to one miner id or solver_id. A pin narrows the
 # candidates and never admits a miner that cannot take the job.
 # solver_pin = "cpu-0"
