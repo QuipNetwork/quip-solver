@@ -44,6 +44,11 @@ reviewed change to `SUPPORTED_ARCHS` in `quip-solver-cuda`
 
 The workspace builds from the repo root. The toolchain is pinned to 1.97.1 (`rust-toolchain.toml`).
 
+Without a local Rust toolchain, `./run` does the same in a container
+(`Containerfile.dev`, podman or `CONTAINER=docker`), caching cargo's registry
+and `target/` in named volumes: `./run build`, `./run test -p quip-coordinator`,
+`./run check` (rustfmt and clippy as CI runs them), `./run coordinator -- …`.
+
 ```bash
 cargo build --workspace
 

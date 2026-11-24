@@ -1,0 +1,8 @@
+# Development image: the pinned toolchain plus what the workspace's build
+# scripts need. Used by ./run; not a release image (see docker/ for those).
+FROM docker.io/library/rust:1.97.1
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends protobuf-compiler clang \
+ && rm -rf /var/lib/apt/lists/* \
+ && rustup component add clippy rustfmt

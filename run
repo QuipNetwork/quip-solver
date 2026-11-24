@@ -1,0 +1,76 @@
+#!/bin/bash
+set -euo pipefail
+
+# Build, test and run the workspace inside the pinned toolchain container, so
+# the host needs only podman (or docker: set CONTAINER=docker).
+
+CONTAINER="${CONTAINER:-podman}"
+IMAGE="quip-miner-dev:$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# A `[patch.crates-io]` path dependency outside the repo (see Cargo.toml) must
+# be visible in the container at the same path.
+patch_mounts() {
+  sed -n 's/^[a-z0-9_-]* *= *{ *path *= *"\([^"]*\)".*/\1/p' "$REPO/Cargo.toml" \
+    | while read -r relative; do
+        local resolved
+        resolved="$(cd "$REPO" && realpath -m "$relative")"
+        case "$resolved" in
+          "$REPO"/*) ;;
+          *) [ -d "$resolved" ] && printf -- '-v\n%s:%s:ro\n' "$resolved" "$resolved" ;;
+        esac
+      done
+}
+
+ensure_image() {
+  if ! "$CONTAINER" image exists "$IMAGE" 2>/dev/null; then
+    "$CONTAINER" build -t "$IMAGE" -f "$REPO/Containerfile.dev" "$REPO"
+  fi
+}
+
+in_container() {
+  ensure_image
+  local interactive=()
+  [ -t 0 ] && interactive=(-it)
+  local extra=()
+  mapfile -t extra < <(patch_mounts)
+  "$CONTAINER" run --rm "${interactive[@]}" --network host \
+    -v "$REPO:$REPO" -w "$REPO" \
+    "${extra[@]}" \
+    -v quip-miner-cargo-registry:/usr/local/cargo/registry \
+    -v quip-miner-cargo-git:/usr/local/cargo/git \
+    -v quip-miner-target:"$REPO/target" \
+    -e RUST_LOG -e QUIP_ID_API_KEY -e QUIP_DEVNET -e QUIP_PROPOSER_SEED \
+    "$IMAGE" "$@"
+}
+
+command="${1:-help}"
+shift || true
+
+case "$command" in
+  build)    in_container cargo build --workspace "$@" ;;
+  test)     in_container cargo test "$@" ;;
+  check)
+    in_container bash -c 'cargo fmt --all --check \
+      && cargo clippy --workspace --exclude quip-coordinator --all-targets -- -D warnings \
+      && cargo clippy -p quip-coordinator --all-targets -- -D warnings' ;;
+  fmt)      in_container cargo fmt --all "$@" ;;
+  coordinator) in_container cargo run -p quip-coordinator -- "$@" ;;
+  cargo)    in_container cargo "$@" ;;
+  shell)    in_container bash ;;
+  image)    "$CONTAINER" build -t "$IMAGE" -f "$REPO/Containerfile.dev" "$REPO" ;;
+  help|*)
+    cat <<USAGE
+usage: ./run <command> [args]
+
+  build             cargo build --workspace
+  test [args]       cargo test (e.g. ./run test -p quip-coordinator)
+  check             rustfmt, then clippy with -D warnings, as CI runs them
+  fmt               cargo fmt --all
+  coordinator ...   cargo run -p quip-coordinator -- ...
+  cargo ...         any cargo command
+  shell             a shell in the toolchain container
+  image             rebuild the toolchain image
+USAGE
+    ;;
+esac
